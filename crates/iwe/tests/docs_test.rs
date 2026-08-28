@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use diwe::config::Configuration;
+use diwe::schema::split_links;
 use liwe::query::block::parse_block_predicate;
 use liwe::query::{current_query_schema, parse_filter_expression, parse_operation, OperationKind};
 use liwe::schema::compile_schema;
@@ -116,7 +117,16 @@ fn test_schema_doc_examples_compile() {
     let examples = fenced_blocks(SCHEMA, "yaml");
     assert!(!examples.is_empty());
     for example in examples {
-        if let Err(errors) = compile_schema(&example) {
+        // `links` is IWE's own keyword, split off before the document
+        // validator sees the schema — exactly as `iwe schema validate` does.
+        let (schema, _links) = match split_links(&example) {
+            Ok(split) => split,
+            Err(errors) => panic!(
+                "schema example has invalid links rules:\n{}\n{:?}",
+                example, errors
+            ),
+        };
+        if let Err(errors) = compile_schema(&schema) {
             panic!(
                 "schema example does not compile:\n{}\n{:?}",
                 example, errors

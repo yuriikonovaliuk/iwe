@@ -128,6 +128,30 @@ impl BlockIndex {
         self.eval(pred).into_iter().any(|selected| selected)
     }
 
+    /// Distinct link targets of the blocks the predicate selects, in document
+    /// order; an empty predicate selects every block. Block references and
+    /// inline links count alike.
+    pub fn targets_within(&self, pred: &BlockPredicate) -> Vec<Key> {
+        let mask = if pred.is_empty() {
+            vec![true; self.blocks.len()]
+        } else {
+            self.eval(pred)
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            if !mask[i] {
+                continue;
+            }
+            for target in &block.ref_targets {
+                if seen.insert(target.clone()) {
+                    out.push(target.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn coalesced_targets(&self, pred: &BlockPredicate) -> Vec<Target> {
         let mask = self.eval(pred);
         let mut sub_full = vec![false; self.blocks.len()];

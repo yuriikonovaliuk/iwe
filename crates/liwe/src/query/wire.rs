@@ -93,6 +93,8 @@ pub struct RawRelationalObj {
     pub min_distance: Option<i64>,
     #[serde(rename = "$size", default)]
     pub size: Option<Value>,
+    #[serde(default)]
+    pub via: Option<Value>,
 }
 
 #[cfg(test)]

@@ -509,3 +509,212 @@ fn run_validate(temp_dir: &TempDir, args: &[&str]) -> std::process::Output {
     cmd.output()
         .expect("Failed to execute schema validate command")
 }
+
+// ---- links rules (IWE extension) ----
+
+fn setup_links() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("concepts")).unwrap();
+    create_dir_all(temp_path.join("facts")).unwrap();
+    create_dir_all(temp_path.join("root")).unwrap();
+    create_dir_all(temp_path.join("docs")).unwrap();
+
+    let mut schemas = binding("concept", "concepts/**");
+    schemas.extend(binding("fact", "facts/**"));
+    write_config(temp_path, schemas);
+
+    write(
+        temp_path.join(".iwe/schemas/concept.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: concept }
+            links:
+              - within: Is a
+                min: 1
+                max: 1
+                target: { type: concept }
+                reach: root/entity
+                description: the genus is one concept and leads to entity
+        "},
+    )
+    .unwrap();
+    write(
+        temp_path.join(".iwe/schemas/fact.yaml"),
+        indoc! {"
+            links:
+              - some: { type: concept }
+                description: a fact is about a concept
+        "},
+    )
+    .unwrap();
+
+    let concept = |body: &str| format!("---\ntype: concept\n---\n\n{body}");
+    write(temp_path.join("root/entity.md"), concept("# Entity\n")).unwrap();
+    write(
+        temp_path.join("concepts/thing.md"),
+        concept("# Thing\n\n## Is a\n\n- [Entity](../root/entity)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/species.md"),
+        concept("# Species\n\nA [thing](thing) of a kind.\n\n## Is a\n\n- [Thing](thing)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/bad-target.md"),
+        concept("# Bad target\n\n## Is a\n\n- [Note](../docs/note)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/no-genus.md"),
+        concept("# No genus\n\nprose\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/two.md"),
+        concept("# Two\n\n## Is a\n\n- [Thing](thing)\n- [Species](species)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/island.md"),
+        concept("# Island\n\n## Is a\n\n- [Isle](isle)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/isle.md"),
+        concept("# Isle\n\n## Is a\n\n- [Island](island)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("concepts/missing.md"),
+        concept("# Missing\n\n## Is a\n\n- [Ghost](ghost)\n"),
+    )
+    .unwrap();
+    write(
+        temp_path.join("docs/note.md"),
+        "---\ntype: note\n---\n\n# Note\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("facts/good.md"),
+        "---\ntype: fact\n---\n\n# Good\n\nEvery [thing](../concepts/thing) has a kind.\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("facts/bare.md"),
+        "---\ntype: fact\n---\n\n# Bare\n\nA claim about nothing defined, see [note](../docs/note).\n",
+    )
+    .unwrap();
+    temp_dir
+}
+
+#[test]
+fn links_rules_pass_for_well_formed_documents() {
+    let temp_dir = setup_links();
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "concepts/thing",
+            "-k",
+            "concepts/species",
+            "-k",
+            "facts/good",
+        ],
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn links_rules_report_count_target_reach_and_some_violations() {
+    let temp_dir = setup_links();
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("concepts/no-genus › Is a: 0 links within 'Is a', fewer than the minimum of 1");
+    expect("  hint: the genus is one concept and leads to entity");
+    expect("concepts/two › Is a: 2 links within 'Is a', greater than the maximum of 1");
+    expect("concepts/bad-target › Is a: link to 'docs/note' within 'Is a' does not satisfy the target filter");
+    expect("concepts/bad-target › Is a: no chain of links within 'Is a' reaches 'root/entity'");
+    expect("concepts/island › Is a: no chain of links within 'Is a' reaches 'root/entity'");
+    expect("concepts/isle › Is a: no chain of links within 'Is a' reaches 'root/entity'");
+    expect("concepts/missing › Is a: link to 'concepts/ghost' within 'Is a': no such document");
+    expect("facts/bare: no link satisfies the 'some' filter");
+    expect("  hint: a fact is about a concept");
+
+    for good in ["concepts/thing", "concepts/species", "facts/good"] {
+        assert!(
+            !stdout.contains(&format!("{good} ")),
+            "{good} reported in:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains(&format!("{good}:")),
+            "{good} reported in:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn links_rules_report_json_with_the_links_keyword() {
+    let temp_dir = setup_links();
+    let output = run_validate(&temp_dir, &["-f", "json", "-k", "concepts/no-genus"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Valid JSON");
+    assert_eq!(parsed[0]["schema"], "concept");
+    assert_eq!(parsed[0]["violations"][0]["keyword"], "links");
+    assert_eq!(parsed[0]["violations"][0]["schemaPath"], "/links/0");
+    assert_eq!(parsed[0]["violations"][0]["breadcrumb"][0], "Is a");
+}
+
+#[test]
+fn links_rule_errors_are_reported_at_load() {
+    let temp_dir = setup_links();
+    write(
+        temp_dir.path().join(".iwe/schemas/fact.yaml"),
+        indoc! {"
+            links:
+              - within: 3
+              - min: 2
+                max: 1
+              - wobble: true
+        "},
+    )
+    .unwrap();
+    let output = run_validate(&temp_dir, &["-k", "facts/good"]);
+    assert_ne!(output.status.code(), Some(0));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("links[0]: within: expected a section name or a block predicate"),
+        "{text}"
+    );
+    assert!(text.contains("links[1]: min is greater than max"), "{text}");
+    assert!(
+        text.contains("links[2]: unknown keyword 'wobble'"),
+        "{text}"
+    );
+}
+
+#[test]
+fn explain_ignores_links_rules() {
+    let temp_dir = setup_links();
+    let output = run_validate(&temp_dir, &["--explain", "-k", "concepts/thing"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert!(
+        stdout.contains("concepts/thing  [schema: concept]"),
+        "{stdout}"
+    );
+}

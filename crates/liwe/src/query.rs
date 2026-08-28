@@ -15,11 +15,11 @@ pub mod scores;
 pub mod search;
 pub mod sort;
 pub mod update;
+pub mod via;
 pub mod wire;
 
 pub use builder::{
-    build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression,
-    parse_filter_mapping, parse_operation, ParseError,
+    ParseError, build_filter_value, build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression, parse_filter_mapping, parse_operation,
 };
 pub use document::{
     is_operator_segment, BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp,
@@ -35,3 +35,4 @@ pub use schemas::{
 };
 pub use scores::QueryScores;
 pub use search::SearchSpec;
+pub use via::ViaWalk;

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `links` rules in schema files — an IWE extension stripped before the document validator runs: per rule a `within` scope, `min`/`max` on distinct link targets, `target` (every target must satisfy a document filter), `some` (at least one must), `reach` (scoped links must transitively reach a key), and a `description` hint. Graph-dependent checks are skipped for partial-graph (pending buffer) validation.
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/diwe-v0.22.0...diwe-v0.23.0) - 2026-08-30
 
 Workspace version bump — no user-visible changes in this crate.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `iwe schema validate` enforces `links` rules from schema files (target typing, link counts, transitive reach along a section's links); the query language gains `via` on the reference operators. Documented in `iwe docs schema` §11 and `iwe docs query`.
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/iwe-v0.22.0...iwe-v0.23.0) - 2026-08-30
 
 ### Added

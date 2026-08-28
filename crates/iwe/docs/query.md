@@ -151,6 +151,45 @@ $includedBy: { match: { $key: projects/alpha }, maxDepth: 0 }  # whole tree
 `match` is optional and defaults to `{}` (any document); the empty mapping
 `$includedBy: {}` is still a parse error.
 
+#### Scoping edges — `via`
+
+By default every link in a document is a reference edge. `via` narrows the
+reference operators to the links found inside the blocks a block predicate
+(§Blocks) selects — and it applies afresh at every hop of a transitive
+walk, so a chain is only as long as the documents that keep their links in
+that scope. A string is shorthand for `{ $within: { $section: NAME } }`.
+
+```yaml
+# Documents whose "Is a" section links straight to concepts/entity
+$references: { match: { $key: concepts/entity }, via: Is a }
+```
+
+```yaml
+# The whole genus chain: every document that reaches entity by "Is a" links
+# alone, however many hops — a prose mention of entity does not count
+$references: { match: { $key: concepts/entity }, via: Is a, maxDistance: 0 }
+```
+
+```yaml
+# The species of a concept — the documents whose "Is a" names it
+$references: { match: { $key: concepts/object }, via: Is a }
+```
+
+```yaml
+# A concept's own genus chain, read from the other side: everything it
+# reaches by "Is a" links, however many hops
+$referencedBy: { match: { $key: concepts/system }, via: Is a, maxDistance: 0 }
+```
+
+```yaml
+# Any block predicate works as the scope
+$references: { match: { type: concept }, via: { $within: { $section: Is a }, $item: {} } }
+```
+
+`via` combines with `$size` (the count is over scoped links only) and with
+`minDistance`/`maxDistance`. It is a reference-walk parameter: on
+`$includes`/`$includedBy` it is rejected at parse time.
+
 A relational operator never matches a document in its own anchor set. To
 include the anchor, OR it in:
 
@@ -891,6 +930,8 @@ depth `0` is the unbounded sentinel.
 | `--includes KEY` | `$includes: KEY` (scalar shorthand, depth 1) |
 | `--included-by KEY:5` | `$includedBy: { match: { $key: KEY }, maxDepth: 5 }` |
 | `--references KEY:0` | `$references: { match: { $key: KEY }, maxDistance: 0 }` (unbounded) |
+
+`via` has no flag of its own — write the operator in `--filter`, which takes the same YAML as a query's `filter`.
 | `--referenced-by KEY` | `$referencedBy: KEY` |
 | `--max-depth N` | session default for `--includes` / `--included-by` (default 1) |
 | `--max-distance N` | session default for `--references` / `--referenced-by` (default 1) |

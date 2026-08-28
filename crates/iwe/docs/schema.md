@@ -436,7 +436,55 @@ violations:
   entry that is not last, or an entry whose identity exactly duplicates an
   earlier one.
 
-## 11. Examples
+## 11. Links — an IWE extension
+
+Everything above validates one document by itself. `links` reaches into the
+graph: it constrains the *targets* of a document's links — how many there
+are, what kind of document they point at, and where following them leads.
+It is IWE's own keyword, evaluated by IWE against the loaded graph and
+stripped from the schema before the document validator sees it, so a schema
+using it is still a valid document schema everywhere else.
+
+```yaml
+links:
+  - within: Is a                # scope: the links inside this section
+    min: 1                      # at least one distinct target …
+    max: 1                      # … and at most one — single inheritance
+    target: { type: concept }   # every target must satisfy this filter
+    reach: ontology/entity      # following scoped links must arrive here
+    description: a concept names exactly one genus, and the genus chain ends at entity
+  - some: { type: concept }     # at least one link (anywhere) points at a concept
+```
+
+Each entry is one rule; all rules apply. Keywords:
+
+| Keyword       | Value                                   | Meaning                                                                                       |
+| ------------- | --------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `within`      | section name, or a block predicate      | which links are in scope: those inside the blocks selected (a name means `{ $within: { $section: NAME } }`); absent — every link in the document |
+| `min`, `max`  | integer                                 | bounds on the number of distinct link targets in scope (`min` defaults to 0, `max` to unbounded) |
+| `target`      | document filter (query-language filter) | every target in scope must satisfy it; a target that is not a document in the graph is a violation too |
+| `some`        | document filter                         | at least one target in scope must satisfy it                                                  |
+| `reach`       | document key                            | following scoped links transitively — the same scope at every hop — must reach this document (a document *is* its own reach) |
+| `description` | string                                  | the hint attached to every violation this rule produces                                        |
+
+Filters are the query language's (`iwe docs query`): frontmatter
+predicates, `$key`, `$content`, even relational operators. A rule with only
+`min`/`max` is a pure shape check; `target`, `some` and `reach` need the
+whole graph, so they are skipped when validating an unsaved buffer on its
+own (the editor's live diagnostics) and enforced by `iwe schema validate`.
+
+Violations name the scope and the offending target — `Is a: link to
+'docs/note' within 'Is a' does not satisfy the target filter`, `Is a: no
+chain of links within 'Is a' reaches 'ontology/entity'`, `no link satisfies
+the 'some' filter` — carry the rule's `description` as their hint, report
+`links` as the keyword and `/links/N` as the schema path. A malformed rule
+(an unknown keyword, `min` above `max`, a filter that does not parse) is a
+load error, like any other schema error.
+
+`--explain` ignores `links`: the binding trace is about the document's own
+structure.
+
+## 12. Examples
 
 Header discipline for a whole store — every header capitalized and short,
 every section within budget, nothing deeper than `###`:

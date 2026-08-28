@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `via` on `$references` / `$referencedBy`: a block predicate (or a section name) that restricts which of a document's links count as reference edges, applied at every hop of the walk — `$references: { match: { $key: K }, via: Is a, maxDistance: 0 }` follows only the chain of "Is a" links. Rejected on inclusion operators. `BlockIndex::targets_within`, `ViaWalk`, `build_filter_value` are exported for callers.
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/liwe-v0.22.0...liwe-v0.23.0) - 2026-08-30
 
 ### Added

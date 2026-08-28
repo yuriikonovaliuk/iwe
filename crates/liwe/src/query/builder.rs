@@ -536,6 +536,16 @@ fn build_filter(raw: RawFilter) -> Result<Filter, ParseError> {
     build_filter_at(raw.0, &[])
 }
 
+/// Build a document filter from an already-parsed YAML mapping — the same
+/// grammar as a query's `filter`, for callers that hold the value rather than
+/// the source text (schema `links` rules, for one).
+pub fn build_filter_value(value: &Value) -> Result<Filter, ParseError> {
+    match value {
+        Value::Mapping(map) => build_filter_at(map.clone(), &[]),
+        _ => Err(ParseError::OperatorExpectedMapping { op: "filter" }),
+    }
+}
+
 fn build_filter_at(map: Mapping, path: &[String]) -> Result<Filter, ParseError> {
     if map.is_empty() {
         return Ok(Filter::And(Vec::new()));
@@ -1469,6 +1479,12 @@ fn parse_inclusion_arg(value: &Value, op: &'static str) -> Result<InclusionAncho
             modifier: "minDistance",
         });
     }
+    if raw.via.is_some() {
+        return Err(ParseError::WrongBoundFamily {
+            op,
+            modifier: "via",
+        });
+    }
     let match_filter = match_to_filter(&raw)?;
     let max_depth = parse_max_bound(raw.max_depth, op, "maxDepth")?;
     let min_depth = parse_min_bound(raw.min_depth, op, "minDepth")?;
@@ -1519,8 +1535,17 @@ fn parse_reference_arg(value: &Value, op: &'static str) -> Result<ReferenceAncho
         .as_ref()
         .map(|v| parse_count_pred(v, "$size"))
         .transpose()?;
+    let via = match raw.via.as_ref() {
+        None => None,
+        Some(Value::String(section)) => Some(BlockPredicate::empty().within_section(section)),
+        Some(value @ Value::Mapping(_)) => Some(parse_block_predicate(value, "via")?),
+        Some(_) => {
+            return Err(ParseError::GraphOpExpectedScalarOrMapping { op: "via" });
+        }
+    };
     let mut anchor = ReferenceAnchor::with_match(match_filter, min_distance, max_distance);
     anchor.size = size;
+    anchor.via = via;
     Ok(anchor)
 }
 

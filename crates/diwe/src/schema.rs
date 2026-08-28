@@ -9,7 +9,10 @@ use liwe::graph::Graph;
 use liwe::markdown::MarkdownReader;
 use liwe::model::Key;
 use liwe::operations::Changes;
-use liwe::schema::{build_document, compile_schema, CompiledSchema, Violation};
+use liwe::query::block::{parse_block_predicate, BlockPredicate};
+use liwe::query::block_eval::BlockIndex;
+use liwe::query::{build_filter_value, evaluate, Filter, ViaWalk};
+use liwe::schema::{build_document, compile_schema, CompiledSchema, Crumb, Violation};
 
 use crate::config::{schemas_dir, Configuration, SchemaBinding};
 use crate::tokens::count_tokens;
@@ -98,6 +101,242 @@ impl Serialize for KeyReport {
     }
 }
 
+/// One entry of a schema's `links` list — an IWE extension to the document
+/// schema language, checked against the graph rather than the document alone:
+/// which section's links are in scope, how many distinct targets there may
+/// be, what every target (or at least one) must satisfy, and which document
+/// the scoped links must reach transitively.
+#[derive(Debug, Clone)]
+pub struct LinkRule {
+    within: Option<BlockPredicate>,
+    within_label: Option<String>,
+    min: u64,
+    max: Option<u64>,
+    target: Option<Filter>,
+    some: Option<Filter>,
+    reach: Option<Key>,
+    description: Option<String>,
+}
+
+/// A schema file compiled in two halves: the document-schema part (handled by
+/// the validator crate) and the graph-level `links` rules IWE checks itself.
+pub struct CompiledSchemaSet {
+    pub schema: CompiledSchema,
+    pub links: Vec<LinkRule>,
+}
+
+/// Split a schema source into the part the document validator understands
+/// and the `links` rules, which it does not. A source without `links` is
+/// passed through untouched.
+pub fn split_links(source: &str) -> Result<(String, Vec<LinkRule>), Vec<String>> {
+    let mut value: serde_yaml::Value = match serde_yaml::from_str(source) {
+        Ok(value) => value,
+        Err(_) => return Ok((source.to_string(), Vec::new())),
+    };
+    let mapping = match value.as_mapping_mut() {
+        Some(mapping) => mapping,
+        None => return Ok((source.to_string(), Vec::new())),
+    };
+    let links = match mapping.remove(serde_yaml::Value::String("links".to_string())) {
+        Some(links) => links,
+        None => return Ok((source.to_string(), Vec::new())),
+    };
+    let rules = parse_link_rules(&links)?;
+    let rest = serde_yaml::to_string(&value)
+        .map_err(|error| vec![format!("links: cannot re-serialize schema: {error}")])?;
+    Ok((rest, rules))
+}
+
+fn parse_link_rules(value: &serde_yaml::Value) -> Result<Vec<LinkRule>, Vec<String>> {
+    let entries = match value {
+        serde_yaml::Value::Sequence(entries) => entries,
+        _ => return Err(vec!["links: expected a list of rules".to_string()]),
+    };
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match parse_link_rule(entry) {
+            Ok(rule) => rules.push(rule),
+            Err(message) => errors.push(format!("links[{index}]: {message}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(rules)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
+    use serde_yaml::Value;
+    let mapping = entry.as_mapping().ok_or("expected a mapping")?;
+    let mut rule = LinkRule {
+        within: None,
+        within_label: None,
+        min: 0,
+        max: None,
+        target: None,
+        some: None,
+        reach: None,
+        description: None,
+    };
+    for (key, value) in mapping {
+        let keyword = key.as_str().ok_or("keys must be strings")?;
+        match keyword {
+            "within" => match value {
+                Value::String(section) => {
+                    rule.within = Some(BlockPredicate::empty().within_section(section));
+                    rule.within_label = Some(section.clone());
+                }
+                Value::Mapping(_) => {
+                    rule.within = Some(
+                        parse_block_predicate(value, "within")
+                            .map_err(|error| format!("within: {error}"))?,
+                    );
+                }
+                _ => return Err("within: expected a section name or a block predicate".into()),
+            },
+            "min" => rule.min = non_negative(value, "min")?,
+            "max" => rule.max = Some(non_negative(value, "max")?),
+            "target" => {
+                rule.target =
+                    Some(build_filter_value(value).map_err(|error| format!("target: {error}"))?)
+            }
+            "some" => {
+                rule.some =
+                    Some(build_filter_value(value).map_err(|error| format!("some: {error}"))?)
+            }
+            "reach" => {
+                rule.reach = Some(Key::name(
+                    value.as_str().ok_or("reach: expected a document key")?,
+                ))
+            }
+            "description" => {
+                rule.description = Some(
+                    value
+                        .as_str()
+                        .ok_or("description: expected a string")?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown keyword '{other}'")),
+        }
+    }
+    if let (Some(min), Some(max)) = (Some(rule.min), rule.max) {
+        if min > max {
+            return Err("min is greater than max".into());
+        }
+    }
+    Ok(rule)
+}
+
+fn non_negative(value: &serde_yaml::Value, keyword: &str) -> Result<u64, String> {
+    value
+        .as_u64()
+        .ok_or_else(|| format!("{keyword}: expected a non-negative integer"))
+}
+
+/// Cache of evaluated `target`/`some` filters, keyed by schema name, rule
+/// index and which of the two filters — each is evaluated once per run.
+type FilterCache = HashMap<(String, usize, &'static str), HashSet<Key>>;
+
+fn filter_set<'c>(
+    cache: &'c mut FilterCache,
+    schema: &str,
+    index: usize,
+    which: &'static str,
+    filter: &Filter,
+    graph: &Graph,
+) -> &'c HashSet<Key> {
+    cache
+        .entry((schema.to_string(), index, which))
+        .or_insert_with(|| evaluate(filter, graph).into_iter().collect())
+}
+
+/// Check one document against a schema's `links` rules. With `full` false
+/// (a partial graph, as when validating unsaved buffers) only the counts are
+/// checked — whether a target exists or what it is cannot be known.
+fn check_links(
+    graph: &Graph,
+    key: &Key,
+    schema: &str,
+    rules: &[LinkRule],
+    full: bool,
+    cache: &mut FilterCache,
+) -> Vec<Violation> {
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let index = BlockIndex::build(graph, key);
+    let mut violations = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let scope = rule.within.clone().unwrap_or_default();
+        let targets = index.targets_within(&scope);
+        let where_ = match &rule.within_label {
+            Some(label) => format!(" within '{label}'"),
+            None => String::new(),
+        };
+        let mut report = |message: String| {
+            violations.push(Violation {
+                breadcrumb: rule
+                    .within_label
+                    .as_ref()
+                    .map(|label| vec![Crumb::Header(label.clone())])
+                    .unwrap_or_default(),
+                message,
+                hint: rule.description.clone(),
+                schema_pointer: format!("/links/{i}"),
+                keyword: "links".to_string(),
+            })
+        };
+        let count = targets.len() as u64;
+        if count < rule.min {
+            report(format!(
+                "{count} link{}{where_}, fewer than the minimum of {}",
+                if count == 1 { "" } else { "s" },
+                rule.min
+            ));
+        }
+        if let Some(max) = rule.max {
+            if count > max {
+                report(format!(
+                    "{count} links{where_}, greater than the maximum of {max}"
+                ));
+            }
+        }
+        if !full {
+            continue;
+        }
+        if let Some(target) = &rule.target {
+            let allowed = filter_set(cache, schema, i, "target", target, graph);
+            for t in &targets {
+                if graph.maybe_key(t).is_none() {
+                    report(format!("link to '{t}'{where_}: no such document"));
+                } else if !allowed.contains(t) {
+                    report(format!(
+                        "link to '{t}'{where_} does not satisfy the target filter"
+                    ));
+                }
+            }
+        }
+        if let Some(some) = &rule.some {
+            let allowed = filter_set(cache, schema, i, "some", some, graph);
+            if !targets.iter().any(|t| allowed.contains(t)) {
+                report(format!("no link{where_} satisfies the 'some' filter"));
+            }
+        }
+        if let Some(reach) = &rule.reach {
+            if key != reach {
+                let walk = ViaWalk::new(graph, &scope).outbound(key, u32::MAX);
+                if !walk.contains_key(reach) {
+                    report(format!("no chain of links{where_} reaches '{reach}'"));
+                }
+            }
+        }
+    }
+    violations
+}
+
 #[derive(Debug)]
 pub struct ValidationRun {
     pub reports: Vec<KeyReport>,
@@ -111,7 +350,7 @@ pub fn validate_documents(
     keys: &[Key],
 ) -> Result<ValidationRun, Vec<String>> {
     let dir = schemas_dir().map_err(|error| vec![error])?;
-    validate_documents_in(&dir, config, graph, keys)
+    validate_documents_in(&dir, config, graph, keys, true)
 }
 
 pub fn validate_documents_against_file(
@@ -127,6 +366,12 @@ pub fn validate_documents_against_file(
 
     let source = read_to_string(schema_path)
         .map_err(|_| vec![format!("schema file not found: {}", schema_path.display())])?;
+    let (source, links) = split_links(&source).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|e| format!("schema '{label}' {e}"))
+            .collect::<Vec<_>>()
+    })?;
 
     let compiled = compile_schema(&source).map_err(|schema_errors| {
         schema_errors
@@ -142,9 +387,11 @@ pub fn validate_documents_against_file(
     })?;
 
     let mut reports = Vec::new();
+    let mut cache = FilterCache::new();
     for key in keys {
         let document = build_document(graph, key, count_tokens);
-        let violations = compiled.validate(&document);
+        let mut violations = compiled.validate(&document);
+        violations.extend(check_links(graph, key, &label, &links, true, &mut cache));
         if !violations.is_empty() {
             reports.push(KeyReport {
                 key: key.clone(),
@@ -179,7 +426,7 @@ pub fn explain_documents(
         let document = build_document(graph, key, count_tokens);
         for name in names {
             out.push_str(&format!("{key}  [schema: {name}]\n"));
-            out.push_str(&compiled[name].explain(&document));
+            out.push_str(&compiled[name].schema.explain(&document));
             out.push('\n');
         }
     }
@@ -199,6 +446,13 @@ pub fn explain_documents_against_file(
 
     let source = read_to_string(schema_path)
         .map_err(|_| vec![format!("schema file not found: {}", schema_path.display())])?;
+    let (source, _links) = split_links(&source).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|e| format!("schema '{label}' {e}"))
+            .collect::<Vec<_>>()
+    })?;
+
     let compiled = compile_schema(&source).map_err(|schema_errors| {
         schema_errors
             .into_iter()
@@ -270,7 +524,7 @@ pub fn validate_pending_documents_in(
         graph.from_markdown(key.clone(), content, MarkdownReader::new());
     }
     let keys: Vec<Key> = docs.iter().map(|(key, _)| key.clone()).collect();
-    validate_documents_in(dir, config, &graph, &keys)
+    validate_documents_in(dir, config, &graph, &keys, false)
 }
 
 fn validate_documents_in(
@@ -278,6 +532,7 @@ fn validate_documents_in(
     config: &Configuration,
     graph: &Graph,
     keys: &[Key],
+    full: bool,
 ) -> Result<ValidationRun, Vec<String>> {
     let bindings = SchemaBindings::compile(&config.schemas)?;
     let compiled = compile_schemas(dir, &config.schemas)?;
@@ -285,6 +540,7 @@ fn validate_documents_in(
     let mut reports = Vec::new();
     let mut documents = 0;
     let mut schemas_used = HashSet::new();
+    let mut cache = FilterCache::new();
     for key in keys {
         let names = bindings.schemas_for(&key.to_string());
         if names.is_empty() {
@@ -294,7 +550,9 @@ fn validate_documents_in(
         let document = build_document(graph, key, count_tokens);
         for name in names {
             schemas_used.insert(name);
-            let violations = compiled[name].validate(&document);
+            let set = &compiled[name];
+            let mut violations = set.schema.validate(&document);
+            violations.extend(check_links(graph, key, name, &set.links, full, &mut cache));
             if !violations.is_empty() {
                 reports.push(KeyReport {
                     key: key.clone(),
@@ -314,7 +572,7 @@ fn validate_documents_in(
 fn compile_schemas(
     dir: &Path,
     schemas: &HashMap<String, SchemaBinding>,
-) -> Result<HashMap<String, CompiledSchema>, Vec<String>> {
+) -> Result<HashMap<String, CompiledSchemaSet>, Vec<String>> {
     let mut names: Vec<&String> = schemas.keys().collect();
     names.sort();
 
@@ -332,9 +590,18 @@ fn compile_schemas(
                 continue;
             }
         };
+        let (source, links) = match split_links(&source) {
+            Ok(split) => split,
+            Err(link_errors) => {
+                for error in link_errors {
+                    errors.push(format!("schema '{name}' {error}"));
+                }
+                continue;
+            }
+        };
         match compile_schema(&source) {
             Ok(schema) => {
-                compiled.insert(name.clone(), schema);
+                compiled.insert(name.clone(), CompiledSchemaSet { schema, links });
             }
             Err(schema_errors) => {
                 for error in schema_errors {
@@ -632,6 +899,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors")
         .reports;
@@ -689,6 +957,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors");
 
@@ -714,6 +983,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors");
 
@@ -739,6 +1009,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors")
         .reports;
@@ -762,6 +1033,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors")
         .reports;
@@ -872,6 +1144,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .expect("no config errors")
         .reports;
@@ -902,6 +1175,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .unwrap_err();
         assert_eq!(
@@ -923,6 +1197,7 @@ match = [\"journal/*\", \"meetings/**\"]
             &config,
             &graph,
             &keys,
+            true,
         )
         .unwrap_err();
         assert_eq!(

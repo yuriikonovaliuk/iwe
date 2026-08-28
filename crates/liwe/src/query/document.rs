@@ -261,6 +261,9 @@ pub struct ReferenceAnchor {
     pub min_distance: u32,
     pub max_distance: u32,
     pub size: Option<CountPred>,
+    /// Restricts which of a document's links count as reference edges: only
+    /// links inside blocks this predicate selects, at every hop of the walk.
+    pub via: Option<BlockPredicate>,
 }
 
 impl ReferenceAnchor {
@@ -270,6 +273,7 @@ impl ReferenceAnchor {
             min_distance,
             max_distance,
             size: None,
+            via: None,
         }
     }
     pub fn with_max(key: impl Into<String>, max_distance: u32) -> Self {
@@ -281,10 +285,15 @@ impl ReferenceAnchor {
             min_distance,
             max_distance,
             size: None,
+            via: None,
         }
     }
     pub fn with_size(mut self, size: CountPred) -> Self {
         self.size = Some(size);
+        self
+    }
+    pub fn with_via(mut self, via: BlockPredicate) -> Self {
+        self.via = Some(via);
         self
     }
 }

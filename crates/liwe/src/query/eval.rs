@@ -14,6 +14,7 @@ use crate::query::document::{
 };
 use crate::query::filter::{match_field_op, resolve_path, Resolution};
 use crate::query::graph_match::match_key_op;
+use crate::query::via::ViaWalk;
 
 const PARALLEL_THRESHOLD: usize = 64;
 
@@ -152,10 +153,10 @@ fn eval_inclusion(
     match &anchor.size {
         None => eval_inclusion_existential(anchor, graph, scope, outbound),
         Some(pred) => {
-            let walk: WalkFn = if outbound {
-                descendants_inclusion
+            let walk: &WalkFn<'_> = if outbound {
+                &descendants_inclusion
             } else {
-                ancestors_inclusion
+                &ancestors_inclusion
             };
             eval_relation_count(
                 &anchor.match_filter,
@@ -199,30 +200,33 @@ fn eval_inclusion_existential(
     combined
 }
 
-fn eval_reference(
-    anchor: &ReferenceAnchor,
-    graph: &Graph,
+fn eval_reference<'a>(
+    anchor: &'a ReferenceAnchor,
+    graph: &'a Graph,
     scope: Option<&HashSet<Key>>,
     outbound: bool,
 ) -> HashSet<Key> {
+    let via: Option<ViaWalk<'a>> = anchor.via.as_ref().map(|via| ViaWalk::new(graph, via));
+    let via = via.as_ref();
+    let walk_out = move |graph: &Graph, key: &Key, max: u32| match via {
+        Some(via) => via.outbound(key, max),
+        None => outbound_reference(graph, key, max),
+    };
+    let walk_in = move |graph: &Graph, key: &Key, max: u32| match via {
+        Some(via) => via.inbound(key, max),
+        None => inbound_reference(graph, key, max),
+    };
     match &anchor.size {
-        None => eval_reference_existential(anchor, graph, scope, outbound),
-        Some(pred) => {
-            let walk: WalkFn = if outbound {
-                outbound_reference
-            } else {
-                inbound_reference
-            };
-            eval_relation_count(
-                &anchor.match_filter,
-                anchor.min_distance,
-                anchor.max_distance,
-                pred,
-                graph,
-                scope,
-                walk,
-            )
-        }
+        None => eval_reference_existential(anchor, graph, scope, outbound, &walk_out, &walk_in),
+        Some(pred) => eval_relation_count(
+            &anchor.match_filter,
+            anchor.min_distance,
+            anchor.max_distance,
+            pred,
+            graph,
+            scope,
+            if outbound { &walk_out } else { &walk_in },
+        ),
     }
 }
 
@@ -231,14 +235,18 @@ fn eval_reference_existential(
     graph: &Graph,
     scope: Option<&HashSet<Key>>,
     outbound: bool,
+    walk_out: &WalkFn<'_>,
+    walk_in: &WalkFn<'_>,
 ) -> HashSet<Key> {
     let anchor_keys = eval(&anchor.match_filter, graph, None);
     let mut combined: HashSet<Key> = HashSet::new();
     for ak in &anchor_keys {
+        // Documents that reference the anchor are found by walking inbound
+        // from it, and vice versa.
         let walk = if outbound {
-            inbound_reference(graph, ak, anchor.max_distance)
+            walk_in(graph, ak, anchor.max_distance)
         } else {
-            outbound_reference(graph, ak, anchor.max_distance)
+            walk_out(graph, ak, anchor.max_distance)
         };
         for (k, d) in walk {
             if d >= anchor.min_distance && d <= anchor.max_distance {
@@ -255,7 +263,7 @@ fn eval_reference_existential(
     combined
 }
 
-type WalkFn = fn(&Graph, &Key, u32) -> HashMap<Key, u32>;
+type WalkFn<'a> = dyn Fn(&Graph, &Key, u32) -> HashMap<Key, u32> + Sync + 'a;
 
 fn eval_relation_count(
     match_filter: &Filter,
@@ -264,7 +272,7 @@ fn eval_relation_count(
     pred: &CountPred,
     graph: &Graph,
     scope: Option<&HashSet<Key>>,
-    walk: WalkFn,
+    walk: &WalkFn<'_>,
 ) -> HashSet<Key> {
     let match_set = eval(match_filter, graph, None);
     let candidates: Vec<Key> = scope
