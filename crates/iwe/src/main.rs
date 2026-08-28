@@ -92,6 +92,7 @@ enum Command {
     Export(Export),
     Schema(Schema),
     Stats(Stats),
+    Argue(Argue),
     Rename(Rename),
     Delete(Delete),
     Extract(Extract),
@@ -442,6 +443,7 @@ enum DocsTopic {
     Schema,
     Agent,
     QuerySchema,
+    Argue,
 }
 
 #[derive(Debug, Args)]
@@ -1000,6 +1002,32 @@ enum ValidateFormat {
 
 #[derive(Debug, Args)]
 #[clap(
+    about = help::argue::ABOUT,
+    long_about = help::argue::LONG_ABOUT,
+    after_help = help::argue::AFTER_HELP
+)]
+struct Argue {
+    #[clap(
+        long,
+        short = 'f',
+        value_enum,
+        default_value = "text",
+        help = "Output format"
+    )]
+    format: ArgueFormat,
+
+    #[clap(flatten)]
+    selector: FilterArgs,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum ArgueFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Args)]
+#[clap(
     about = help::stats::ABOUT,
     long_about = help::stats::LONG_ABOUT,
     after_help = help::stats::AFTER_HELP
@@ -1472,6 +1500,7 @@ fn main() {
         Command::Export(export) => export_command(export),
         Command::Schema(schema) => schema_command(schema),
         Command::Stats(stats) => stats_command(stats),
+        Command::Argue(argue) => argue_command(argue),
         Command::Rename(rename) => rename_command(rename),
         Command::Delete(delete) => delete_command(delete),
         Command::Extract(extract) => extract_command(extract),
@@ -1664,6 +1693,7 @@ fn docs_command(args: Docs) {
         Some(DocsTopic::Schema) => print!("{}", help::docs::SCHEMA),
         Some(DocsTopic::Agent) => print!("{}", help::docs::AGENT),
         Some(DocsTopic::QuerySchema) => print!("{}", current_query_schema()),
+        Some(DocsTopic::Argue) => print!("{}", help::docs::ARGUE),
         None => print!("{}", help::docs::INDEX),
     }
 }
@@ -3018,6 +3048,28 @@ fn warn_stats(config: &Configuration, graph: &Graph, targets: &[Key]) {
     };
     for finding in findings {
         eprintln!("stats: {}", finding.render());
+    }
+}
+
+fn argue_command(args: Argue) {
+    let config = get_configuration();
+    let graph = load_graph(&config);
+    let mut argument = liwe::query::argue(&graph);
+    if let Some(filter) = resolve_filter(&args.selector, &graph) {
+        let selected: std::collections::HashSet<String> = liwe::query::evaluate(&filter, &graph)
+            .into_iter()
+            .map(|k| k.to_string())
+            .collect();
+        argument.nodes.retain(|n| selected.contains(&n.key));
+        argument.disputes.retain(|d| selected.contains(&d.key));
+        argument.warnings.retain(|w| selected.contains(&w.key));
+    }
+    match args.format {
+        ArgueFormat::Text => print!("{}", liwe::query::render_argument_text(&argument)),
+        ArgueFormat::Json => {
+            let json = serde_json::to_string_pretty(&argument).expect("Failed to serialize");
+            println!("{}", json);
+        }
     }
 }
 

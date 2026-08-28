@@ -1,0 +1,12 @@
+Compute the dialectical standing of the graph's claims: which are in, out or
+undecided given the objections raised against them and the premises they rest
+on. A reading, never a gate — the command always exits 0.
+
+Nodes are the claim types (fact, pattern, model, stance, conjecture,
+hypothesis) and objections. An objection attacks the target of its `Against`
+section — or the premise in its `Undermines` section when its kind is
+`undermines`; an answered objection attacks nothing; a conceded one stands.
+`Rests on` links between nodes are support. Standing is the grounded
+extension with deductive support: in when every attacker is out and every
+premise is in; out when some attacker is in or some premise is out; otherwise
+undecided. See `iwe docs argue`.

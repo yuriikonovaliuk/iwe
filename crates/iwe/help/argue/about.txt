@@ -1,0 +1,1 @@
+Compute the standing of every claim from the objections against it

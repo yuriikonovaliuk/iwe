@@ -14,3 +14,6 @@ Print a topic with `iwe docs <topic>`.
   query-schema   JSON Schema (draft 2020-12) for the query language, also
                  published at
                  https://iwe.md/schemas/query/draft/2026-08/schema
+  argue          Dialectic: how `iwe argue` computes the standing of
+                 claims from objections, premises and disputes
+

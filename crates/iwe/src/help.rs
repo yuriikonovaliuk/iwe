@@ -64,6 +64,12 @@ pub mod schema {
     pub const AFTER_HELP: &str = include_str!("../help/schema/after_help.txt");
 }
 
+pub mod argue {
+    pub const ABOUT: &str = include_str!("../help/argue/about.txt");
+    pub const LONG_ABOUT: &str = include_str!("../help/argue/long_about.txt");
+    pub const AFTER_HELP: &str = include_str!("../help/argue/after_help.txt");
+}
+
 pub mod stats {
     pub const ABOUT: &str = include_str!("../help/stats/about.txt");
     pub const LONG_ABOUT: &str = include_str!("../help/stats/long_about.txt");
@@ -121,4 +127,5 @@ pub mod docs {
     pub const CONFIG: &str = include_str!("../docs/config.md");
     pub const SCHEMA: &str = include_str!("../docs/schema.md");
     pub const AGENT: &str = include_str!("../docs/agent.md");
+    pub const ARGUE: &str = include_str!("../docs/argue.md");
 }

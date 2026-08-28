@@ -13,6 +13,7 @@ mod normalization_misc;
 mod normalization_raw;
 #[allow(dead_code)]
 mod queries;
+mod query_argue;
 mod query_block_update;
 mod query_blocks;
 mod query_content_filter;

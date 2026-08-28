@@ -1,0 +1,20 @@
+OUTPUT:
+
+  text (default): one line per node — key, status, why — then the disputes
+  (state, thesis and antithesis with their status, what decides it) and
+  warnings (a conceded objection whose target still stands, an objection
+  whose target is gone).
+
+  json (-f json): { nodes: [...], disputes: [...], warnings: [...] } with the
+  same content, each node listing its attackers and premises with status.
+
+SELECTION:
+
+  -k KEY / --filter EXPR restrict which nodes are printed; standing is
+  always computed over the whole graph.
+
+EXAMPLES:
+
+  iwe argue                              # every claim and objection
+  iwe argue -k world/engineering/stances/code-is-the-liability
+  iwe argue --filter 'type: objection, state: open' -f json

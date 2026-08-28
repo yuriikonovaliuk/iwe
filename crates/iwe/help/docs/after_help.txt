@@ -13,6 +13,8 @@ TOPICS:
   query-schema   JSON Schema (draft 2020-12) for the query language, also
                  published at
                  https://iwe.md/schemas/query/draft/2026-08/schema
+  argue          Dialectic: how `iwe argue` computes the standing of
+                 claims from objections, premises and disputes
 
 EXAMPLES:
 
@@ -22,3 +24,5 @@ EXAMPLES:
   iwe docs schema           # the document schema reference
   iwe docs agent            # the policy an agent follows to use this CLI
   iwe docs query-schema     # the query language as a JSON Schema
+  iwe docs argue            # the dialectic reference
+

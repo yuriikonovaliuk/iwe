@@ -424,6 +424,18 @@ pub struct StatsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArgueParams {
+    #[schemars(
+        description = "Restrict the printed nodes to this document key. Standing is always computed over the whole graph"
+    )]
+    pub key: Option<String>,
+    #[schemars(
+        description = "Restrict the printed nodes to documents matching this query-language filter (inline YAML, e.g. 'type: objection, state: open')"
+    )]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SquashParams {
     #[schemars(description = "Root document key to expand")]
     pub key: String,
@@ -880,6 +892,38 @@ impl IweServer {
             let stats = GraphStatistics::from_graph(&graph);
             to_json_result(&stats)
         }
+    }
+
+    #[tool(
+        description = "Compute the dialectical standing (in, out, undecided) of every claim and objection from the objections against it and the premises it rests on — grounded semantics with deductive support. Returns nodes with attackers, premises and a 'because' chain, disputes with what decides them, and warnings (a conceded objection whose target still stands, an objection whose target is gone). A reading, not a gate"
+    )]
+    async fn iwe_argue(
+        &self,
+        Parameters(params): Parameters<ArgueParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let graph = self.graph.lock().await;
+        let mut argument = liwe::query::argue(&graph);
+        let mut selected: Option<HashSet<String>> = None;
+        if let Some(key) = params.key {
+            selected
+                .get_or_insert_with(HashSet::new)
+                .insert(Key::name(&key).to_string());
+        }
+        if let Some(filter) = params.filter {
+            let filter = liwe::query::parse_filter_expression(&filter)
+                .map_err(|e| McpError::invalid_params(format!("filter: {e}"), None))?;
+            selected.get_or_insert_with(HashSet::new).extend(
+                liwe::query::evaluate(&filter, &graph)
+                    .into_iter()
+                    .map(|k| k.to_string()),
+            );
+        }
+        if let Some(selected) = selected {
+            argument.nodes.retain(|n| selected.contains(&n.key));
+            argument.disputes.retain(|d| selected.contains(&d.key));
+            argument.warnings.retain(|w| selected.contains(&w.key));
+        }
+        to_json_result(&argument)
     }
 
     #[tool(
@@ -1670,7 +1714,7 @@ impl ServerHandler for IweServer {
         )
         .with_server_info(Implementation::new("iwe", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "IWE knowledge graph server. Tools: iwe_find, iwe_retrieve, iwe_tree, iwe_stats, iwe_squash, iwe_create, iwe_update, iwe_delete, iwe_query, iwe_rename, iwe_extract, iwe_inline, iwe_normalize, iwe_attach. Prompts: explore, review, refactor. Resources: iwe://documents/{key}, iwe://tree, iwe://stats, iwe://config."
+            "IWE knowledge graph server. Tools: iwe_find, iwe_retrieve, iwe_tree, iwe_stats, iwe_squash, iwe_create, iwe_update, iwe_delete, iwe_query, iwe_rename, iwe_extract, iwe_inline, iwe_normalize, iwe_attach, iwe_argue. Prompts: explore, review, refactor. Resources: iwe://documents/{key}, iwe://tree, iwe://stats, iwe://config."
                 .to_string(),
         )
     }

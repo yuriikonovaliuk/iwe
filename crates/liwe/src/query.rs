@@ -1,3 +1,4 @@
+pub mod argue;
 pub mod block;
 pub mod block_eval;
 pub mod block_update;
@@ -18,6 +19,7 @@ pub mod update;
 pub mod via;
 pub mod wire;
 
+pub use argue::{argue, render_text as render_argument_text, Argument, Status as ArgueStatus};
 pub use builder::{
     ParseError, build_filter_value, build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression, parse_filter_mapping, parse_operation,
 };
