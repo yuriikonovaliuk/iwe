@@ -121,6 +121,9 @@ impl Argument {
     }
 }
 
+/// (key, state, thesis, antithesis, resolution)
+type RawDispute = (Key, String, Vec<Key>, Vec<Key>, Vec<Key>);
+
 struct Raw {
     key: Key,
     kind: String,
@@ -150,10 +153,10 @@ fn section_targets(index: &BlockIndex, section: &str) -> Vec<Key> {
 /// Compute the standing of every claim and objection in the graph.
 pub fn argue(graph: &Graph) -> Argument {
     let mut keys = graph.keys();
-    keys.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    keys.sort_by_key(|k| k.to_string());
 
     let mut raws: Vec<Raw> = Vec::new();
-    let mut disputes_raw: Vec<(Key, String, Vec<Key>, Vec<Key>, Vec<Key>)> = Vec::new();
+    let mut disputes_raw: Vec<RawDispute> = Vec::new();
     for key in &keys {
         let Some(kind) = field(graph, key, "type") else {
             continue;
