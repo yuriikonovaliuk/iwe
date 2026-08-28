@@ -718,3 +718,335 @@ fn explain_ignores_links_rules() {
         "{stdout}"
     );
 }
+
+// ---- requires rules, $this anchors and [invariants] (IWE extensions) ----
+
+fn write_config_with_invariants(
+    path: &std::path::Path,
+    schemas: HashMap<String, SchemaBinding>,
+    invariants: HashMap<String, diwe::config::Invariant>,
+) {
+    let config = Configuration {
+        library: LibraryOptions {
+            path: "".to_string(),
+            ..Default::default()
+        },
+        markdown: MarkdownOptions {
+            refs_extension: "".to_string(),
+            ..Default::default()
+        },
+        schemas,
+        invariants,
+        ..Default::default()
+    };
+    let config_content = toml::to_string(&config).expect("Failed to serialize config");
+    write(path.join(".iwe/config.toml"), config_content).unwrap();
+}
+
+fn setup_dialectic() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("claims")).unwrap();
+    create_dir_all(temp_path.join("facts")).unwrap();
+    create_dir_all(temp_path.join("objections")).unwrap();
+
+    let schemas = binding("objection", "objections/**");
+    let mut invariants = HashMap::new();
+    invariants.insert(
+        "objection-past-stale".to_string(),
+        diwe::config::Invariant {
+            filter: "type: objection, state: open, stale_after: { $lt: $today }".to_string(),
+            expect: toml::Value::Integer(0),
+            description: Some("an open objection past its stale_after must be answered".into()),
+        },
+    );
+    invariants.insert(
+        "at-most-one-answered".to_string(),
+        diwe::config::Invariant {
+            filter: "type: objection, state: answered".to_string(),
+            expect: toml::Value::String("{ $lte: 2 }".to_string()),
+            description: None,
+        },
+    );
+    write_config_with_invariants(temp_path, schemas, invariants);
+
+    write(
+        temp_path.join(".iwe/schemas/objection.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: objection }
+            links:
+              - within: Against
+                min: 1
+                max: 1
+              - within: Undermines
+                max: 1
+                target: { $referencedBy: { match: { $key: $this.Against }, via: Rests on } }
+                description: an undermined premise is one the attacked claim rests on
+              - within: Against
+                target: { $key: { $nin: [$this] } }
+                description: an objection never attacks itself
+            requires:
+              - when: { kind: undermines }
+                section: Undermines
+                description: an undermining objection names the premise
+              - when: { state: { $in: [answered, conceded] } }
+                section: Answer
+        "},
+    )
+    .unwrap();
+
+    write(
+        temp_path.join("facts/f.md"),
+        "---\ntype: fact\n---\n\n# F\n\nA premise.\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("facts/g.md"),
+        "---\ntype: fact\n---\n\n# G\n\nAnother premise.\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("claims/a.md"),
+        "---\ntype: fact\n---\n\n# A\n\n## Rests on\n\n- [F](../facts/f)\n",
+    )
+    .unwrap();
+    let objection = |kind: &str, state: &str, stale: &str, body: &str| {
+        format!(
+            "---\ntype: objection\nkind: {kind}\nstate: {state}\nstale_after: {stale}\n---\n\n# Objection\n\n{body}"
+        )
+    };
+    write(
+        temp_path.join("objections/good.md"),
+        objection(
+            "undermines",
+            "open",
+            "2999-01-01",
+            "## Against\n\n- [A](../claims/a)\n\n## Undermines\n\n- [F](../facts/f)\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/wrong-premise.md"),
+        objection(
+            "undermines",
+            "open",
+            "2999-01-01",
+            "## Against\n\n- [A](../claims/a)\n\n## Undermines\n\n- [G](../facts/g)\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/no-premise.md"),
+        objection(
+            "undermines",
+            "open",
+            "2999-01-01",
+            "## Against\n\n- [A](../claims/a)\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/silent-answer.md"),
+        objection(
+            "rebuts",
+            "answered",
+            "2999-01-01",
+            "## Against\n\n- [A](../claims/a)\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/answered.md"),
+        objection(
+            "rebuts",
+            "answered",
+            "2999-01-01",
+            "## Against\n\n- [A](../claims/a)\n\n## Answer\n\nRevised.\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/stale.md"),
+        objection(
+            "rebuts",
+            "open",
+            "2000-01-01",
+            "## Against\n\n- [A](../claims/a)\n",
+        ),
+    )
+    .unwrap();
+    write(
+        temp_path.join("objections/self.md"),
+        objection(
+            "rebuts",
+            "open",
+            "2999-01-01",
+            "## Against\n\n- [Self](self)\n",
+        ),
+    )
+    .unwrap();
+    temp_dir
+}
+
+#[test]
+fn requires_and_this_rules_pass_for_well_formed_documents() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(
+        &temp_dir,
+        &["-k", "objections/good", "-k", "objections/answered"],
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn requires_reports_a_missing_conditional_section() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "objections/no-premise",
+            "-k",
+            "objections/silent-answer",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("objections/no-premise › Undermines: required section \"Undermines\" is missing when { kind: undermines }");
+    expect("  hint: an undermining objection names the premise");
+    expect("objections/silent-answer › Answer: required section \"Answer\" is missing when { state: { $in: [answered, conceded] } }");
+}
+
+#[test]
+fn this_anchors_resolve_against_the_validated_document() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(
+        &temp_dir,
+        &["-k", "objections/wrong-premise", "-k", "objections/self"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("objections/wrong-premise › Undermines: link to 'facts/g' within 'Undermines' does not satisfy the target filter");
+    expect("  hint: an undermined premise is one the attacked claim rests on");
+    expect("objections/self › Against: link to 'objections/self' within 'Against' does not satisfy the target filter");
+    expect("  hint: an objection never attacks itself");
+}
+
+#[test]
+fn requires_reports_json_with_the_requires_keyword() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(&temp_dir, &["-f", "json", "-k", "objections/no-premise"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Valid JSON");
+    assert_eq!(parsed[0]["violations"][0]["keyword"], "requires");
+    assert_eq!(parsed[0]["violations"][0]["schemaPath"], "/requires/0");
+    assert_eq!(parsed[0]["violations"][0]["breadcrumb"][0], "Undermines");
+}
+
+#[test]
+fn invariants_run_on_a_whole_graph_validation() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("invariants/objection-past-stale: 1 document matches, expected 0: objections/stale");
+    expect("  hint: an open objection past its stale_after must be answered");
+    assert!(
+        !stdout.contains("at-most-one-answered"),
+        "a satisfied invariant was reported:\n{stdout}"
+    );
+}
+
+#[test]
+fn invariants_are_skipped_when_validating_a_selection() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(&temp_dir, &["-k", "objections/stale"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn invariants_report_json_under_a_synthetic_key() {
+    let temp_dir = setup_dialectic();
+    let output = run_validate(&temp_dir, &["-f", "json"]);
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("Valid JSON");
+    let report = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "invariants/objection-past-stale")
+        .expect("invariant report present");
+    assert_eq!(report["schema"], "config");
+    assert_eq!(report["violations"][0]["keyword"], "invariants");
+    assert_eq!(
+        report["violations"][0]["schemaPath"],
+        "/invariants/objection-past-stale"
+    );
+}
+
+#[test]
+fn malformed_invariants_and_requires_are_load_errors() {
+    let temp_dir = setup_dialectic();
+    let mut invariants = HashMap::new();
+    invariants.insert(
+        "broken".to_string(),
+        diwe::config::Invariant {
+            filter: "type: objection".to_string(),
+            expect: toml::Value::String("{ $between: 3 }".to_string()),
+            description: None,
+        },
+    );
+    write_config_with_invariants(
+        temp_dir.path(),
+        binding("objection", "objections/**"),
+        invariants,
+    );
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("invariant 'broken': expect: unknown comparison '$between'"),
+        "{stderr}"
+    );
+
+    write(
+        temp_dir.path().join(".iwe/schemas/objection.yaml"),
+        indoc! {"
+            requires:
+              - section: Answer
+              - when: { state: answered }
+              - when: { state: answered }
+                section: Answer
+                wobble: true
+            links:
+              - within: Undermines
+                target: { $key: { $nin: $this.Against, $bogus: 1 } }
+        "},
+    )
+    .unwrap();
+    let output = run_validate(&temp_dir, &["-k", "objections/good"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires[0]: missing 'when'"), "{stderr}");
+    assert!(
+        stderr.contains("requires[1]: missing 'section'"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("requires[2]: unknown keyword 'wobble'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("links[0]: target:"), "{stderr}");
+}

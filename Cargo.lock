@@ -710,6 +710,7 @@ name = "diwe"
 version = "0.23.0"
 dependencies = [
  "bm25",
+ "chrono",
  "crossbeam-channel",
  "csv",
  "env_logger",

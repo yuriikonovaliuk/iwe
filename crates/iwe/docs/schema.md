@@ -467,6 +467,28 @@ Each entry is one rule; all rules apply. Keywords:
 | `reach`       | document key                            | following scoped links transitively — the same scope at every hop — must reach this document (a document *is* its own reach) |
 | `description` | string                                  | the hint attached to every violation this rule produces                                        |
 
+A `target` or `some` filter may anchor on the document being validated:
+`$this` stands for its key and `$this.<Section>` for the distinct link
+targets inside that section of it. That relates a document's links to other
+documents' links — "the premise this objection undermines must be one the
+attacked claim rests on", "a resolution is neither of the two sides":
+
+```yaml
+links:
+  - within: Undermines
+    target: { $referencedBy: { match: { $key: $this.Against }, via: Rests on } }
+  - within: Resolution
+    target: { $key: { $nin: $this.Thesis } }
+```
+
+In a list position (the value of `$in`/`$nin`/`$all`, or an element of a
+list) the targets are spliced in as a list; in a scalar position `$this`
+becomes the key and `$this.<Section>` becomes `{ $in: [targets] }`. A section
+with no links resolves to a sentinel no document has, so `$in` of it matches
+nothing — a violation for `target` if any link is in scope — and `$nin` of
+it matches everything. Such a rule is resolved and evaluated per document
+rather than once per run.
+
 Filters are the query language's (`iwe docs query`): frontmatter
 predicates, `$key`, `$content`, even relational operators. A rule with only
 `min`/`max` is a pure shape check; `target`, `some` and `reach` need the
@@ -484,7 +506,39 @@ load error, like any other schema error.
 `--explain` ignores `links`: the binding trace is about the document's own
 structure.
 
-## 12. Examples
+## 12. Requirements — an IWE extension
+
+`requires` makes a section conditional on the document's own frontmatter or
+content: "a resolved dispute names what resolved it", "an undermining
+objection names the premise". Like `links` it is IWE's keyword, stripped
+before the document validator runs.
+
+```yaml
+requires:
+  - when: { state: resolved }        # a query-language filter over this document
+    section: Resolution              # header text that must then be present …
+    min: 1                           # … this many times (default 1)
+    description: a resolved dispute names what resolved it
+  - when: { kind: undermines }
+    section: Undermines
+    max: 1
+```
+
+| Keyword       | Value                                   | Meaning                                                                 |
+| ------------- | --------------------------------------- | ----------------------------------------------------------------------- |
+| `when`        | document filter (query-language filter) | the condition; frontmatter predicates and `$content` alike              |
+| `section`     | header text                             | the section that must be present, at any depth, when `when` holds       |
+| `min`, `max`  | integer                                 | how many such sections (`min` defaults to 1, `max` to unbounded)        |
+| `description` | string                                  | the hint attached to every violation this rule produces                 |
+
+A document the `when` filter does not select is unaffected. Violations read
+`Resolution: required section "Resolution" is missing when { state: resolved }`,
+carry the hint, report `requires` as the keyword and `/requires/N` as the
+schema path. Both are document-local, so they are checked on unsaved buffers
+too. A rule without `when` or `section`, or with an unknown keyword, is a
+load error.
+
+## 13. Examples
 
 Header discipline for a whole store — every header capitalized and short,
 every section within budget, nothing deeper than `###`:

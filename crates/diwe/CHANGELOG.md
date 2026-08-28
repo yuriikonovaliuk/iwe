@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `requires` rules in schema files: a section that must be present (`min`/`max` times) whenever the document satisfies a `when` filter over its own frontmatter and content; document-local, so checked on partial graphs too.
+- `$this` and `$this.<Section>` in `links` `target`/`some` filters: the validated document's key and the distinct link targets inside one of its sections, resolved per document.
+- `[invariants]` in `config.toml` (`Invariant { filter, expect, description }`) and `check_invariants`: graph-wide count checks with `$today`/`$today±Nd` date substitution, reported under `invariants/<name>`.
 - `links` rules in schema files — an IWE extension stripped before the document validator runs: per rule a `within` scope, `min`/`max` on distinct link targets, `target` (every target must satisfy a document filter), `some` (at least one must), `reach` (scoped links must transitively reach a key), and a `description` hint. Graph-dependent checks are skipped for partial-graph (pending buffer) validation.
 
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/diwe-v0.22.0...diwe-v0.23.0) - 2026-08-30

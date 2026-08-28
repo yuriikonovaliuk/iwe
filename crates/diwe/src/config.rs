@@ -96,6 +96,8 @@ pub struct Configuration {
     pub templates: HashMap<String, NoteTemplate>,
     #[serde(default)]
     pub schemas: HashMap<String, SchemaBinding>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub invariants: HashMap<String, Invariant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
@@ -212,6 +214,19 @@ pub struct SchemaBinding {
     pub r#match: Patterns,
 }
 
+/// A graph-wide standing check: the documents matching `filter` must number
+/// what `expect` says — an integer, or a count predicate such as
+/// `"{ $lte: 3 }"`. The filter may use `$today`, `$today-Nd`, `$today+Nd`,
+/// replaced by ISO dates before parsing. Checked by `iwe schema validate`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invariant {
+    pub filter: String,
+    pub expect: toml::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 impl Default for Configuration {
     fn default() -> Self {
         Self {
@@ -226,6 +241,7 @@ impl Default for Configuration {
             actions: Default::default(),
             templates: Default::default(),
             schemas: Default::default(),
+            invariants: Default::default(),
         }
     }
 }
@@ -747,7 +763,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `commands`, `actions`, `templates`, `schemas`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `commands`, `actions`, `templates`, `schemas`, `invariants`
             "#}
         );
     }

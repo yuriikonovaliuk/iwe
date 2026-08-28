@@ -297,6 +297,37 @@ match = ["journal/*", "meetings/**"]
 
 Run `iwe schema validate` to check the store against these bindings.
 
+## `[invariants]`
+
+Standing checks over the whole graph, run by `iwe schema validate` whenever
+it validates the whole store (not a `-k`/`--filter` selection, not a
+`--schema-file`). Each names a filter and how many documents may match it:
+
+```toml
+[invariants.dispute-past-stale]
+filter = "type: dispute, state: { $ne: resolved }, stale_after: { $lt: $today }"
+expect = 0
+description = "an open dispute past its stale_after must be resolved or extended"
+
+[invariants.objection-unanswered]
+filter = "type: objection, state: open, raised_at: { $lt: $today-14d }"
+expect = "{ $lte: 3 }"
+```
+
+- `filter` — a query-language filter (`iwe docs query`), as `--filter`
+  takes it. `$today`, `$today-Nd` and `$today+Nd` are replaced by ISO dates
+  before parsing, so a date field compares against the calendar (ISO dates
+  order lexicographically).
+- `expect` — an integer (exact count) or a string holding a count predicate
+  with `$eq`, `$ne`, `$lt`, `$lte`, `$gt`, `$gte`.
+- `description` — the hint attached to a failing report.
+
+A failing invariant is reported like a document violation, under the
+synthetic key `invariants/<name>`, listing up to ten of the matching
+documents, with `invariants` as the keyword and `/invariants/<name>` as the
+schema path; the run exits 1. A malformed invariant is a configuration error
+(exit 2).
+
 ## Date format patterns
 
 Date and time formats use chrono strftime specifiers: `%Y` (2024), `%y`

@@ -11,10 +11,11 @@ use liwe::model::Key;
 use liwe::operations::Changes;
 use liwe::query::block::{parse_block_predicate, BlockPredicate};
 use liwe::query::block_eval::BlockIndex;
-use liwe::query::{build_filter_value, evaluate, Filter, ViaWalk};
+use liwe::query::{build_filter_value, evaluate, parse_filter_expression, Filter, KeyOp, ViaWalk};
 use liwe::schema::{build_document, compile_schema, CompiledSchema, Crumb, Violation};
+use serde_yaml::Value;
 
-use crate::config::{schemas_dir, Configuration, SchemaBinding};
+use crate::config::{schemas_dir, Configuration, Invariant, SchemaBinding};
 use crate::tokens::count_tokens;
 
 #[derive(Debug)]
@@ -105,7 +106,10 @@ impl Serialize for KeyReport {
 /// schema language, checked against the graph rather than the document alone:
 /// which section's links are in scope, how many distinct targets there may
 /// be, what every target (or at least one) must satisfy, and which document
-/// the scoped links must reach transitively.
+/// the scoped links must reach transitively. A `target`/`some` filter may
+/// anchor on the validated document itself with `$this` (its key) and
+/// `$this.<Section>` (the distinct link targets inside that section); such a
+/// filter is re-resolved per document.
 #[derive(Debug, Clone)]
 pub struct LinkRule {
     within: Option<BlockPredicate>,
@@ -114,37 +118,195 @@ pub struct LinkRule {
     max: Option<u64>,
     target: Option<Filter>,
     some: Option<Filter>,
+    target_this: Option<Value>,
+    some_this: Option<Value>,
     reach: Option<Key>,
     description: Option<String>,
 }
 
+/// One entry of a schema's `requires` list — a section that must be present
+/// (`min` times, at most `max`) whenever the document satisfies `when`, a
+/// query-language filter over the document's own frontmatter and content.
+#[derive(Debug, Clone)]
+pub struct RequireRule {
+    when: Filter,
+    when_text: String,
+    section: String,
+    min: u64,
+    max: Option<u64>,
+    description: Option<String>,
+}
+
 /// A schema file compiled in two halves: the document-schema part (handled by
-/// the validator crate) and the graph-level `links` rules IWE checks itself.
+/// the validator crate) and the graph-level `links` and `requires` rules IWE
+/// checks itself.
 pub struct CompiledSchemaSet {
     pub schema: CompiledSchema,
     pub links: Vec<LinkRule>,
+    pub requires: Vec<RequireRule>,
+}
+
+/// A schema source split into what the document validator understands and
+/// the IWE extensions it does not.
+pub struct SchemaExtensions {
+    pub source: String,
+    pub links: Vec<LinkRule>,
+    pub requires: Vec<RequireRule>,
 }
 
 /// Split a schema source into the part the document validator understands
-/// and the `links` rules, which it does not. A source without `links` is
-/// passed through untouched.
+/// and the `links` rules, which it does not (`requires` rules are stripped
+/// too). A source without either is passed through untouched.
 pub fn split_links(source: &str) -> Result<(String, Vec<LinkRule>), Vec<String>> {
-    let mut value: serde_yaml::Value = match serde_yaml::from_str(source) {
+    let extensions = split_extensions(source)?;
+    Ok((extensions.source, extensions.links))
+}
+
+/// Split a schema source into the document-schema part and IWE's own
+/// top-level keywords, `links` and `requires`.
+pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
+    let passthrough = || SchemaExtensions {
+        source: source.to_string(),
+        links: Vec::new(),
+        requires: Vec::new(),
+    };
+    let mut value: Value = match serde_yaml::from_str(source) {
         Ok(value) => value,
-        Err(_) => return Ok((source.to_string(), Vec::new())),
+        Err(_) => return Ok(passthrough()),
     };
     let mapping = match value.as_mapping_mut() {
         Some(mapping) => mapping,
-        None => return Ok((source.to_string(), Vec::new())),
+        None => return Ok(passthrough()),
     };
-    let links = match mapping.remove(serde_yaml::Value::String("links".to_string())) {
-        Some(links) => links,
-        None => return Ok((source.to_string(), Vec::new())),
+    let links = mapping.remove(Value::String("links".to_string()));
+    let requires = mapping.remove(Value::String("requires".to_string()));
+    if links.is_none() && requires.is_none() {
+        return Ok(passthrough());
+    }
+    let mut errors = Vec::new();
+    let links = match links {
+        Some(links) => parse_link_rules(&links).unwrap_or_else(|e| {
+            errors.extend(e);
+            Vec::new()
+        }),
+        None => Vec::new(),
     };
-    let rules = parse_link_rules(&links)?;
+    let requires = match requires {
+        Some(requires) => parse_require_rules(&requires).unwrap_or_else(|e| {
+            errors.extend(e);
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     let rest = serde_yaml::to_string(&value)
         .map_err(|error| vec![format!("links: cannot re-serialize schema: {error}")])?;
-    Ok((rest, rules))
+    Ok(SchemaExtensions {
+        source: rest,
+        links,
+        requires,
+    })
+}
+
+fn parse_require_rules(value: &Value) -> Result<Vec<RequireRule>, Vec<String>> {
+    let entries = match value {
+        Value::Sequence(entries) => entries,
+        _ => return Err(vec!["requires: expected a list of rules".to_string()]),
+    };
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        match parse_require_rule(entry) {
+            Ok(rule) => rules.push(rule),
+            Err(message) => errors.push(format!("requires[{index}]: {message}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(rules)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_require_rule(entry: &Value) -> Result<RequireRule, String> {
+    let mapping = entry.as_mapping().ok_or("expected a mapping")?;
+    let mut when = None;
+    let mut section = None;
+    let mut min = 1;
+    let mut max = None;
+    let mut description = None;
+    for (key, value) in mapping {
+        let keyword = key.as_str().ok_or("keys must be strings")?;
+        match keyword {
+            "when" => {
+                if !value.is_mapping() {
+                    return Err("when: expected a filter mapping".into());
+                }
+                let filter = build_filter_value(value).map_err(|error| format!("when: {error}"))?;
+                when = Some((filter, flow(value)));
+            }
+            "section" => {
+                section = Some(
+                    value
+                        .as_str()
+                        .ok_or("section: expected a header text")?
+                        .to_string(),
+                )
+            }
+            "min" => min = non_negative(value, "min")?,
+            "max" => max = Some(non_negative(value, "max")?),
+            "description" => {
+                description = Some(
+                    value
+                        .as_str()
+                        .ok_or("description: expected a string")?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown keyword '{other}'")),
+        }
+    }
+    let (when, when_text) = when.ok_or("missing 'when'")?;
+    let section = section.ok_or("missing 'section'")?;
+    if let Some(max) = max {
+        if min > max {
+            return Err("min is greater than max".into());
+        }
+    }
+    Ok(RequireRule {
+        when,
+        when_text,
+        section,
+        min,
+        max,
+        description,
+    })
+}
+
+/// Render a YAML value in flow style, for messages.
+fn flow(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Sequence(items) => {
+            format!(
+                "[{}]",
+                items.iter().map(flow).collect::<Vec<_>>().join(", ")
+            )
+        }
+        Value::Mapping(map) => format!(
+            "{{ {} }}",
+            map.iter()
+                .map(|(k, v)| format!("{}: {}", flow(k), flow(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Tagged(tagged) => flow(&tagged.value),
+    }
 }
 
 fn parse_link_rules(value: &serde_yaml::Value) -> Result<Vec<LinkRule>, Vec<String>> {
@@ -177,6 +339,8 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
         max: None,
         target: None,
         some: None,
+        target_this: None,
+        some_this: None,
         reach: None,
         description: None,
     };
@@ -199,12 +363,23 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
             "min" => rule.min = non_negative(value, "min")?,
             "max" => rule.max = Some(non_negative(value, "max")?),
             "target" => {
-                rule.target =
-                    Some(build_filter_value(value).map_err(|error| format!("target: {error}"))?)
+                if contains_this(value) {
+                    check_this_filter(value, "target")?;
+                    rule.target_this = Some(value.clone());
+                } else {
+                    rule.target = Some(
+                        build_filter_value(value).map_err(|error| format!("target: {error}"))?,
+                    );
+                }
             }
             "some" => {
-                rule.some =
-                    Some(build_filter_value(value).map_err(|error| format!("some: {error}"))?)
+                if contains_this(value) {
+                    check_this_filter(value, "some")?;
+                    rule.some_this = Some(value.clone());
+                } else {
+                    rule.some =
+                        Some(build_filter_value(value).map_err(|error| format!("some: {error}"))?);
+                }
             }
             "reach" => {
                 rule.reach = Some(Key::name(
@@ -253,6 +428,135 @@ fn filter_set<'c>(
         .or_insert_with(|| evaluate(filter, graph).into_iter().collect())
 }
 
+const THIS: &str = "$this";
+const THIS_PREFIX: &str = "$this.";
+const LIST_OPERATORS: [&str; 3] = ["$in", "$nin", "$all"];
+/// Stands in for an empty `$this.<Section>` list: `$in` of it matches
+/// nothing, `$nin` of it matches everything.
+const NO_TARGET: &str = "$this.none";
+
+fn contains_this(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s == THIS || s.starts_with(THIS_PREFIX),
+        Value::Sequence(items) => items.iter().any(contains_this),
+        Value::Mapping(map) => map
+            .iter()
+            .any(|(k, v)| contains_this(k) || contains_this(v)),
+        _ => false,
+    }
+}
+
+/// Check at load time that a filter using `$this` parses once the anchors
+/// are substituted — with placeholders, since no document is at hand yet.
+fn check_this_filter(value: &Value, keyword: &str) -> Result<(), String> {
+    let placeholder = |section: Option<&str>| match section {
+        None => vec![THIS.to_string()],
+        Some(section) => vec![format!("{THIS_PREFIX}{section}")],
+    };
+    let substituted = substitute_this(value, &placeholder, false);
+    build_filter_value(&substituted)
+        .map(|_| ())
+        .map_err(|error| format!("{keyword}: {error}"))
+}
+
+/// Replace `$this` and `$this.<Section>` in a filter value. `resolve(None)`
+/// yields the document's own key, `resolve(Some(section))` the distinct link
+/// targets inside that section. In a list position (an element of a
+/// sequence, or the value of `$in`/`$nin`/`$all`) the targets are spliced
+/// in as a list; in a scalar position `$this` becomes the key and
+/// `$this.<Section>` becomes `{ $in: [targets] }`. An empty target list
+/// becomes a sentinel no document has, so `$in` matches nothing and `$nin`
+/// matches everything.
+fn substitute_this(
+    value: &Value,
+    resolve: &dyn Fn(Option<&str>) -> Vec<String>,
+    list_context: bool,
+) -> Value {
+    let strings = |items: Vec<String>| -> Value {
+        let items = if items.is_empty() {
+            vec![NO_TARGET.to_string()]
+        } else {
+            items
+        };
+        Value::Sequence(items.into_iter().map(Value::String).collect())
+    };
+    match value {
+        Value::String(s) if s == THIS => {
+            let mut keys = resolve(None);
+            if list_context {
+                strings(keys)
+            } else {
+                Value::String(keys.pop().unwrap_or_else(|| NO_TARGET.to_string()))
+            }
+        }
+        Value::String(s) if s.starts_with(THIS_PREFIX) => {
+            let list = strings(resolve(Some(&s[THIS_PREFIX.len()..])));
+            if list_context {
+                list
+            } else {
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(Value::String("$in".to_string()), list);
+                Value::Mapping(map)
+            }
+        }
+        Value::Sequence(items) => {
+            let mut out = Vec::new();
+            for item in items {
+                match item {
+                    Value::String(s) if s == THIS || s.starts_with(THIS_PREFIX) => {
+                        match substitute_this(item, resolve, true) {
+                            Value::Sequence(spliced) => out.extend(spliced),
+                            other => out.push(other),
+                        }
+                    }
+                    other => out.push(substitute_this(other, resolve, false)),
+                }
+            }
+            Value::Sequence(out)
+        }
+        Value::Mapping(map) => Value::Mapping(
+            map.iter()
+                .map(|(k, v)| {
+                    let list = k
+                        .as_str()
+                        .map(|k| LIST_OPERATORS.contains(&k))
+                        .unwrap_or(false);
+                    (k.clone(), substitute_this(v, resolve, list))
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Resolve a `$this` filter for one document and evaluate it over the
+/// candidate targets only.
+fn this_filter_set(
+    raw: &Value,
+    key: &Key,
+    index: &BlockIndex,
+    targets: &[Key],
+    graph: &Graph,
+) -> Result<HashSet<Key>, String> {
+    let resolve = |section: Option<&str>| -> Vec<String> {
+        match section {
+            None => vec![key.to_string()],
+            Some(section) => index
+                .targets_within(&BlockPredicate::empty().within_section(section))
+                .into_iter()
+                .map(|k| k.to_string())
+                .collect(),
+        }
+    };
+    let substituted = substitute_this(raw, &resolve, false);
+    let filter = build_filter_value(&substituted).map_err(|error| error.to_string())?;
+    if targets.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let scoped = Filter::And(vec![Filter::Key(KeyOp::In(targets.to_vec())), filter]);
+    Ok(evaluate(&scoped, graph).into_iter().collect())
+}
+
 /// Check one document against a schema's `links` rules. With `full` false
 /// (a partial graph, as when validating unsaved buffers) only the counts are
 /// checked — whether a target exists or what it is cannot be known.
@@ -263,11 +567,11 @@ fn check_links(
     rules: &[LinkRule],
     full: bool,
     cache: &mut FilterCache,
+    index: &BlockIndex,
 ) -> Vec<Violation> {
     if rules.is_empty() {
         return Vec::new();
     }
-    let index = BlockIndex::build(graph, key);
     let mut violations = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
         let scope = rule.within.clone().unwrap_or_default();
@@ -307,8 +611,20 @@ fn check_links(
         if !full {
             continue;
         }
-        if let Some(target) = &rule.target {
-            let allowed = filter_set(cache, schema, i, "target", target, graph);
+        let target_allowed: Option<HashSet<Key>> = match (&rule.target, &rule.target_this) {
+            (Some(target), _) => {
+                Some(filter_set(cache, schema, i, "target", target, graph).clone())
+            }
+            (None, Some(raw)) => match this_filter_set(raw, key, index, &targets, graph) {
+                Ok(set) => Some(set),
+                Err(error) => {
+                    report(format!("target filter cannot be resolved: {error}"));
+                    None
+                }
+            },
+            (None, None) => None,
+        };
+        if let Some(allowed) = target_allowed {
             for t in &targets {
                 if graph.maybe_key(t).is_none() {
                     report(format!("link to '{t}'{where_}: no such document"));
@@ -319,8 +635,18 @@ fn check_links(
                 }
             }
         }
-        if let Some(some) = &rule.some {
-            let allowed = filter_set(cache, schema, i, "some", some, graph);
+        let some_allowed: Option<HashSet<Key>> = match (&rule.some, &rule.some_this) {
+            (Some(some), _) => Some(filter_set(cache, schema, i, "some", some, graph).clone()),
+            (None, Some(raw)) => match this_filter_set(raw, key, index, &targets, graph) {
+                Ok(set) => Some(set),
+                Err(error) => {
+                    report(format!("some filter cannot be resolved: {error}"));
+                    None
+                }
+            },
+            (None, None) => None,
+        };
+        if let Some(allowed) = some_allowed {
             if !targets.iter().any(|t| allowed.contains(t)) {
                 report(format!("no link{where_} satisfies the 'some' filter"));
             }
@@ -335,6 +661,240 @@ fn check_links(
         }
     }
     violations
+}
+
+/// Check one document against a schema's `requires` rules: whenever the
+/// document satisfies a rule's `when` filter, the named section must appear
+/// the required number of times. Document-local, so it runs on partial
+/// graphs too.
+fn check_requires(
+    graph: &Graph,
+    key: &Key,
+    rules: &[RequireRule],
+    index: &BlockIndex,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let applies = Filter::And(vec![Filter::Key(KeyOp::Eq(key.clone())), rule.when.clone()]);
+        if !evaluate(&applies, graph).contains(key) {
+            continue;
+        }
+        let count = index
+            .select(&BlockPredicate::empty().header(rule.section.as_str()))
+            .len() as u64;
+        let mut report = |message: String| {
+            violations.push(Violation {
+                breadcrumb: vec![Crumb::Header(rule.section.clone())],
+                message,
+                hint: rule.description.clone(),
+                schema_pointer: format!("/requires/{i}"),
+                keyword: "requires".to_string(),
+            })
+        };
+        if count < rule.min {
+            if count == 0 && rule.min == 1 {
+                report(format!(
+                    "required section \"{}\" is missing when {}",
+                    rule.section, rule.when_text
+                ));
+            } else {
+                report(format!(
+                    "section \"{}\" appears {count} time{}, fewer than the minimum of {} when {}",
+                    rule.section,
+                    if count == 1 { "" } else { "s" },
+                    rule.min,
+                    rule.when_text
+                ));
+            }
+        }
+        if let Some(max) = rule.max {
+            if count > max {
+                report(format!(
+                    "section \"{}\" appears {count} times, greater than the maximum of {max} when {}",
+                    rule.section, rule.when_text
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// Replace `$today`, `$today-Nd` and `$today+Nd` with ISO dates relative to
+/// `today`, so date fields (ISO strings compare lexicographically) can be
+/// tested against the calendar.
+pub fn substitute_today(filter: &str, today: chrono::NaiveDate) -> String {
+    let mut out = String::new();
+    let mut rest = filter;
+    while let Some(at) = rest.find("$today") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + "$today".len()..];
+        let mut consumed = 0;
+        let mut date = today;
+        let bytes = after.as_bytes();
+        if !bytes.is_empty() && (bytes[0] == b'+' || bytes[0] == b'-') {
+            let digits: String = after[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() && after[1 + digits.len()..].starts_with('d') {
+                let days: i64 = digits.parse().unwrap_or(0);
+                let delta = chrono::Duration::days(days);
+                date = if bytes[0] == b'+' {
+                    today + delta
+                } else {
+                    today - delta
+                };
+                consumed = 1 + digits.len() + 1;
+            }
+        }
+        out.push_str(&date.format("%Y-%m-%d").to_string());
+        rest = &after[consumed..];
+    }
+    out.push_str(rest);
+    out
+}
+
+enum Expect {
+    Exactly(u64),
+    Compare(Vec<(String, u64)>),
+}
+
+impl Expect {
+    fn parse(value: &toml::Value) -> Result<Expect, String> {
+        match value {
+            toml::Value::Integer(n) if *n >= 0 => Ok(Expect::Exactly(*n as u64)),
+            toml::Value::Integer(_) => Err("expect: expected a non-negative integer".into()),
+            toml::Value::String(text) => {
+                let parsed: Value =
+                    serde_yaml::from_str(text).map_err(|error| format!("expect: {error}"))?;
+                let map = parsed.as_mapping().ok_or(
+                    "expect: expected an integer or a count predicate such as { $lte: 3 }",
+                )?;
+                let mut comparisons = Vec::new();
+                for (k, v) in map {
+                    let op = k.as_str().ok_or("expect: keys must be strings")?;
+                    if !["$eq", "$ne", "$lt", "$lte", "$gt", "$gte"].contains(&op) {
+                        return Err(format!("expect: unknown comparison '{op}'"));
+                    }
+                    let n = v
+                        .as_u64()
+                        .ok_or_else(|| format!("expect: {op} expects a non-negative integer"))?;
+                    comparisons.push((op.to_string(), n));
+                }
+                if comparisons.is_empty() {
+                    return Err("expect: empty count predicate".into());
+                }
+                Ok(Expect::Compare(comparisons))
+            }
+            _ => Err("expect: expected an integer or a count predicate string".into()),
+        }
+    }
+
+    fn satisfied_by(&self, count: u64) -> bool {
+        match self {
+            Expect::Exactly(n) => count == *n,
+            Expect::Compare(comparisons) => comparisons.iter().all(|(op, n)| match op.as_str() {
+                "$eq" => count == *n,
+                "$ne" => count != *n,
+                "$lt" => count < *n,
+                "$lte" => count <= *n,
+                "$gt" => count > *n,
+                "$gte" => count >= *n,
+                _ => false,
+            }),
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Expect::Exactly(n) => n.to_string(),
+            Expect::Compare(comparisons) => comparisons
+                .iter()
+                .map(|(op, n)| format!("{op} {n}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+}
+
+/// Check the graph-wide `[invariants]` of the configuration: each names a
+/// filter and the count its matches must satisfy. A failing invariant is
+/// reported under the synthetic key `invariants/<name>`, listing the
+/// offending documents; a malformed one is a configuration error.
+pub fn check_invariants(
+    config: &Configuration,
+    graph: &Graph,
+) -> Result<Vec<KeyReport>, Vec<String>> {
+    check_invariants_on(config, graph, chrono::Local::now().date_naive())
+}
+
+pub fn check_invariants_on(
+    config: &Configuration,
+    graph: &Graph,
+    today: chrono::NaiveDate,
+) -> Result<Vec<KeyReport>, Vec<String>> {
+    let mut names: Vec<&String> = config.invariants.keys().collect();
+    names.sort();
+    let mut reports = Vec::new();
+    let mut errors = Vec::new();
+    for name in names {
+        let invariant: &Invariant = &config.invariants[name];
+        let expect = match Expect::parse(&invariant.expect) {
+            Ok(expect) => expect,
+            Err(error) => {
+                errors.push(format!("invariant '{name}': {error}"));
+                continue;
+            }
+        };
+        let filter = match parse_filter_expression(&substitute_today(&invariant.filter, today)) {
+            Ok(filter) => filter,
+            Err(error) => {
+                errors.push(format!("invariant '{name}': filter: {error}"));
+                continue;
+            }
+        };
+        let matches = evaluate(&filter, graph);
+        let count = matches.len() as u64;
+        if expect.satisfied_by(count) {
+            continue;
+        }
+        let listed: Vec<String> = matches.iter().take(10).map(|k| k.to_string()).collect();
+        let more = if matches.len() > listed.len() {
+            format!(", and {} more", matches.len() - listed.len())
+        } else {
+            String::new()
+        };
+        let message = if matches.is_empty() {
+            format!("0 documents match, expected {}", expect.describe())
+        } else {
+            format!(
+                "{count} {}, expected {}: {}{more}",
+                if count == 1 {
+                    "document matches"
+                } else {
+                    "documents match"
+                },
+                expect.describe(),
+                listed.join(", ")
+            )
+        };
+        reports.push(KeyReport {
+            key: Key::name(&format!("invariants/{name}")),
+            schema: "config".to_string(),
+            violations: vec![Violation {
+                breadcrumb: Vec::new(),
+                message,
+                hint: invariant.description.clone(),
+                schema_pointer: format!("/invariants/{name}"),
+                keyword: "invariants".to_string(),
+            }],
+        });
+    }
+    if errors.is_empty() {
+        Ok(reports)
+    } else {
+        Err(errors)
+    }
 }
 
 #[derive(Debug)]
@@ -366,14 +926,14 @@ pub fn validate_documents_against_file(
 
     let source = read_to_string(schema_path)
         .map_err(|_| vec![format!("schema file not found: {}", schema_path.display())])?;
-    let (source, links) = split_links(&source).map_err(|errors| {
+    let extensions = split_extensions(&source).map_err(|errors| {
         errors
             .into_iter()
             .map(|e| format!("schema '{label}' {e}"))
             .collect::<Vec<_>>()
     })?;
 
-    let compiled = compile_schema(&source).map_err(|schema_errors| {
+    let compiled = compile_schema(&extensions.source).map_err(|schema_errors| {
         schema_errors
             .into_iter()
             .map(|error| {
@@ -391,7 +951,17 @@ pub fn validate_documents_against_file(
     for key in keys {
         let document = build_document(graph, key, count_tokens);
         let mut violations = compiled.validate(&document);
-        violations.extend(check_links(graph, key, &label, &links, true, &mut cache));
+        let index = BlockIndex::build(graph, key);
+        violations.extend(check_requires(graph, key, &extensions.requires, &index));
+        violations.extend(check_links(
+            graph,
+            key,
+            &label,
+            &extensions.links,
+            true,
+            &mut cache,
+            &index,
+        ));
         if !violations.is_empty() {
             reports.push(KeyReport {
                 key: key.clone(),
@@ -548,11 +1118,15 @@ fn validate_documents_in(
         }
         documents += 1;
         let document = build_document(graph, key, count_tokens);
+        let index = BlockIndex::build(graph, key);
         for name in names {
             schemas_used.insert(name);
             let set = &compiled[name];
             let mut violations = set.schema.validate(&document);
-            violations.extend(check_links(graph, key, name, &set.links, full, &mut cache));
+            violations.extend(check_requires(graph, key, &set.requires, &index));
+            violations.extend(check_links(
+                graph, key, name, &set.links, full, &mut cache, &index,
+            ));
             if !violations.is_empty() {
                 reports.push(KeyReport {
                     key: key.clone(),
@@ -590,7 +1164,7 @@ fn compile_schemas(
                 continue;
             }
         };
-        let (source, links) = match split_links(&source) {
+        let extensions = match split_extensions(&source) {
             Ok(split) => split,
             Err(link_errors) => {
                 for error in link_errors {
@@ -599,9 +1173,16 @@ fn compile_schemas(
                 continue;
             }
         };
-        match compile_schema(&source) {
+        match compile_schema(&extensions.source) {
             Ok(schema) => {
-                compiled.insert(name.clone(), CompiledSchemaSet { schema, links });
+                compiled.insert(
+                    name.clone(),
+                    CompiledSchemaSet {
+                        schema,
+                        links: extensions.links,
+                        requires: extensions.requires,
+                    },
+                );
             }
             Err(schema_errors) => {
                 for error in schema_errors {

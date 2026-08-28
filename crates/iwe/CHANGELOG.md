@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `requires` (conditional sections) and `$this` anchors in `links` filters are enforced by `iwe schema validate` (`iwe docs schema` §11–12); `[invariants]` from `config.toml` run on every whole-store validation (`iwe docs config`).
 - `iwe schema validate` enforces `links` rules from schema files (target typing, link counts, transitive reach along a section's links); the query language gains `via` on the reference operators. Documented in `iwe docs schema` §11 and `iwe docs query`.
 
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/iwe-v0.22.0...iwe-v0.23.0) - 2026-08-30

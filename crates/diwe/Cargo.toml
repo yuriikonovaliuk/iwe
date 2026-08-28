@@ -32,6 +32,7 @@ tiktoken-rs.workspace = true
 bm25.workspace = true
 fuzzy-matcher.workspace = true
 notify = "8"
+chrono.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

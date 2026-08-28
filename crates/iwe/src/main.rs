@@ -2903,7 +2903,9 @@ fn schema_validate_command(args: SchemaValidate) {
     let config = get_configuration();
     let graph = load_graph(&config);
 
-    let keys: Vec<Key> = match resolve_filter(&args.selector, &graph) {
+    let selection = resolve_filter(&args.selector, &graph);
+    let whole_graph = selection.is_none() && args.schema_file.is_none();
+    let keys: Vec<Key> = match selection {
         Some(filter) => liwe::query::evaluate(&filter, &graph),
         None => {
             let mut k = graph.keys();
@@ -2951,7 +2953,18 @@ fn schema_validate_command(args: SchemaValidate) {
         );
     }
 
-    let reports = run.reports;
+    let mut reports = run.reports;
+    if whole_graph {
+        match diwe::schema::check_invariants(&config, &graph) {
+            Ok(failed) => reports.extend(failed),
+            Err(errors) => {
+                for error in errors {
+                    eprintln!("error: {}", error);
+                }
+                std::process::exit(2);
+            }
+        }
+    }
     if reports.is_empty() {
         return;
     }
