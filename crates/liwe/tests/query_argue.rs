@@ -996,3 +996,180 @@ fn a_support_cycle_is_a_warning_and_stays_undecided() {
         "support cycle: 1 → 2 — a chain of Rests on that returns to itself never reaches the floor"
     );
 }
+
+// 1: a structured fact.  2: a rebuttal whose proposition is about something
+// else.  3: a rebuttal asserting the contrary.  4: an unstructured rebuttal.
+const CONTRARIETY: &str = indoc! {"
+    ---
+    type: fact
+    proposition: { subject: defect, predicate: scales-with, object: code, polarity: affirm }
+    ---
+    # Defects scale with code
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    proposition: { subject: liability, predicate: scales-with, object: code, polarity: deny }
+    ---
+    # Liability does not scale with code
+
+    ## Against
+
+    - [F](1)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    proposition: { subject: Defect, predicate: scales-with, object: code, polarity: deny }
+    ---
+    # Defects do not scale with code
+
+    ## Against
+
+    - [F](1)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Unstructured
+
+    ## Against
+
+    - [F](1)
+"};
+
+#[test]
+fn a_rebuttal_that_is_not_a_contrary_is_not_an_attack() {
+    let argument = run(CONTRARIETY);
+    let f = argument.node("1").unwrap();
+    assert_eq!(f.status, Status::Out);
+    let keys: Vec<&str> = f.attackers.iter().map(|a| a.key.as_str()).collect();
+    assert_eq!(keys, vec!["3", "4"], "2 is not an attack; 4 is trusted");
+    let messages: Vec<&str> = argument
+        .warnings
+        .iter()
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "not an attack: asserts ¬( liability scales-with code) which is not a contrary of '1' ( defect scales-with code)",
+            "contrariety not checkable: no proposition on this objection",
+        ]
+    );
+}
+
+// 1: an established fact.  2: a rebuttal resting on a conjecture (weaker).
+// 3: a rebuttal resting on an observed fact (not weaker).  4, 5: the grounds.
+const STRENGTH: &str = indoc! {"
+    ---
+    type: fact
+    warrant: established
+    ---
+    # F
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Weak
+
+    ## Against
+
+    - [F](1)
+
+    ## Rests on
+
+    - [C](4)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Strong
+
+    ## Against
+
+    - [F](1)
+
+    ## Rests on
+
+    - [O](5)
+    _
+    ---
+    type: conjecture
+    confidence: medium
+    ---
+    # C
+    _
+    ---
+    type: fact
+    warrant: observed
+    ---
+    # O
+"};
+
+#[test]
+fn a_weaker_attack_lands_but_does_not_defeat() {
+    let argument = run(STRENGTH);
+    let f = argument.node("1").unwrap();
+    assert_eq!(f.strength, 3);
+    assert_eq!(argument.node("2").unwrap().strength, 1);
+    assert_eq!(argument.node("3").unwrap().strength, 4);
+    let weak = f.attackers.iter().find(|a| a.key == "2").unwrap();
+    let strong = f.attackers.iter().find(|a| a.key == "3").unwrap();
+    assert!(!weak.defeats);
+    assert!(strong.defeats);
+    assert_eq!(f.status, Status::Out);
+    assert_eq!(f.because, "defeated by '3' (rebuts)");
+
+    // Without the strong one, the weak attack fails and the fact stands.
+    let only_weak = STRENGTH.replace("- [O](5)", "- [C](4)");
+    let argument = run(&only_weak);
+    let f = argument.node("1").unwrap();
+    assert_eq!(f.status, Status::In);
+    assert_eq!(f.because, "attacks fail, weaker (2, 3)");
+}
+
+// Two documents argue the same proposition; one is defeated.
+const CONCLUSIONS: &str = indoc! {"
+    ---
+    type: fact
+    proposition: { subject: defect, predicate: scales-with, object: code }
+    ---
+    # A
+    _
+    ---
+    type: pattern
+    proposition: { subject: defect, predicate: scales-with, object: code }
+    ---
+    # B
+    _
+    ---
+    type: objection
+    kind: undercuts
+    state: open
+    ---
+    # Not B
+
+    ## Against
+
+    - [B](2)
+"};
+
+#[test]
+fn a_conclusion_is_justified_when_any_argument_for_it_is_in() {
+    let argument = run(CONCLUSIONS);
+    assert_eq!(argument.node("2").unwrap().status, Status::Out);
+    assert_eq!(argument.conclusions.len(), 1);
+    let c = &argument.conclusions[0];
+    assert_eq!(c.status, Status::In);
+    assert_eq!(c.arguments, vec!["1", "2"]);
+    assert_eq!(c.proposition.render(), "( defect scales-with code)");
+}

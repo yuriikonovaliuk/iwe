@@ -506,6 +506,12 @@ load error, like any other schema error.
 `--explain` ignores `links`: the binding trace is about the document's own
 structure.
 
+`$this.frontmatter.<path>` anchors a rule to the document's own
+frontmatter field (a dotted path; a scalar stays a scalar, a list becomes
+a list), so a target can be required to agree or disagree with the
+document on a field — `proposition.polarity: { $ne:
+$this.frontmatter.proposition.polarity }` is the contrariety rule.
+
 A `links` rule may carry `when:` — a filter over the document itself; the
 rule applies only to documents that satisfy it, so a rule can be
 conditioned on the document's own frontmatter (its `kind`, `quantity`,

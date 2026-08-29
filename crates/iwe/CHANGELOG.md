@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `iwe argue`: propositions and the contrariety check, strength ordering (attack ≠ defeat), conclusions; `$this.frontmatter.<path>` in schema `links` rules (`iwe docs argue`, `iwe docs schema` §11).
 - `iwe argue` knows `axiom` documents, checks that a rebutting or undermining objection's `## Denies` quotes its target, and warns on support cycles (`iwe docs argue`).
 - `links` rules accept `when:` (`iwe docs schema` §11); `argue` treats a particular objection against a generic claim as an exception, not a defeat (`iwe docs argue`).
 - `iwe argue --explain`: the diagnosis — root cycles behind every undecided node and the moves that break them, downstream claims, defeated claims with reinstatement moves, hypotheses waiting on an observation. `argue` also warns on circular grounds.

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `$this.frontmatter.<path>` in `links` filters: the validated document's own frontmatter field.
 - `when:` on `links` rules — a filter over the document itself; the rule applies only where it matches, so rules can be conditioned on the document's own frontmatter.
 
 - `requires` rules in schema files: a section that must be present (`min`/`max` times) whenever the document satisfies a `when` filter over its own frontmatter and content; document-local, so checked on partial graphs too.

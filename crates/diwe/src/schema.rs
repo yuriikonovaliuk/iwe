@@ -441,6 +441,7 @@ fn filter_set<'c>(
 
 const THIS: &str = "$this";
 const THIS_PREFIX: &str = "$this.";
+const THIS_FRONTMATTER_PREFIX: &str = "$this.frontmatter.";
 const LIST_OPERATORS: [&str; 3] = ["$in", "$nin", "$all"];
 /// Stands in for an empty `$this.<Section>` list: `$in` of it matches
 /// nothing, `$nin` of it matches everything.
@@ -500,6 +501,21 @@ fn substitute_this(
                 Value::String(keys.pop().unwrap_or_else(|| NO_TARGET.to_string()))
             }
         }
+        Value::String(s) if s.starts_with(THIS_FRONTMATTER_PREFIX) => {
+            // `$this.frontmatter.<path>`: the document's own field. A single
+            // value stays a scalar so it can sit under `$eq`/`$ne` or as a
+            // bare equality; several become a list.
+            let mut values = resolve(Some(&s[THIS_PREFIX.len()..]));
+            if list_context {
+                strings(values)
+            } else if values.len() == 1 {
+                Value::String(values.pop().unwrap())
+            } else {
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(Value::String("$in".to_string()), strings(values));
+                Value::Mapping(map)
+            }
+        }
         Value::String(s) if s.starts_with(THIS_PREFIX) => {
             let list = strings(resolve(Some(&s[THIS_PREFIX.len()..])));
             if list_context {
@@ -540,6 +556,36 @@ fn substitute_this(
     }
 }
 
+/// The values at a dotted path in a document's frontmatter, as strings: a
+/// scalar gives one, a sequence of scalars gives each, anything else none.
+fn frontmatter_values(graph: &Graph, key: &Key, path: &str) -> Vec<String> {
+    let Some(mapping) = graph.frontmatter(key) else {
+        return Vec::new();
+    };
+    let mut current = Value::Mapping(mapping.clone());
+    for segment in path.split('.') {
+        current = match current {
+            Value::Mapping(map) => match map.get(Value::String(segment.to_string())) {
+                Some(v) => v.clone(),
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+    }
+    let scalar = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    };
+    match &current {
+        Value::Sequence(items) => items.iter().filter_map(scalar).collect(),
+        other => scalar(other).into_iter().collect(),
+    }
+}
+
 /// Resolve a `$this` filter for one document and evaluate it over the
 /// candidate targets only.
 fn this_filter_set(
@@ -552,6 +598,9 @@ fn this_filter_set(
     let resolve = |section: Option<&str>| -> Vec<String> {
         match section {
             None => vec![key.to_string()],
+            Some(path) if path.starts_with("frontmatter.") => {
+                frontmatter_values(graph, key, &path["frontmatter.".len()..])
+            }
             Some(section) => index
                 .targets_within(&BlockPredicate::empty().within_section(section))
                 .into_iter()

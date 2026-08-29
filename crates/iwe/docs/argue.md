@@ -38,6 +38,33 @@ unchanged. Against a universal, a particular is a counter-instance and
 defeats it. Documents without `quantity` attack and are attacked as
 before.
 
+## Propositions, contrariety and strength
+
+A claim or objection may carry a structured **proposition** in its
+frontmatter — `proposition: { subject, predicate, object, polarity }`,
+polarity `affirm` (default) or `deny`, compared case-insensitively. When
+both a rebutting or undermining objection and its target carry one, the
+attack counts only if the objection's proposition is a *contrary* of the
+target's: same subject, predicate and object, opposite polarity. A
+non-contrary is reported (`not an attack: …`) and ignored — an attack
+whose conclusion does not contradict its target is not an attack. When
+only one side is structured the attack is trusted and reported as
+`contrariety not checkable`; when neither is, it is trusted silently.
+
+Attacks land; **defeats** succeed. An undercut always defeats. A rebuttal
+or undermining defeats only when the attacker is not weaker than its
+target, by *weakest-link strength*: a node's own base, bounded by the
+least of its premises. Bases: axiom 5; fact by warrant — observed 4,
+established 3, authority 2, inference unbounded; pattern, model, stance
+3; conjecture and hypothesis by confidence — high 2, else 1; objection
+unbounded (its grounds decide). A `strength: N` field overrides the base.
+So an objection resting on a conjecture cannot defeat an established
+fact, and nothing is weaker than an observation but an axiom. A landed
+attack that fails appears in `because` as `attacks fail, weaker (…)`.
+
+A proposition argued for by several documents is a **conclusion**,
+justified when any argument for it is in (`conclusions` in the output).
+
 ## Standing
 
 The grounded extension — the unique, sceptical one — extended with

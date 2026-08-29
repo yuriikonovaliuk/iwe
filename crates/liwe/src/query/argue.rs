@@ -68,6 +68,75 @@ pub struct Attacker {
     pub key: String,
     pub kind: String,
     pub status: Status,
+    /// Whether the attack succeeds as a defeat: undercuts always; rebuts
+    /// and underminings only when the attacker is not weaker than its
+    /// target.
+    pub defeats: bool,
+}
+
+/// The structured content of a claim: what it asserts or denies of what.
+/// Two propositions are contraries when they agree on subject, predicate
+/// and object and differ in polarity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct Proposition {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub polarity: String,
+}
+
+impl Proposition {
+    fn from_frontmatter(graph: &Graph, key: &Key) -> Option<Proposition> {
+        let fm = graph.frontmatter(key)?;
+        let map = fm
+            .get(serde_yaml::Value::String("proposition".to_string()))?
+            .as_mapping()?;
+        let get = |name: &str| -> Option<String> {
+            map.get(serde_yaml::Value::String(name.to_string()))
+                .and_then(|v| match v {
+                    serde_yaml::Value::String(s) => Some(s.clone()),
+                    serde_yaml::Value::Number(n) => Some(n.to_string()),
+                    serde_yaml::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                })
+                .map(|s| s.trim().to_lowercase())
+        };
+        Some(Proposition {
+            subject: get("subject")?,
+            predicate: get("predicate")?,
+            object: get("object").unwrap_or_default(),
+            polarity: get("polarity").unwrap_or_else(|| "affirm".to_string()),
+        })
+    }
+
+    fn same_terms(&self, other: &Proposition) -> bool {
+        self.subject == other.subject
+            && self.predicate == other.predicate
+            && self.object == other.object
+    }
+
+    pub fn is_contrary_of(&self, other: &Proposition) -> bool {
+        self.same_terms(other) && self.polarity != other.polarity
+    }
+
+    pub fn render(&self) -> String {
+        format!(
+            "{} {} {} {}",
+            if self.polarity == "deny" { "¬(" } else { "(" },
+            self.subject,
+            self.predicate,
+            format!("{})", self.object).trim()
+        )
+    }
+}
+
+/// A conclusion — one proposition — with every document that argues for
+/// it. Justified when some argument for it is in (ASPIC+'s notion).
+#[derive(Debug, Clone, Serialize)]
+pub struct Conclusion {
+    pub proposition: Proposition,
+    pub status: Status,
+    pub arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +156,13 @@ pub struct Node {
     pub test_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposition: Option<Proposition>,
+    /// Weakest-link strength: the least of the node's own warrant and its
+    /// premises'. Axioms 5; observed 4; established 3; authority 2;
+    /// conjectures and hypotheses by confidence (1–2); derived nodes take
+    /// the least of their premises.
+    pub strength: u8,
     pub status: Status,
     pub attackers: Vec<Attacker>,
     pub premises: Vec<Premise>,
@@ -124,6 +200,10 @@ pub struct Warning {
 #[derive(Debug, Clone, Serialize)]
 pub struct Argument {
     pub nodes: Vec<Node>,
+    /// Propositions argued for by more than one document, with the
+    /// justified status: in when any argument for it is in.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conclusions: Vec<Conclusion>,
     pub disputes: Vec<Dispute>,
     pub warnings: Vec<Warning>,
 }
@@ -147,6 +227,9 @@ struct Raw {
     state: Option<String>,
     test_state: Option<String>,
     quantity: Option<String>,
+    proposition: Option<Proposition>,
+    /// The node's own strength before its premises are weighed in.
+    base: u8,
     objection_kind: Option<String>,
     against: Vec<Key>,
     undermines: Vec<Key>,
@@ -196,6 +279,32 @@ fn field(graph: &Graph, key: &Key, name: &str) -> Option<String> {
         })
 }
 
+/// A node's own strength: axioms 5; facts by warrant — observed 4,
+/// established 3, authority 2, inference unbounded (its premises decide);
+/// patterns, models and stances 3, bounded by their premises; conjectures
+/// and hypotheses by confidence — high 2, otherwise 1; objections
+/// unbounded (their grounds decide). A `strength` field overrides.
+fn base_strength(graph: &Graph, key: &Key, kind: &str) -> u8 {
+    if let Some(explicit) = field(graph, key, "strength").and_then(|s| s.parse::<u8>().ok()) {
+        return explicit.min(5);
+    }
+    match kind {
+        AXIOM_TYPE => 5,
+        "fact" => match field(graph, key, "warrant").as_deref() {
+            Some("observed") => 4,
+            Some("established") => 3,
+            Some("authority") => 2,
+            _ => 5,
+        },
+        "pattern" | "model" | "stance" => 3,
+        "conjecture" | "hypothesis" => match field(graph, key, "confidence").as_deref() {
+            Some("high") => 2,
+            _ => 1,
+        },
+        _ => 5,
+    }
+}
+
 fn section_targets(index: &BlockIndex, section: &str) -> Vec<Key> {
     index.targets_within(&BlockPredicate::empty().within_section(section))
 }
@@ -242,6 +351,8 @@ pub fn argue(graph: &Graph) -> Argument {
                 None
             },
             quantity: field(graph, key, "quantity"),
+            proposition: Proposition::from_frontmatter(graph, key),
+            base: base_strength(graph, key, &kind),
             objection_kind: if is_objection {
                 Some(field(graph, key, "kind").unwrap_or_else(|| "rebuts".to_string()))
             } else {
@@ -283,8 +394,8 @@ pub fn argue(graph: &Graph) -> Argument {
         .collect();
     let n = raws.len();
 
-    // attackers[i]: (objection index, kind) — live objections only.
-    let mut attackers: Vec<Vec<(usize, String)>> = vec![Vec::new(); n];
+    // attackers[i]: (objection index, kind, defeats) — live objections only.
+    let mut attackers: Vec<Vec<(usize, String, bool)>> = vec![Vec::new(); n];
     let mut premises: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut warnings = Vec::new();
     for (i, raw) in raws.iter().enumerate() {
@@ -368,8 +479,75 @@ pub fn argue(graph: &Graph) -> Argument {
             });
             continue;
         }
+        // Contrariety: a rebuttal or undermining asserts the contrary of
+        // what it attacks. With both sides structured this is checked and
+        // a non-contrary is not an attack; unstructured, it is trusted and
+        // said so.
+        if matches!(objection_kind.as_str(), "rebuts" | "undermines") {
+            match (&raw.proposition, &raws[t].proposition) {
+                (Some(mine), Some(theirs)) => {
+                    if !mine.is_contrary_of(theirs) {
+                        warnings.push(Warning {
+                            key: raw.key.to_string(),
+                            message: format!(
+                                "not an attack: asserts {} which is not a contrary of '{}' {}",
+                                mine.render(),
+                                raws[t].key,
+                                theirs.render()
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                (Some(_), None) | (None, Some(_)) => warnings.push(Warning {
+                    key: raw.key.to_string(),
+                    message: format!(
+                        "contrariety not checkable: no proposition on {}",
+                        if raw.proposition.is_none() {
+                            "this objection".to_string()
+                        } else {
+                            format!("'{}'", raws[t].key)
+                        }
+                    ),
+                }),
+                (None, None) => {}
+            }
+        }
         if t != i {
-            attackers[t].push((i, objection_kind));
+            attackers[t].push((i, objection_kind, true));
+        }
+    }
+
+    // Weakest-link strength: the least of a node's own base and its
+    // premises', so an objection is as strong as its weakest ground. A
+    // support cycle bottoms out at the base.
+    let mut strength: Vec<u8> = raws.iter().map(|r| r.base).collect();
+    loop {
+        let mut changed = false;
+        for i in 0..n {
+            let least = premises[i]
+                .iter()
+                .map(|p| strength[*p])
+                .min()
+                .unwrap_or(5)
+                .min(raws[i].base);
+            if least < strength[i] {
+                strength[i] = least;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Defeat: undercuts always succeed; a rebuttal or undermining succeeds
+    // only when the attacker is not weaker than its target.
+    for t in 0..n {
+        for (a, kind, defeats) in attackers[t].iter_mut() {
+            if kind != "undercuts" && strength[*a] < strength[t] {
+                *defeats = false;
+            }
         }
     }
 
@@ -409,14 +587,18 @@ pub fn argue(graph: &Graph) -> Argument {
             if status[i] != Status::Undecided {
                 continue;
             }
-            let attacked = attackers[i].iter().any(|(a, _)| status[*a] == Status::In);
+            let attacked = attackers[i]
+                .iter()
+                .any(|(a, _, defeats)| *defeats && status[*a] == Status::In);
             let premise_out = premises[i].iter().any(|p| status[*p] == Status::Out);
             if attacked || premise_out {
                 status[i] = Status::Out;
                 changed = true;
                 continue;
             }
-            let all_attackers_out = attackers[i].iter().all(|(a, _)| status[*a] == Status::Out);
+            let all_attackers_out = attackers[i]
+                .iter()
+                .all(|(a, _, defeats)| !*defeats || status[*a] == Status::Out);
             let all_premises_in = premises[i].iter().all(|p| status[*p] == Status::In);
             if all_attackers_out && all_premises_in {
                 status[i] = Status::In;
@@ -432,7 +614,7 @@ pub fn argue(graph: &Graph) -> Argument {
     for (i, raw) in raws.iter().enumerate() {
         if raw.kind == "objection" && raw.state.as_deref() == Some("conceded") {
             for (t, list) in attackers.iter().enumerate() {
-                if list.iter().any(|(a, _)| *a == i) {
+                if list.iter().any(|(a, _, _)| *a == i) {
                     warnings.push(Warning {
                         key: raw.key.to_string(),
                         message: format!(
@@ -496,10 +678,11 @@ pub fn argue(graph: &Graph) -> Argument {
         .map(|(i, raw)| {
             let attackers: Vec<Attacker> = attackers[i]
                 .iter()
-                .map(|(a, kind)| Attacker {
+                .map(|(a, kind, defeats)| Attacker {
                     key: raws[*a].key.to_string(),
                     kind: kind.clone(),
                     status: status[*a],
+                    defeats: *defeats,
                 })
                 .collect();
             let premises: Vec<Premise> = premises[i]
@@ -516,6 +699,8 @@ pub fn argue(graph: &Graph) -> Argument {
                 state: raw.state.clone(),
                 test_state: raw.test_state.clone(),
                 quantity: raw.quantity.clone(),
+                proposition: raw.proposition.clone(),
+                strength: strength[i],
                 status: status[i],
                 attackers,
                 premises,
@@ -570,8 +755,37 @@ pub fn argue(graph: &Graph) -> Argument {
         })
         .collect();
 
+    // Conclusions: a proposition argued for by several documents is
+    // justified when any of them is in.
+    let mut by_proposition: HashMap<&Proposition, Vec<&Node>> = HashMap::new();
+    for node in &nodes {
+        if node.kind == "objection" {
+            continue;
+        }
+        if let Some(p) = &node.proposition {
+            by_proposition.entry(p).or_default().push(node);
+        }
+    }
+    let mut conclusions: Vec<Conclusion> = by_proposition
+        .into_iter()
+        .filter(|(_, args)| args.len() > 1)
+        .map(|(p, args)| Conclusion {
+            proposition: p.clone(),
+            status: if args.iter().any(|n| n.status == Status::In) {
+                Status::In
+            } else if args.iter().all(|n| n.status == Status::Out) {
+                Status::Out
+            } else {
+                Status::Undecided
+            },
+            arguments: args.iter().map(|n| n.key.clone()).collect(),
+        })
+        .collect();
+    conclusions.sort_by(|a, b| a.arguments.cmp(&b.arguments));
+
     Argument {
         nodes,
+        conclusions,
         disputes,
         warnings,
     }
@@ -696,7 +910,7 @@ pub fn diagnose(argument: &Argument) -> Diagnosis {
             continue;
         }
         for a in &node.attackers {
-            if a.status == Status::Undecided {
+            if a.defeats && a.status == Status::Undecided {
                 if let Some(&j) = position.get(a.key.as_str()) {
                     deps[i].push(j);
                 }
@@ -940,7 +1154,11 @@ pub fn diagnose(argument: &Argument) -> Diagnosis {
             continue;
         }
         let mut moves = Vec::new();
-        if let Some(a) = node.attackers.iter().find(|a| a.status == Status::In) {
+        if let Some(a) = node
+            .attackers
+            .iter()
+            .find(|a| a.defeats && a.status == Status::In)
+        {
             moves.push(format!(
                 "answer '{}' (state: answered) — revise the claim to meet it",
                 a.key
@@ -1057,10 +1275,22 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
                 "unattacked".to_string()
             } else {
                 let mut parts = Vec::new();
-                if !attackers.is_empty() {
+                let (defeating, weaker): (Vec<&Attacker>, Vec<&Attacker>) =
+                    attackers.iter().partition(|a| a.defeats);
+                if !defeating.is_empty() {
                     parts.push(format!(
                         "attackers out ({})",
-                        attackers
+                        defeating
+                            .iter()
+                            .map(|a| a.key.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                if !weaker.is_empty() {
+                    parts.push(format!(
+                        "attacks fail, weaker ({})",
+                        weaker
                             .iter()
                             .map(|a| a.key.as_str())
                             .collect::<Vec<_>>()
@@ -1074,7 +1304,10 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
             }
         }
         Status::Out => {
-            if let Some(a) = attackers.iter().find(|a| a.status == Status::In) {
+            if let Some(a) = attackers
+                .iter()
+                .find(|a| a.defeats && a.status == Status::In)
+            {
                 format!("defeated by '{}' ({})", a.key, a.kind)
             } else if let Some(p) = premises.iter().find(|p| p.status == Status::Out) {
                 format!("premise '{}' is out", p.key)
@@ -1083,7 +1316,10 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
             }
         }
         Status::Undecided => {
-            if let Some(a) = attackers.iter().find(|a| a.status == Status::Undecided) {
+            if let Some(a) = attackers
+                .iter()
+                .find(|a| a.defeats && a.status == Status::Undecided)
+            {
                 format!("attacker '{}' ({}) is undecided", a.key, a.kind)
             } else if let Some(p) = premises.iter().find(|p| p.status == Status::Undecided) {
                 format!("premise '{}' is undecided", p.key)
@@ -1112,6 +1348,17 @@ pub fn render_text(argument: &Argument) -> String {
             node.because,
             width = width
         ));
+    }
+    if !argument.conclusions.is_empty() {
+        out.push_str("\nconclusions argued more than once:\n");
+        for c in &argument.conclusions {
+            out.push_str(&format!(
+                "{}  {:9}  {}\n",
+                c.proposition.render(),
+                c.status.as_str(),
+                c.arguments.join(", ")
+            ));
+        }
     }
     if !argument.disputes.is_empty() {
         out.push_str("\ndisputes:\n");

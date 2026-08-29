@@ -1304,3 +1304,75 @@ fn links_rules_with_when_apply_only_to_matching_documents() {
     expect("  hint: an is does not refute an ought");
     assert!(!stdout.contains("ought-against-ought"), "{stdout}");
 }
+
+// ---- $this.frontmatter.<path> anchors ----
+
+#[test]
+fn this_frontmatter_anchors_compare_the_documents_own_fields() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("claims")).unwrap();
+    create_dir_all(temp_path.join("objections")).unwrap();
+    write_config_with_invariants(
+        temp_path,
+        binding("objection", "objections/**"),
+        HashMap::new(),
+    );
+    write(
+        temp_path.join(".iwe/schemas/objection.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: objection }
+            links:
+              - when: { kind: rebuts }
+                within: Against
+                target:
+                  proposition.subject: $this.frontmatter.proposition.subject
+                  proposition.predicate: $this.frontmatter.proposition.predicate
+                  proposition.polarity: { $ne: $this.frontmatter.proposition.polarity }
+                description: a rebuttal asserts the contrary of what it attacks
+        "},
+    )
+    .unwrap();
+    write(
+        temp_path.join("claims/f.md"),
+        "---\ntype: fact\nproposition:\n  subject: defect\n  predicate: scales-with\n  polarity: affirm\n---\n\n# F\n",
+    )
+    .unwrap();
+    let objection = |name: &str, subject: &str, polarity: &str| {
+        write(
+            temp_path.join(format!("objections/{name}.md")),
+            format!(
+                "---\ntype: objection\nkind: rebuts\nproposition:\n  subject: {subject}\n  predicate: scales-with\n  polarity: {polarity}\n---\n\n# {name}\n\n## Against\n\n- [F](../claims/f)\n"
+            ),
+        )
+        .unwrap();
+    };
+    objection("contrary", "defect", "deny");
+    objection("about-something-else", "liability", "deny");
+    objection("same-polarity", "defect", "affirm");
+
+    let output = run_validate(&temp_dir, &["-k", "objections/contrary"]);
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+    assert_eq!(output.status.code(), Some(0));
+
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "objections/about-something-else",
+            "-k",
+            "objections/same-polarity",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("objections/about-something-else › Against: link to 'claims/f' within 'Against' (when { kind: rebuts }) does not satisfy the target filter");
+    expect("objections/same-polarity › Against: link to 'claims/f' within 'Against' (when { kind: rebuts }) does not satisfy the target filter");
+    expect("  hint: a rebuttal asserts the contrary of what it attacks");
+}
