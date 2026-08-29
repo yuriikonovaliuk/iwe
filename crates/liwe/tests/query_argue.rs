@@ -549,3 +549,236 @@ fn an_open_dispute_names_what_each_side_hangs_on() {
         "open — decided by: 1: attacker '3' (rebuts) is undecided; 2: attacker '4' (rebuts) is undecided"
     );
 }
+
+#[test]
+fn a_circular_ground_is_a_warning() {
+    let argument = run(OPEN_DISPUTE);
+    let messages: Vec<&str> = argument
+        .warnings
+        .iter()
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "circular ground: enters '5' against '1' and rests on the other side '2'",
+            "circular ground: enters '5' against '2' and rests on the other side '1'",
+        ]
+    );
+}
+
+// 1: A.  2: objection against A that rests on A.
+const SELF_GROUNDED: &str = indoc! {"
+    ---
+    type: fact
+    ---
+    # A
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # B
+
+    ## Against
+
+    - [A](1)
+
+    ## Rests on
+
+    - [A](1)
+"};
+
+#[test]
+fn resting_on_the_attacked_claim_is_a_warning() {
+    let argument = run(SELF_GROUNDED);
+    assert_eq!(
+        argument.warnings[0].message,
+        "circular ground: rests on '1', the claim it attacks"
+    );
+}
+
+#[test]
+fn diagnosis_reduces_a_diamond_to_one_root_with_its_moves() {
+    let argument = run(OPEN_DISPUTE);
+    let diagnosis = liwe::query::diagnose(&argument);
+    assert_eq!(diagnosis.roots.len(), 1);
+    let root = &diagnosis.roots[0];
+    assert_eq!(root.id, 1);
+    assert_eq!(root.members, vec!["1", "2", "3", "4"]);
+    assert_eq!(root.disputes, vec!["5"]);
+    assert!(root.hangs_on.is_empty());
+    let moves: Vec<(&str, &str)> = root
+        .moves
+        .iter()
+        .map(|m| (m.key.as_str(), m.what.as_str()))
+        .collect();
+    assert_eq!(
+        moves,
+        vec![
+            ("3", "circular ground: enters '5' against '1' and rests on the other side '2' — give it a ground outside the cycle, or answer it"),
+            ("4", "circular ground: enters '5' against '2' and rests on the other side '1' — give it a ground outside the cycle, or answer it"),
+        ]
+    );
+    assert!(diagnosis.downstream.is_empty());
+    assert!(diagnosis.defeated.is_empty());
+    assert!(diagnosis.pending.is_empty());
+    let text = liwe::query::render_diagnosis_text(&diagnosis);
+    assert!(
+        text.starts_with("roots (1):\n  #1  cycle of 4: 1, 2, 3, 4\n      dispute: 5\n"),
+        "{text}"
+    );
+}
+
+// The diamond of OPEN_DISPUTE plus 6: a pattern resting on T (downstream of
+// the root), and 7: a hypothesis with a pending test in its own open dispute 8.
+const DOWNSTREAM_AND_PENDING: &str = indoc! {"
+    ---
+    type: conjecture
+    ---
+    # T
+    _
+    ---
+    type: conjecture
+    ---
+    # A
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # O
+
+    ## Against
+
+    - [T](1)
+
+    ## Rests on
+
+    - [A](2)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # P
+
+    ## Against
+
+    - [A](2)
+
+    ## Rests on
+
+    - [T](1)
+    _
+    ---
+    type: dispute
+    state: open
+    ---
+    # D
+
+    ## Thesis
+
+    - [T](1)
+
+    ## Antithesis
+
+    - [A](2)
+    _
+    ---
+    type: pattern
+    ---
+    # S
+
+    ## Rests on
+
+    - [T](1)
+    _
+    ---
+    type: hypothesis
+    test_state: pending
+    ---
+    # H
+    _
+    ---
+    type: dispute
+    state: open
+    ---
+    # E
+
+    ## Thesis
+
+    - [H](7)
+
+    ## Antithesis
+
+    - [S](6)
+"};
+
+#[test]
+fn diagnosis_lists_downstream_claims_and_pending_hypotheses() {
+    let argument = run(DOWNSTREAM_AND_PENDING);
+    let diagnosis = liwe::query::diagnose(&argument);
+    assert_eq!(diagnosis.roots.len(), 1);
+    assert_eq!(diagnosis.downstream.len(), 1);
+    assert_eq!(diagnosis.downstream[0].key, "6");
+    assert_eq!(diagnosis.downstream[0].roots, vec![1]);
+    assert_eq!(diagnosis.pending.len(), 1);
+    assert_eq!(diagnosis.pending[0].key, "7");
+    assert_eq!(diagnosis.pending[0].dispute, "8");
+
+    let mut selected = diagnosis.clone();
+    selected.select(&["6".to_string()].into_iter().collect());
+    assert_eq!(
+        selected.roots.len(),
+        1,
+        "a selected downstream node keeps its root"
+    );
+    assert_eq!(selected.downstream.len(), 1);
+    assert!(selected.pending.is_empty());
+}
+
+#[test]
+fn diagnosis_names_the_reinstatement_moves_of_a_defeated_claim() {
+    let argument = run(UNDERCUT);
+    let diagnosis = liwe::query::diagnose(&argument);
+    assert_eq!(diagnosis.defeated.len(), 1);
+    let d = &diagnosis.defeated[0];
+    assert_eq!(d.key, "2");
+    assert_eq!(d.because, "defeated by '3' (undercuts)");
+    assert_eq!(
+        d.moves,
+        vec![
+            "answer '3' (state: answered) — revise the claim to meet it",
+            "concede it and demote or delete the claim",
+            "attack '3' with a counter-objection grounded outside this dispute",
+        ]
+    );
+}
+
+#[test]
+fn standing_is_a_filter_operator() {
+    use liwe::query::{evaluate, parse_filter_expression};
+    let graph = Graph::import(&from_indoc(REINSTATEMENT), MarkdownOptions::default(), None);
+    let keys = |expr: &str| -> Vec<String> {
+        evaluate(&parse_filter_expression(expr).unwrap(), &graph)
+            .into_iter()
+            .map(|k| k.to_string())
+            .collect()
+    };
+    assert_eq!(keys("$standing: in"), vec!["1", "3"]);
+    assert_eq!(keys("$standing: { $ne: in }"), vec!["2"]);
+    assert_eq!(keys("$standing: { $in: [out, undecided] }"), vec!["2"]);
+    assert_eq!(keys("type: objection, $standing: in"), vec!["3"]);
+    assert_eq!(
+        keys("type: fact, $standing: { $nin: [in] }"),
+        Vec::<String>::new()
+    );
+    assert!(parse_filter_expression("$standing: maybe")
+        .unwrap_err()
+        .to_string()
+        .contains("'$standing' expects in, out or undecided"));
+}

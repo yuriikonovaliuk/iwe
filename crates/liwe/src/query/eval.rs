@@ -10,7 +10,7 @@ use crate::model::Key;
 use crate::query::block::BlockPredicate;
 use crate::query::block_eval::BlockIndex;
 use crate::query::document::{
-    CountPred, FieldOp, FieldPath, Filter, InclusionAnchor, KeyOp, ReferenceAnchor,
+    CountPred, FieldOp, FieldPath, Filter, InclusionAnchor, KeyOp, ReferenceAnchor, StandingOp,
 };
 use crate::query::filter::{match_field_op, resolve_path, Resolution};
 use crate::query::graph_match::match_key_op;
@@ -41,6 +41,7 @@ fn eval(filter: &Filter, graph: &Graph, scope: Option<&HashSet<Key>>) -> HashSet
         Filter::IncludedBy(anchor) => eval_inclusion(anchor, graph, scope, false),
         Filter::References(anchor) => eval_reference(anchor, graph, scope, true),
         Filter::ReferencedBy(anchor) => eval_reference(anchor, graph, scope, false),
+        Filter::Standing(op) => eval_standing(op, graph, scope),
     }
 }
 
@@ -119,6 +120,22 @@ fn eval_key(op: &KeyOp, graph: &Graph, scope: Option<&HashSet<Key>>) -> HashSet<
     universe
         .into_iter()
         .filter(|k| match_key_op(op, k))
+        .collect()
+}
+
+fn eval_standing(op: &StandingOp, graph: &Graph, scope: Option<&HashSet<Key>>) -> HashSet<Key> {
+    // Standing is a property of the whole argument, so it is computed over
+    // the whole graph and then read off for the candidates.
+    let argument = crate::query::argue::argue(graph);
+    let statuses: HashMap<String, crate::query::argue::Status> = argument
+        .nodes
+        .into_iter()
+        .map(|n| (n.key, n.status))
+        .collect();
+    let universe = scope.cloned().unwrap_or_else(|| all_keys(graph));
+    universe
+        .into_iter()
+        .filter(|k| statuses.get(&k.to_string()).is_some_and(|s| op.matches(*s)))
         .collect()
 }
 

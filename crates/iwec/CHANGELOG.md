@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `iwe_argue` tool: the dialectical standing of claims and objections (grounded semantics with deductive support), optionally restricted by key or filter.
+- `iwe_argue` tool: the dialectical standing of claims and objections (grounded semantics with deductive support), optionally restricted by key or filter; `explain: true` returns the diagnosis (root cycles and the moves that break them, downstream, defeated, pending) instead. Filters accept `$standing`.
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/iwec-v0.22.0...iwec-v0.23.0) - 2026-08-30
 
 Workspace version bump — no user-visible changes in this crate.

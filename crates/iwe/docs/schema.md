@@ -506,6 +506,32 @@ load error, like any other schema error.
 `--explain` ignores `links`: the binding trace is about the document's own
 structure.
 
+Filters in `target`, `some` and `when` may use every query operator,
+including `$standing` (the computed dialectical standing, `iwe docs argue`).
+A target filter can also reach across a relation from the anchored
+document: the rule below makes an objection's ground independent of the
+dispute it enters — it may rest neither on the claim it attacks nor on the
+other side of a dispute whose one side it attacks:
+
+```yaml
+links:
+  - within: Rests on
+    target:
+      $key: { $nin: [$this.Against] }
+      $nor:
+        - $referencedBy:
+            via: Antithesis
+            match:
+              type: dispute
+              $references: { via: Thesis, match: { $key: $this.Against } }
+        - $referencedBy:
+            via: Thesis
+            match:
+              type: dispute
+              $references: { via: Antithesis, match: { $key: $this.Against } }
+    description: an objection's ground is independent of the dispute it enters
+```
+
 ## 12. Requirements — an IWE extension
 
 `requires` makes a section conditional on the document's own frontmatter or

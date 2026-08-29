@@ -62,4 +62,54 @@ JSON (`-f json`): `{ nodes, disputes, warnings }`; each node carries
 
 `-k KEY` and `--filter EXPR` restrict what is printed; standing is always
 computed over the whole store, since a node's status depends on everything
-that attacks or supports it.
+that attacks or supports it. The same standing is available to every filter
+as `$standing: in | out | undecided` (`iwe docs query`), so `find`, schema
+`links` rules and `[invariants]` can select on it.
+
+## Warnings
+
+Warnings are shapes the argument cannot resolve on its own:
+
+- `conceded but not demoted: 'K' still stands in the graph` — a conceded
+  objection whose target is still present;
+- `objection attacks 'K', which no longer exists` / `…which is not a claim
+  or objection` / `objection attacks nothing`;
+- `circular ground: rests on 'K', the claim it attacks` — an objection
+  whose premises (transitively) include its own target;
+- `circular ground: enters 'D' against 'T' and rests on the other side 'A'`
+  — an objection against one side of a dispute whose premises include the
+  other side. Two of these facing each other are a Nixon diamond: both
+  sides stay undecided, and nothing but a new ground or an answer moves
+  them. The direct case is best made uncommittable by a `links` rule on the
+  objection's `Rests on` (`iwe docs schema` §11); this warning also catches
+  the transitive case.
+
+## Diagnosis — `--explain`
+
+`iwe argue --explain` reduces what is undecided or defeated to what would
+move it:
+
+- **roots** — the strongly connected components of mutual dependence among
+  undecided nodes (an undecided node hangs on its undecided attackers and
+  premises). Every undecided node is in a root or downstream of one. Each
+  root lists its members, the dispute(s) its members sit in, other roots it
+  also hangs on, and its *moves*: for each objection in the cycle, the
+  premise inside the cycle it should not rest on (`circular ground: …` when
+  that premise is the other side of the dispute it enters — give it a
+  ground outside the cycle, or answer it), or the mutual attack on which a
+  reply is owed;
+- **downstream** — undecided nodes that are not in any cycle, with the
+  root(s) they resolve with;
+- **defeated** — claims that are out, with why and the reinstatement moves:
+  answer the defeater (state `answered`), concede and demote, or counter it
+  with an objection grounded outside the dispute; a claim out through a
+  premise resolves with that premise;
+- **pending** — hypotheses without a `supported`/`refuted` test result that
+  are a side of an unresolved dispute: resolved by observation, not
+  argument.
+
+The diagnosis names the *slot* — which objection needs an independent
+ground, which hypothesis needs its result — never the content that fills it.
+`-k`/`--filter` keep the roots with a selected member and the selected
+downstream, defeated and pending entries together with the roots they hang
+on. `-f json` gives `{ roots, downstream, defeated, pending }`.

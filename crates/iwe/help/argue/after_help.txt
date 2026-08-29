@@ -8,6 +8,12 @@ OUTPUT:
   json (-f json): { nodes: [...], disputes: [...], warnings: [...] } with the
   same content, each node listing its attackers and premises with status.
 
+  --explain: the diagnosis instead — root cycles of mutual dependence behind
+  every undecided node with the move that breaks each (an objection resting
+  on the other side of its dispute, a reply owed), the claims downstream of
+  each root, the defeated claims with their reinstatement moves, and the
+  hypotheses whose dispute waits on an observation. Text or -f json.
+
 SELECTION:
 
   -k KEY / --filter EXPR restrict which nodes are printed; standing is
@@ -18,3 +24,5 @@ EXAMPLES:
   iwe argue                              # every claim and objection
   iwe argue -k world/engineering/stances/code-is-the-liability
   iwe argue --filter 'type: objection, state: open' -f json
+  iwe argue --explain                    # what would resolve the undecided
+  iwe find --filter 'type: stance, $standing: { $ne: in }'   # standing in any filter

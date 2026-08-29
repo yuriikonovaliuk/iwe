@@ -1016,6 +1016,12 @@ struct Argue {
     )]
     format: ArgueFormat,
 
+    #[clap(
+        long,
+        help = "Diagnose instead of list: the root cycles behind every undecided node and the moves that break them, the defeated claims and their reinstatement moves, and the hypotheses waiting on an observation"
+    )]
+    explain: bool,
+
     #[clap(flatten)]
     selector: FilterArgs,
 }
@@ -3055,11 +3061,28 @@ fn argue_command(args: Argue) {
     let config = get_configuration();
     let graph = load_graph(&config);
     let mut argument = liwe::query::argue(&graph);
-    if let Some(filter) = resolve_filter(&args.selector, &graph) {
-        let selected: std::collections::HashSet<String> = liwe::query::evaluate(&filter, &graph)
-            .into_iter()
-            .map(|k| k.to_string())
-            .collect();
+    let selected: Option<std::collections::HashSet<String>> =
+        resolve_filter(&args.selector, &graph).map(|filter| {
+            liwe::query::evaluate(&filter, &graph)
+                .into_iter()
+                .map(|k| k.to_string())
+                .collect()
+        });
+    if args.explain {
+        let mut diagnosis = liwe::query::diagnose(&argument);
+        if let Some(selected) = &selected {
+            diagnosis.select(selected);
+        }
+        match args.format {
+            ArgueFormat::Text => print!("{}", liwe::query::render_diagnosis_text(&diagnosis)),
+            ArgueFormat::Json => {
+                let json = serde_json::to_string_pretty(&diagnosis).expect("Failed to serialize");
+                println!("{}", json);
+            }
+        }
+        return;
+    }
+    if let Some(selected) = &selected {
         argument.nodes.retain(|n| selected.contains(&n.key));
         argument.disputes.retain(|d| selected.contains(&d.key));
         argument.warnings.retain(|w| selected.contains(&w.key));

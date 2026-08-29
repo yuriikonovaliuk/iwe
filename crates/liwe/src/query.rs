@@ -19,15 +19,15 @@ pub mod update;
 pub mod via;
 pub mod wire;
 
-pub use argue::{argue, render_text as render_argument_text, Argument, Status as ArgueStatus};
+pub use argue::{
+    argue, diagnose, render_diagnosis_text, render_text as render_argument_text, Argument,
+    Diagnosis, Status as ArgueStatus,
+};
 pub use builder::{
     ParseError, build_filter_value, build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression, parse_filter_mapping, parse_operation,
 };
 pub use document::{
-    is_operator_segment, BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp,
-    Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation,
-    OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField,
-    ReferenceAnchor, Sort, SortDir, Update, UpdateOp, UpdateOperator, YamlType,
+    BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp, Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation, OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField, ReferenceAnchor, Sort, SortDir, StandingOp, Update, UpdateOp, UpdateOperator, YamlType, is_operator_segment,
 };
 pub use eval::evaluate;
 pub use execute::{execute, execute_with_scores, strict_guard_violations, FindMatch, Outcome};

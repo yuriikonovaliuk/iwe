@@ -103,6 +103,22 @@ $key: notes/foo
 # $key: { $nin: [drafts/scratch, drafts/temp] }  # none of these
 ```
 
+### `$standing` — computed dialectical standing
+
+```yaml
+$standing: undecided
+# $standing: { $in: [out, undecided] }   # any of these
+# $standing: { $ne: in }                 # anything argued that is not in
+```
+
+The standing `iwe argue` computes — `in`, `out` or `undecided` — for the
+claim types and objections (see `iwe docs argue`). It is a property of the
+whole argument, so it is computed over the whole store whatever the scope of
+the filter. Documents that are not argued (concepts, observations, rulings,
+disputes, …) never match a `$standing` clause, whichever operator is used.
+Usable wherever a filter is: `find`, `argue --filter`, schema `links` and
+`requires` rules, and `[invariants]`.
+
 ### Relational operators
 
 | Operator | Reads as | Edge type | Walk parameters |

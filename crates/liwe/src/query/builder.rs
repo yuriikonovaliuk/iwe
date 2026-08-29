@@ -1,12 +1,10 @@
 use serde_yaml::{Mapping, Value};
 
 use crate::model::Key;
+use crate::query::argue::Status as ArgueStatus;
 use crate::query::block::{parse_block_predicate, parse_matches_source, BlockPredicate};
 use crate::query::document::{
-    is_operator_segment, BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp,
-    Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation,
-    OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField,
-    ReferenceAnchor, Sort, SortDir, Update, UpdateOp, UpdateOperator, YamlType,
+    BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp, Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation, OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField, ReferenceAnchor, Sort, SortDir, StandingOp, Update, UpdateOp, UpdateOperator, YamlType, is_operator_segment,
 };
 use crate::query::search::SearchSpec;
 use crate::query::wire::{
@@ -122,6 +120,9 @@ pub enum ParseError {
     },
     KeyOpForbidden {
         op: &'static str,
+    },
+    InvalidStanding {
+        value: String,
     },
     InvalidDepthValue {
         op: &'static str,
@@ -289,6 +290,11 @@ impl std::fmt::Display for ParseError {
             Self::KeyOpForbidden { op } => {
                 write!(f, "$key predicates are not allowed inside '{}'", op)
             }
+            Self::InvalidStanding { value } => write!(
+                f,
+                "'$standing' expects in, out or undecided (or $eq/$ne/$in/$nin of those), got '{}'",
+                value
+            ),
             Self::InvalidDepthValue { op, modifier } => {
                 write!(f, "'{}' has an invalid '{}' value; expected a non-negative integer", op, modifier)
             }
@@ -620,6 +626,7 @@ fn build_filter_op(op: &str, value: &Value, path: &[String]) -> Result<Filter, P
             value,
             "$referencedBy",
         )?))),
+        "$standing" => Ok(Filter::Standing(parse_standing_op(value)?)),
         other => Err(ParseError::UnknownOperator {
             op: other.to_string(),
             path: path.to_vec(),
@@ -1325,6 +1332,51 @@ fn parse_key_op(value: &Value, op: &'static str) -> Result<KeyOp, ParseError> {
     let m: RawKeyOpMap =
         serde_yaml::from_value(value.clone()).map_err(|_| ParseError::KeyOpForbidden { op })?;
     key_op_from_map(m, op)
+}
+
+fn parse_standing_op(value: &Value) -> Result<StandingOp, ParseError> {
+    fn status(v: &Value) -> Result<ArgueStatus, ParseError> {
+        let s = v.as_str().unwrap_or("");
+        ArgueStatus::parse(s).ok_or_else(|| ParseError::InvalidStanding {
+            value: match v {
+                Value::String(s) => s.clone(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            },
+        })
+    }
+    fn list(v: &Value, op: &'static str) -> Result<Vec<ArgueStatus>, ParseError> {
+        let seq = v
+            .as_sequence()
+            .ok_or(ParseError::OperatorExpectedList { op })?;
+        if seq.is_empty() {
+            return Err(ParseError::EmptyOperatorList { op });
+        }
+        seq.iter().map(status).collect()
+    }
+    if value.is_string() {
+        return Ok(StandingOp::In(vec![status(value)?]));
+    }
+    let Some(map) = value.as_mapping() else {
+        return Err(ParseError::GraphOpExpectedScalarOrMapping { op: "$standing" });
+    };
+    if map.len() != 1 {
+        return Err(ParseError::KeyOpForbidden { op: "$standing" });
+    }
+    let (k, v) = map.iter().next().unwrap();
+    match k.as_str() {
+        Some("$eq") => Ok(StandingOp::In(vec![status(v)?])),
+        Some("$ne") => Ok(StandingOp::Nin(vec![status(v)?])),
+        Some("$in") => Ok(StandingOp::In(list(v, "$in")?)),
+        Some("$nin") => Ok(StandingOp::Nin(list(v, "$nin")?)),
+        Some(other) => Err(ParseError::UnknownOperator {
+            op: other.to_string(),
+            path: vec!["$standing".to_string()],
+        }),
+        None => Err(ParseError::NonStringKey),
+    }
 }
 
 fn key_op_from_map(m: RawKeyOpMap, op: &'static str) -> Result<KeyOp, ParseError> {

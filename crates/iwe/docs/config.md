@@ -312,7 +312,16 @@ description = "an open dispute past its stale_after must be resolved or extended
 [invariants.objection-unanswered]
 filter = "type: objection, state: open, raised_at: { $lt: $today-14d }"
 expect = "{ $lte: 3 }"
+
+[invariants.stance-not-defeated]
+filter = "type: stance, $standing: out"
+expect = 0
+description = "a defeated stance is revised or demoted, not kept"
 ```
+
+A filter may use `$standing` — the standing `iwe argue` computes — so an
+invariant can hold the graph to what the argument shows, not only to what
+the frontmatter says.
 
 - `filter` — a query-language filter (`iwe docs query`), as `--filter`
   takes it. `$today`, `$today-Nd` and `$today+Nd` are replaced by ISO dates

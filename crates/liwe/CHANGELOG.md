@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `$standing` filter operator: the standing `argue` computes (`in`, `out`, `undecided`), usable in any filter; non-argued documents never match. `Filter::Standing(StandingOp)`.
+- `query::diagnose(&Argument) -> Diagnosis`: root cycles of mutual dependence among undecided nodes (Tarjan SCC) with the moves that break them, downstream nodes, defeated claims with reinstatement moves, hypotheses pending observation; `Diagnosis::select`, `render_diagnosis_text`.
+- `argue` warns on circular grounds: an objection resting (transitively) on the claim it attacks, or on the other side of a dispute it enters. Nodes carry `test_state` for hypotheses.
 - `query::argue`: computed acceptability of claims and objections — grounded semantics with deductive support over `Against`/`Undermines` attack edges and `Rests on` support edges, with per-node `because` chains, dispute summaries and warnings. Exported as `argue`, `Argument`, `ArgueStatus`, `render_argument_text`.
 - `via` on `$references` / `$referencedBy`: a block predicate (or a section name) that restricts which of a document's links count as reference edges, applied at every hop of the walk — `$references: { match: { $key: K }, via: Is a, maxDistance: 0 }` follows only the chain of "Is a" links. Rejected on inclusion operators. `BlockIndex::targets_within`, `ViaWalk`, `build_filter_value` are exported for callers.
 

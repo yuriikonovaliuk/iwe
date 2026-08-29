@@ -1050,3 +1050,127 @@ fn malformed_invariants_and_requires_are_load_errors() {
     );
     assert!(stderr.contains("links[0]: target:"), "{stderr}");
 }
+
+// ---- circular grounds: the objection rule and a $standing invariant ----
+
+fn setup_circular() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("claims")).unwrap();
+    create_dir_all(temp_path.join("objections")).unwrap();
+    create_dir_all(temp_path.join("disputes")).unwrap();
+
+    let schemas = binding("objection", "objections/**");
+    let mut invariants = HashMap::new();
+    invariants.insert(
+        "stance-not-defeated".to_string(),
+        diwe::config::Invariant {
+            filter: "type: stance, $standing: out".to_string(),
+            expect: toml::Value::Integer(0),
+            description: Some("a defeated stance is demoted or revised, not kept".into()),
+        },
+    );
+    write_config_with_invariants(temp_path, schemas, invariants);
+
+    write(
+        temp_path.join(".iwe/schemas/objection.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: objection }
+            links:
+              - within: Against
+                min: 1
+                max: 1
+              - within: Rests on
+                target:
+                  $key: { $nin: [$this.Against] }
+                  $nor:
+                    - $referencedBy:
+                        via: Antithesis
+                        match:
+                          type: dispute
+                          $references: { via: Thesis, match: { $key: $this.Against } }
+                    - $referencedBy:
+                        via: Thesis
+                        match:
+                          type: dispute
+                          $references: { via: Antithesis, match: { $key: $this.Against } }
+                description: an objection's ground is independent of the dispute it enters
+        "},
+    )
+    .unwrap();
+
+    let claim = |name: &str, kind: &str| {
+        write(
+            temp_path.join(format!("claims/{name}.md")),
+            format!("---\ntype: {kind}\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    };
+    claim("t", "stance");
+    claim("a", "conjecture");
+    claim("e", "fact");
+    write(
+        temp_path.join("disputes/d.md"),
+        "---\ntype: dispute\nstate: open\n---\n\n# D\n\n## Thesis\n\n- [T](../claims/t)\n\n## Antithesis\n\n- [A](../claims/a)\n",
+    )
+    .unwrap();
+    let objection = |name: &str, against: &str, ground: &str| {
+        write(
+            temp_path.join(format!("objections/{name}.md")),
+            format!(
+                "---\ntype: objection\nkind: rebuts\nstate: open\n---\n\n# {name}\n\n## Against\n\n- [x](../claims/{against})\n\n## Rests on\n\n- [g](../claims/{ground})\n"
+            ),
+        )
+        .unwrap();
+    };
+    objection("independent", "t", "e");
+    objection("circular", "t", "a");
+    objection("self-grounded", "a", "a");
+    temp_dir
+}
+
+#[test]
+fn an_objection_may_not_rest_on_the_other_side_of_its_dispute() {
+    let temp_dir = setup_circular();
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "objections/circular",
+            "-k",
+            "objections/self-grounded",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("objections/circular › Rests on: link to 'claims/a' within 'Rests on' does not satisfy the target filter");
+    expect("objections/self-grounded › Rests on: link to 'claims/a' within 'Rests on' does not satisfy the target filter");
+    expect("  hint: an objection's ground is independent of the dispute it enters");
+}
+
+#[test]
+fn an_independently_grounded_objection_passes_the_rule() {
+    let temp_dir = setup_circular();
+    let output = run_validate(&temp_dir, &["-k", "objections/independent"]);
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn invariants_can_filter_on_computed_standing() {
+    let temp_dir = setup_circular();
+    // The independent objection stands (its ground E is unattacked), so the
+    // stance T is out: the $standing invariant trips on the whole graph.
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("invariants/stance-not-defeated: 1 document matches, expected 0: claims/t");
+    expect("  hint: a defeated stance is demoted or revised, not kept");
+}

@@ -1,3 +1,4 @@
+use crate::query::argue::Status as ArgueStatus;
 use serde_yaml::Value;
 
 use crate::model::Key;
@@ -189,13 +190,35 @@ pub enum Filter {
     And(Vec<Filter>),
     Or(Vec<Filter>),
     Nor(Vec<Filter>),
-    Field { path: FieldPath, op: FieldOp },
+    Field {
+        path: FieldPath,
+        op: FieldOp,
+    },
     Key(KeyOp),
     Content(BlockPredicate),
     Includes(Box<InclusionAnchor>),
     IncludedBy(Box<InclusionAnchor>),
     References(Box<ReferenceAnchor>),
     ReferencedBy(Box<ReferenceAnchor>),
+    /// `$standing` — the document's computed dialectical standing (see
+    /// `argue`). Documents that are not argued (concepts, rulings, …) never
+    /// match, whatever the operator.
+    Standing(StandingOp),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StandingOp {
+    In(Vec<ArgueStatus>),
+    Nin(Vec<ArgueStatus>),
+}
+
+impl StandingOp {
+    pub fn matches(&self, status: ArgueStatus) -> bool {
+        match self {
+            StandingOp::In(list) => list.contains(&status),
+            StandingOp::Nin(list) => !list.contains(&status),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

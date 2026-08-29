@@ -433,6 +433,10 @@ pub struct ArgueParams {
         description = "Restrict the printed nodes to documents matching this query-language filter (inline YAML, e.g. 'type: objection, state: open')"
     )]
     pub filter: Option<String>,
+    #[schemars(
+        description = "Diagnose instead of list: the root cycles behind every undecided node with the moves that break them, the claims downstream of each root, the defeated claims with their reinstatement moves, and the hypotheses whose dispute waits on an observation"
+    )]
+    pub explain: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -895,7 +899,7 @@ impl IweServer {
     }
 
     #[tool(
-        description = "Compute the dialectical standing (in, out, undecided) of every claim and objection from the objections against it and the premises it rests on — grounded semantics with deductive support. Returns nodes with attackers, premises and a 'because' chain, disputes with what decides them, and warnings (a conceded objection whose target still stands, an objection whose target is gone). A reading, not a gate"
+        description = "Compute the dialectical standing (in, out, undecided) of every claim and objection from the objections against it and the premises it rests on — grounded semantics with deductive support. Returns nodes with attackers, premises and a 'because' chain, disputes with what decides them, and warnings (a conceded objection whose target still stands, an objection whose target is gone, an objection with a circular ground). With explain: true, returns instead the diagnosis — root cycles and the moves that break them, downstream claims, defeated claims and their reinstatement moves, hypotheses waiting on an observation. A reading, not a gate"
     )]
     async fn iwe_argue(
         &self,
@@ -917,6 +921,13 @@ impl IweServer {
                     .into_iter()
                     .map(|k| k.to_string()),
             );
+        }
+        if params.explain.unwrap_or(false) {
+            let mut diagnosis = liwe::query::diagnose(&argument);
+            if let Some(selected) = &selected {
+                diagnosis.select(selected);
+            }
+            return to_json_result(&diagnosis);
         }
         if let Some(selected) = selected {
             argument.nodes.retain(|n| selected.contains(&n.key));
