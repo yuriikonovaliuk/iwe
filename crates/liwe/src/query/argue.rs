@@ -334,8 +334,12 @@ pub fn argue(graph: &Graph) -> Argument {
             });
             continue;
         }
-        // A rebutting or undermining objection denies a sentence of its
-        // target; the quote must be there.
+        if raw.state.as_deref() == Some("answered") {
+            continue;
+        }
+        // A live rebutting or undermining objection denies a sentence of its
+        // target; the quote must be there. (An answered one was met by
+        // revising the target, so its sentence is gone by design.)
         if matches!(objection_kind.as_str(), "rebuts" | "undermines") {
             if let Some(quote) = &raw.denies {
                 let body = normalize(&graph.to_markdown_skip_frontmatter(&raws[t].key));
@@ -349,9 +353,6 @@ pub fn argue(graph: &Graph) -> Argument {
                     });
                 }
             }
-        }
-        if raw.state.as_deref() == Some("answered") {
-            continue;
         }
         // A particular does not overturn a generic: the objection is an
         // exception the claim's scope must absorb, not a defeater.
