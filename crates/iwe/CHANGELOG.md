@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `links` rules accept `when:` (`iwe docs schema` §11); `argue` treats a particular objection against a generic claim as an exception, not a defeat (`iwe docs argue`).
 - `iwe argue --explain`: the diagnosis — root cycles behind every undecided node and the moves that break them, downstream claims, defeated claims with reinstatement moves, hypotheses waiting on an observation. `argue` also warns on circular grounds.
 - `$standing` in every filter (`find`, `argue --filter`, schema `links`/`requires`, `[invariants]`): select documents by computed dialectical standing (`iwe docs query`, `iwe docs config`).
 - `iwe argue [-k KEY]... [--filter F] [-f text|json]`: the dialectical standing of every claim (`iwe docs argue`); always exits 0.

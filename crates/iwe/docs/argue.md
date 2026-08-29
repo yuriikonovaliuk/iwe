@@ -27,6 +27,15 @@ The three objection kinds are the three places an argument can be hit:
 `rebuts` the conclusion, `undercuts` the inference from grounds to
 conclusion (the grounds stand), `undermines` a premise.
 
+**Quantity.** When documents carry `quantity: universal | generic |
+particular`, a *particular* objection against a *generic* claim is not an
+attack: a generalisation is not overturned by an edge case. The objection
+is reported under `warnings` as an exception — the claim's scope should
+absorb it and the objection be answered — and the claim's standing is
+unchanged. Against a universal, a particular is a counter-instance and
+defeats it. Documents without `quantity` attack and are attacked as
+before.
+
 ## Standing
 
 The grounded extension — the unique, sceptical one — extended with

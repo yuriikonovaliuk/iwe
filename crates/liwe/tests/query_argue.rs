@@ -782,3 +782,67 @@ fn standing_is_a_filter_operator() {
         .to_string()
         .contains("'$standing' expects in, out or undecided"));
 }
+
+// 1: a generic fact.  2: a particular objection against it.  3: a universal
+// claim.  4: a particular objection against it (a counter-instance).
+const PARTICULAR_VS_GENERIC: &str = indoc! {"
+    ---
+    type: fact
+    quantity: generic
+    ---
+    # Defects scale with code
+    _
+    ---
+    type: objection
+    kind: undercuts
+    state: open
+    quantity: particular
+    ---
+    # Not when the lines are a wrong abstraction
+
+    ## Against
+
+    - [F](1)
+    _
+    ---
+    type: pattern
+    quantity: universal
+    ---
+    # Every objection has a ground
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    quantity: particular
+    ---
+    # This one has none
+
+    ## Against
+
+    - [U](3)
+"};
+
+#[test]
+fn a_particular_is_an_exception_to_a_generic_but_refutes_a_universal() {
+    let argument = run(PARTICULAR_VS_GENERIC);
+    assert_statuses(
+        &argument,
+        &[
+            ("1", Status::In),
+            ("2", Status::In),
+            ("3", Status::Out),
+            ("4", Status::In),
+        ],
+    );
+    assert_eq!(argument.node("1").unwrap().because, "unattacked");
+    assert_eq!(
+        argument.node("1").unwrap().quantity.as_deref(),
+        Some("generic")
+    );
+    assert_eq!(argument.warnings.len(), 1);
+    assert_eq!(
+        argument.warnings[0].message,
+        "exception: a particular objection does not defeat the generic '1' — absorb it into the claim's scope and answer it"
+    );
+}

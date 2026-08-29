@@ -112,6 +112,9 @@ impl Serialize for KeyReport {
 /// filter is re-resolved per document.
 #[derive(Debug, Clone)]
 pub struct LinkRule {
+    /// The rule applies only to documents satisfying this filter (with its
+    /// rendering, for messages).
+    when: Option<(Filter, String)>,
     within: Option<BlockPredicate>,
     within_label: Option<String>,
     min: u64,
@@ -333,6 +336,7 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
     use serde_yaml::Value;
     let mapping = entry.as_mapping().ok_or("expected a mapping")?;
     let mut rule = LinkRule {
+        when: None,
         within: None,
         within_label: None,
         min: 0,
@@ -347,6 +351,13 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
     for (key, value) in mapping {
         let keyword = key.as_str().ok_or("keys must be strings")?;
         match keyword {
+            "when" => {
+                if !value.is_mapping() {
+                    return Err("when: expected a filter mapping".into());
+                }
+                let filter = build_filter_value(value).map_err(|error| format!("when: {error}"))?;
+                rule.when = Some((filter, flow(value)));
+            }
             "within" => match value {
                 Value::String(section) => {
                     rule.within = Some(BlockPredicate::empty().within_section(section));
@@ -574,11 +585,19 @@ fn check_links(
     }
     let mut violations = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
+        if let Some((when, _)) = &rule.when {
+            let applies = Filter::And(vec![Filter::Key(KeyOp::Eq(key.clone())), when.clone()]);
+            if !evaluate(&applies, graph).contains(key) {
+                continue;
+            }
+        }
         let scope = rule.within.clone().unwrap_or_default();
         let targets = index.targets_within(&scope);
-        let where_ = match &rule.within_label {
-            Some(label) => format!(" within '{label}'"),
-            None => String::new(),
+        let where_ = match (&rule.within_label, &rule.when) {
+            (Some(label), Some((_, when))) => format!(" within '{label}' (when {when})"),
+            (Some(label), None) => format!(" within '{label}'"),
+            (None, Some((_, when))) => format!(" (when {when})"),
+            (None, None) => String::new(),
         };
         let mut report = |message: String| {
             violations.push(Violation {

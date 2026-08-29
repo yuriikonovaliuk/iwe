@@ -506,6 +506,19 @@ load error, like any other schema error.
 `--explain` ignores `links`: the binding trace is about the document's own
 structure.
 
+A `links` rule may carry `when:` — a filter over the document itself; the
+rule applies only to documents that satisfy it, so a rule can be
+conditioned on the document's own frontmatter (its `kind`, `quantity`,
+`mood`). Messages append `(when { … })`.
+
+```yaml
+links:
+  - when: { quantity: particular, kind: { $in: [rebuts, undermines] } }
+    within: Against
+    target: { quantity: { $in: [universal, particular] } }
+    description: a particular denies a universal or another particular, never a generic
+```
+
 Filters in `target`, `some` and `when` may use every query operator,
 including `$standing` (the computed dialectical standing, `iwe docs argue`).
 A target filter can also reach across a relation from the anchored

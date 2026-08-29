@@ -1174,3 +1174,133 @@ fn invariants_can_filter_on_computed_standing() {
     expect("invariants/stance-not-defeated: 1 document matches, expected 0: claims/t");
     expect("  hint: a defeated stance is demoted or revised, not kept");
 }
+
+// ---- when: on links rules ----
+
+fn setup_when() -> TempDir {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("claims")).unwrap();
+    create_dir_all(temp_path.join("objections")).unwrap();
+    write_config_with_invariants(
+        temp_path,
+        binding("objection", "objections/**"),
+        HashMap::new(),
+    );
+    write(
+        temp_path.join(".iwe/schemas/objection.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: objection }
+            links:
+              - when: { quantity: particular, kind: { $in: [rebuts, undermines] } }
+                within: Against
+                target: { quantity: { $in: [universal, particular] } }
+                description: a particular denies a universal or another particular, never a generic
+              - when: { mood: normative }
+                within: Against
+                target: { mood: normative }
+                description: only an ought attacks an ought
+              - when: { mood: descriptive }
+                within: Against
+                target: { mood: descriptive }
+                description: an is does not refute an ought
+        "},
+    )
+    .unwrap();
+    let claim = |name: &str, quantity: &str, mood: &str| {
+        write(
+            temp_path.join(format!("claims/{name}.md")),
+            format!("---\ntype: fact\nquantity: {quantity}\nmood: {mood}\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    };
+    claim("generic", "generic", "descriptive");
+    claim("universal", "universal", "descriptive");
+    claim("ought", "generic", "normative");
+    let objection = |name: &str, kind: &str, quantity: &str, mood: &str, against: &str| {
+        write(
+            temp_path.join(format!("objections/{name}.md")),
+            format!(
+                "---\ntype: objection\nkind: {kind}\nstate: open\nquantity: {quantity}\nmood: {mood}\n---\n\n# {name}\n\n## Against\n\n- [x](../claims/{against})\n"
+            ),
+        )
+        .unwrap();
+    };
+    objection(
+        "edge-case",
+        "rebuts",
+        "particular",
+        "descriptive",
+        "generic",
+    );
+    objection(
+        "counter-instance",
+        "rebuts",
+        "particular",
+        "descriptive",
+        "universal",
+    );
+    objection(
+        "particular-undercut",
+        "undercuts",
+        "particular",
+        "descriptive",
+        "generic",
+    );
+    objection(
+        "is-against-ought",
+        "rebuts",
+        "generic",
+        "descriptive",
+        "ought",
+    );
+    objection(
+        "ought-against-ought",
+        "rebuts",
+        "generic",
+        "normative",
+        "ought",
+    );
+    temp_dir
+}
+
+#[test]
+fn links_rules_with_when_apply_only_to_matching_documents() {
+    let temp_dir = setup_when();
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "objections/counter-instance",
+            "-k",
+            "objections/particular-undercut",
+            "-k",
+            "objections/ought-against-ought",
+        ],
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    assert_eq!(stdout, "");
+    assert_eq!(output.status.code(), Some(0));
+
+    let output = run_validate(
+        &temp_dir,
+        &[
+            "-k",
+            "objections/edge-case",
+            "-k",
+            "objections/is-against-ought",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("objections/edge-case › Against: link to 'claims/generic' within 'Against' (when { quantity: particular, kind: { $in: [rebuts, undermines] } }) does not satisfy the target filter");
+    expect("  hint: a particular denies a universal or another particular, never a generic");
+    expect("objections/is-against-ought › Against: link to 'claims/ought' within 'Against' (when { mood: descriptive }) does not satisfy the target filter");
+    expect("  hint: an is does not refute an ought");
+    assert!(!stdout.contains("ought-against-ought"), "{stdout}");
+}

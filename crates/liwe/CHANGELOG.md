@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `argue`: a `particular` objection does not defeat a `generic` claim (reported as an exception warning); nodes carry `quantity`.
 - `$standing` filter operator: the standing `argue` computes (`in`, `out`, `undecided`), usable in any filter; non-argued documents never match. `Filter::Standing(StandingOp)`.
 - `query::diagnose(&Argument) -> Diagnosis`: root cycles of mutual dependence among undecided nodes (Tarjan SCC) with the moves that break them, downstream nodes, defeated claims with reinstatement moves, hypotheses pending observation; `Diagnosis::select`, `render_diagnosis_text`.
 - `argue` warns on circular grounds: an objection resting (transitively) on the claim it attacks, or on the other side of a dispute it enters. Nodes carry `test_state` for hypotheses.

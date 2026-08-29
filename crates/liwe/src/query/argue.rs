@@ -81,6 +81,8 @@ pub struct Node {
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<String>,
     pub status: Status,
     pub attackers: Vec<Attacker>,
     pub premises: Vec<Premise>,
@@ -140,6 +142,7 @@ struct Raw {
     kind: String,
     state: Option<String>,
     test_state: Option<String>,
+    quantity: Option<String>,
     objection_kind: Option<String>,
     against: Vec<Key>,
     undermines: Vec<Key>,
@@ -203,6 +206,7 @@ pub fn argue(graph: &Graph) -> Argument {
             } else {
                 None
             },
+            quantity: field(graph, key, "quantity"),
             objection_kind: if is_objection {
                 Some(field(graph, key, "kind").unwrap_or_else(|| "rebuts".to_string()))
             } else {
@@ -271,6 +275,20 @@ pub fn argue(graph: &Graph) -> Argument {
             continue;
         };
         if raw.state.as_deref() == Some("answered") {
+            continue;
+        }
+        // A particular does not overturn a generic: the objection is an
+        // exception the claim's scope must absorb, not a defeater.
+        if raw.quantity.as_deref() == Some("particular")
+            && raws[t].quantity.as_deref() == Some("generic")
+        {
+            warnings.push(Warning {
+                key: raw.key.to_string(),
+                message: format!(
+                    "exception: a particular objection does not defeat the generic '{}' — absorb it into the claim's scope and answer it",
+                    raws[t].key
+                ),
+            });
             continue;
         }
         if t != i {
@@ -392,6 +410,7 @@ pub fn argue(graph: &Graph) -> Argument {
                 kind: raw.kind.clone(),
                 state: raw.state.clone(),
                 test_state: raw.test_state.clone(),
+                quantity: raw.quantity.clone(),
                 status: status[i],
                 attackers,
                 premises,

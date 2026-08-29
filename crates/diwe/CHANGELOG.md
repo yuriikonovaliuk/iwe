@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `when:` on `links` rules — a filter over the document itself; the rule applies only where it matches, so rules can be conditioned on the document's own frontmatter.
+
 - `requires` rules in schema files: a section that must be present (`min`/`max` times) whenever the document satisfies a `when` filter over its own frontmatter and content; document-local, so checked on partial graphs too.
 - `$this` and `$this.<Section>` in `links` `target`/`some` filters: the validated document's key and the distinct link targets inside one of its sections, resolved per document.
 - `[invariants]` in `config.toml` (`Invariant { filter, expect, description }`) and `check_invariants`: graph-wide count checks with `$today`/`$today±Nd` date substitution, reported under `invariants/<name>`.
