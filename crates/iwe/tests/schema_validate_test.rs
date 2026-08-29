@@ -1376,3 +1376,46 @@ fn this_frontmatter_anchors_compare_the_documents_own_fields() {
     expect("objections/same-polarity › Against: link to 'claims/f' within 'Against' (when { kind: rebuts }) does not satisfy the target filter");
     expect("  hint: a rebuttal asserts the contrary of what it attacks");
 }
+
+// ---- asserts rules ----
+
+#[test]
+fn asserts_compare_a_documents_own_fields() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("disputes")).unwrap();
+    write_config_with_invariants(temp_path, binding("dispute", "disputes/**"), HashMap::new());
+    write(
+        temp_path.join(".iwe/schemas/dispute.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: dispute }
+            asserts:
+              - that: { stale_after: { $gt: $this.frontmatter.opened_at } }
+                description: a dispute goes stale after it opens, not before
+        "},
+    )
+    .unwrap();
+    write(
+        temp_path.join("disputes/sane.md"),
+        "---\ntype: dispute\nopened_at: 2026-08-29\nstale_after: 2027-02-28\n---\n\n# Sane\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("disputes/backwards.md"),
+        "---\ntype: dispute\nopened_at: 2026-08-29\nstale_after: 2026-01-01\n---\n\n# Backwards\n",
+    )
+    .unwrap();
+    let output = run_validate(&temp_dir, &["-k", "disputes/sane"]);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_eq!(output.status.code(), Some(0));
+    let output = run_validate(&temp_dir, &["-k", "disputes/backwards"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).expect("Valid UTF-8 output");
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("disputes/backwards: assertion fails: { stale_after: { $gt: $this.frontmatter.opened_at } }");
+    expect("  hint: a dispute goes stale after it opens, not before");
+}

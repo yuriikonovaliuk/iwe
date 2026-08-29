@@ -583,6 +583,19 @@ schema path. Both are document-local, so they are checked on unsaved buffers
 too. A rule without `when` or `section`, or with an unknown keyword, is a
 load error.
 
+### Assertions
+
+`asserts` — a list of conditions the document itself must satisfy, each a
+filter that may compare the document's own fields through
+`$this.frontmatter.<path>`; violations use the keyword `asserts` and the
+pointer `/asserts/N`.
+
+```yaml
+asserts:
+  - that: { stale_after: { $gt: $this.frontmatter.opened_at } }
+    description: a dispute goes stale after it opens, not before
+```
+
 ## 13. Examples
 
 Header discipline for a whole store — every header capitalized and short,

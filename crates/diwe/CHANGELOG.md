@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `asserts` rules: per-document conditions that compare the document's own fields (`that: { stale_after: { $gt: $this.frontmatter.opened_at } }`).
 - `$this.frontmatter.<path>` in `links` filters: the validated document's own frontmatter field.
 - `when:` on `links` rules — a filter over the document itself; the rule applies only where it matches, so rules can be conditioned on the document's own frontmatter.
 

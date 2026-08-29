@@ -147,6 +147,18 @@ pub struct CompiledSchemaSet {
     pub schema: CompiledSchema,
     pub links: Vec<LinkRule>,
     pub requires: Vec<RequireRule>,
+    pub asserts: Vec<AssertRule>,
+}
+
+/// One entry of a schema's `asserts` list — a condition the document itself
+/// must satisfy, written as a filter that may compare the document's own
+/// fields through `$this.frontmatter.<path>` (`stale_after: { $gt:
+/// $this.frontmatter.opened_at }`).
+#[derive(Debug, Clone)]
+pub struct AssertRule {
+    that: Value,
+    that_text: String,
+    description: Option<String>,
 }
 
 /// A schema source split into what the document validator understands and
@@ -155,6 +167,7 @@ pub struct SchemaExtensions {
     pub source: String,
     pub links: Vec<LinkRule>,
     pub requires: Vec<RequireRule>,
+    pub asserts: Vec<AssertRule>,
 }
 
 /// Split a schema source into the part the document validator understands
@@ -172,6 +185,7 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         source: source.to_string(),
         links: Vec::new(),
         requires: Vec::new(),
+        asserts: Vec::new(),
     };
     let mut value: Value = match serde_yaml::from_str(source) {
         Ok(value) => value,
@@ -183,7 +197,8 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
     };
     let links = mapping.remove(Value::String("links".to_string()));
     let requires = mapping.remove(Value::String("requires".to_string()));
-    if links.is_none() && requires.is_none() {
+    let asserts = mapping.remove(Value::String("asserts".to_string()));
+    if links.is_none() && requires.is_none() && asserts.is_none() {
         return Ok(passthrough());
     }
     let mut errors = Vec::new();
@@ -201,6 +216,13 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         }),
         None => Vec::new(),
     };
+    let asserts = match asserts {
+        Some(asserts) => parse_assert_rules(&asserts).unwrap_or_else(|e| {
+            errors.extend(e);
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -210,7 +232,93 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         source: rest,
         links,
         requires,
+        asserts,
     })
+}
+
+fn parse_assert_rules(value: &Value) -> Result<Vec<AssertRule>, Vec<String>> {
+    let list = match value {
+        Value::Sequence(list) => list,
+        _ => return Err(vec!["asserts: expected a list of rules".to_string()]),
+    };
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    for (index, entry) in list.iter().enumerate() {
+        match parse_assert_rule(entry) {
+            Ok(rule) => rules.push(rule),
+            Err(message) => errors.push(format!("asserts[{index}]: {message}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(rules)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_assert_rule(entry: &Value) -> Result<AssertRule, String> {
+    let mapping = entry.as_mapping().ok_or("expected a mapping")?;
+    let mut that = None;
+    let mut description = None;
+    for (key, value) in mapping {
+        let keyword = key.as_str().ok_or("keys must be strings")?;
+        match keyword {
+            "that" => {
+                if !value.is_mapping() {
+                    return Err("that: expected a filter mapping".into());
+                }
+                check_this_filter(value, "that")?;
+                that = Some((value.clone(), flow(value)));
+            }
+            "description" => {
+                description = Some(
+                    value
+                        .as_str()
+                        .ok_or("description: expected a string")?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown keyword '{other}'")),
+        }
+    }
+    let (that, that_text) = that.ok_or("missing 'that'")?;
+    Ok(AssertRule {
+        that,
+        that_text,
+        description,
+    })
+}
+
+/// Check one document against a schema's `asserts` rules: the document
+/// must satisfy each `that` filter once its own `$this` anchors are
+/// resolved. Document-local.
+fn check_asserts(
+    graph: &Graph,
+    key: &Key,
+    rules: &[AssertRule],
+    index: &BlockIndex,
+) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let mut report = |message: String| {
+            violations.push(Violation {
+                breadcrumb: Vec::new(),
+                message,
+                hint: rule.description.clone(),
+                schema_pointer: format!("/asserts/{i}"),
+                keyword: "asserts".to_string(),
+            })
+        };
+        match this_filter_set(&rule.that, key, index, std::slice::from_ref(key), graph) {
+            Ok(set) => {
+                if !set.contains(key) {
+                    report(format!("assertion fails: {}", rule.that_text));
+                }
+            }
+            Err(error) => report(format!("assertion cannot be resolved: {error}")),
+        }
+    }
+    violations
 }
 
 fn parse_require_rules(value: &Value) -> Result<Vec<RequireRule>, Vec<String>> {
@@ -1021,6 +1129,7 @@ pub fn validate_documents_against_file(
         let mut violations = compiled.validate(&document);
         let index = BlockIndex::build(graph, key);
         violations.extend(check_requires(graph, key, &extensions.requires, &index));
+        violations.extend(check_asserts(graph, key, &extensions.asserts, &index));
         violations.extend(check_links(
             graph,
             key,
@@ -1192,6 +1301,7 @@ fn validate_documents_in(
             let set = &compiled[name];
             let mut violations = set.schema.validate(&document);
             violations.extend(check_requires(graph, key, &set.requires, &index));
+            violations.extend(check_asserts(graph, key, &set.asserts, &index));
             violations.extend(check_links(
                 graph, key, name, &set.links, full, &mut cache, &index,
             ));
@@ -1249,6 +1359,7 @@ fn compile_schemas(
                         schema,
                         links: extensions.links,
                         requires: extensions.requires,
+                        asserts: extensions.asserts,
                     },
                 );
             }
