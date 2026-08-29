@@ -82,6 +82,10 @@ pub struct Proposition {
     pub subject: String,
     pub predicate: String,
     pub object: String,
+    /// A literal qualifier — a quantity, a locus, a case — compared as part
+    /// of the terms; empty when absent.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub polarity: String,
 }
 
@@ -105,6 +109,7 @@ impl Proposition {
             subject: get("subject")?,
             predicate: get("predicate")?,
             object: get("object").unwrap_or_default(),
+            detail: get("detail").unwrap_or_default(),
             polarity: get("polarity").unwrap_or_else(|| "affirm".to_string()),
         })
     }
@@ -113,6 +118,7 @@ impl Proposition {
         self.subject == other.subject
             && self.predicate == other.predicate
             && self.object == other.object
+            && self.detail == other.detail
     }
 
     pub fn is_contrary_of(&self, other: &Proposition) -> bool {
@@ -125,7 +131,16 @@ impl Proposition {
             if self.polarity == "deny" { "¬(" } else { "(" },
             self.subject,
             self.predicate,
-            format!("{})", self.object).trim()
+            format!(
+                "{}{})",
+                self.object,
+                if self.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", self.detail)
+                }
+            )
+            .trim()
         )
     }
 }

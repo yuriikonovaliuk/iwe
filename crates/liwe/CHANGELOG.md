@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `argue`: `proposition.detail`, an optional literal qualifier compared as part of the terms.
 - `argue`: structured `proposition` on nodes, the contrariety check (a non-contrary rebuttal or undermining is not an attack), weakest-link `strength` with defeat separated from attack (`Attacker::defeats`), and `conclusions` — a proposition justified when any argument for it is in.
 - `argue`: `axiom` nodes (rest on nothing, cannot be attacked), the `## Denies` quote check on rebutting and undermining objections, and support-cycle warnings.
 - `argue`: a `particular` objection does not defeat a `generic` claim (reported as an exception warning); nodes carry `quantity`.
