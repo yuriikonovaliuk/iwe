@@ -125,6 +125,9 @@ Warnings are shapes the argument cannot resolve on its own:
 - `support cycle: A → B` — a chain of `Rests on` that returns to itself
   never reaches the floor; everything on it stays undecided;
 - `an axiom cannot be attacked: 'K'`;
+- `contrary of the axiom 'K' — cannot stand` — a claim whose proposition
+  is the contrary of an axiom's is out before the fixpoint runs (the
+  axioms are consistent and closed; nothing denying one is justified);
 - `circular ground: enters 'D' against 'T' and rests on the other side 'A'`
   — an objection against one side of a dispute whose premises include the
   other side. Two of these facing each other are a Nixon diamond: both

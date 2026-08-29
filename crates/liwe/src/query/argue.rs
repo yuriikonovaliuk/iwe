@@ -594,8 +594,44 @@ pub fn argue(graph: &Graph) -> Argument {
         }
     }
 
+    // A claim contrary to an axiom cannot stand: the axioms are the floor
+    // and are consistent, so nothing that denies one is justified
+    // (ASPIC+'s closure of K_n). Decided before the fixpoint, reported.
+    let mut contrary_of_axiom: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        if raws[i].kind == AXIOM_TYPE {
+            continue;
+        }
+        let Some(mine) = &raws[i].proposition else {
+            continue;
+        };
+        for (a, ax) in raws.iter().enumerate() {
+            if ax.kind != AXIOM_TYPE {
+                continue;
+            }
+            if let Some(theirs) = &ax.proposition {
+                if mine.is_contrary_of(theirs) {
+                    contrary_of_axiom[i] = Some(a);
+                    warnings.push(Warning {
+                        key: raws[i].key.to_string(),
+                        message: format!(
+                            "contrary of the axiom '{}' — cannot stand; the terms must change",
+                            ax.key
+                        ),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
     // Grounded fixpoint with deductive support.
     let mut status = vec![Status::Undecided; n];
+    for i in 0..n {
+        if contrary_of_axiom[i].is_some() {
+            status[i] = Status::Out;
+        }
+    }
     loop {
         let mut changed = false;
         for i in 0..n {
@@ -1319,7 +1355,13 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
             }
         }
         Status::Out => {
-            if let Some(a) = attackers
+            if attackers
+                .iter()
+                .all(|a| !(a.defeats && a.status == Status::In))
+                && premises.iter().all(|p| p.status != Status::Out)
+            {
+                "contrary of an axiom".to_string()
+            } else if let Some(a) = attackers
                 .iter()
                 .find(|a| a.defeats && a.status == Status::In)
             {

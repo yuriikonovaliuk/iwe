@@ -1173,3 +1173,29 @@ fn a_conclusion_is_justified_when_any_argument_for_it_is_in() {
     assert_eq!(c.arguments, vec!["1", "2"]);
     assert_eq!(c.proposition.render(), "( defect scales-with code)");
 }
+
+// 1: an axiom with a proposition.  2: a claim asserting its contrary.
+const CONTRARY_OF_AXIOM: &str = indoc! {"
+    ---
+    type: axiom
+    proposition: { subject: proposition, predicate: bears, object: contrary, polarity: deny }
+    ---
+    # Non-contradiction
+    _
+    ---
+    type: conjecture
+    proposition: { subject: proposition, predicate: bears, object: contrary, polarity: affirm }
+    ---
+    # Some contradictions are true
+"};
+
+#[test]
+fn a_claim_contrary_to_an_axiom_cannot_stand() {
+    let argument = run(CONTRARY_OF_AXIOM);
+    assert_statuses(&argument, &[("1", Status::In), ("2", Status::Out)]);
+    assert_eq!(argument.node("2").unwrap().because, "contrary of an axiom");
+    assert_eq!(
+        argument.warnings[0].message,
+        "contrary of the axiom '1' — cannot stand; the terms must change"
+    );
+}
