@@ -9,8 +9,10 @@ beliefs. It is a reading, not a gate: the command always exits 0.
 ## Nodes and edges
 
 - **Nodes** are the claim-bearing documents — `type` one of `fact`,
-  `pattern`, `model`, `stance`, `conjecture`, `hypothesis` — and every
-  `objection`.
+  `pattern`, `model`, `stance`, `conjecture`, `hypothesis` — every
+  `objection`, and every `axiom`. An axiom rests on nothing and cannot be
+  attacked: an objection against one is reported and ignored. It is the
+  floor a chain of support ends on.
 - **Attack edges** come from objections. An objection attacks the document
   linked in its `## Against` section. When its `kind` is `undermines` and it
   names a premise in `## Undermines`, the attack lands on that premise
@@ -85,6 +87,15 @@ Warnings are shapes the argument cannot resolve on its own:
   or objection` / `objection attacks nothing`;
 - `circular ground: rests on 'K', the claim it attacks` — an objection
   whose premises (transitively) include its own target;
+- `denies nothing in 'K': the quoted sentence is not in it` — a `rebuts`
+  or `undermines` objection with a `## Denies` section must quote a
+  sentence of its target (link and emphasis markup and whitespace are
+  ignored); an attack whose conclusion contradicts nothing its target
+  says is not an attack (the contrariness requirement of structured
+  argumentation);
+- `support cycle: A → B` — a chain of `Rests on` that returns to itself
+  never reaches the floor; everything on it stays undecided;
+- `an axiom cannot be attacked: 'K'`;
 - `circular ground: enters 'D' against 'T' and rests on the other side 'A'`
   — an objection against one side of a dispute whose premises include the
   other side. Two of these facing each other are a Nixon diamond: both

@@ -846,3 +846,153 @@ fn a_particular_is_an_exception_to_a_generic_but_refutes_a_universal() {
         "exception: a particular objection does not defeat the generic '1' — absorb it into the claim's scope and answer it"
     );
 }
+
+// 1: an axiom.  2: a fact resting on it.  3: an objection against the axiom.
+const AXIOM: &str = indoc! {"
+    ---
+    type: axiom
+    ---
+    # Non-contradiction
+
+    ## Statement
+
+    The same attribute cannot at the same time belong and not belong to the same subject in the same respect.
+    _
+    ---
+    type: fact
+    ---
+    # F
+
+    ## Rests on
+
+    - [A](1)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Contradictions are true
+
+    ## Against
+
+    - [A](1)
+"};
+
+#[test]
+fn an_axiom_stands_and_cannot_be_attacked() {
+    let argument = run(AXIOM);
+    assert_statuses(
+        &argument,
+        &[("1", Status::In), ("2", Status::In), ("3", Status::In)],
+    );
+    assert_eq!(argument.node("1").unwrap().kind, "axiom");
+    assert_eq!(
+        argument.warnings[0].message,
+        "an axiom cannot be attacked: '1' — its denial presupposes it"
+    );
+}
+
+// 1: a fact with two sentences.  2: an objection quoting one of them.
+// 3: an objection quoting a sentence that is not there.
+const DENIES: &str = indoc! {"
+    ---
+    type: fact
+    ---
+    # Defects scale with code
+
+    Defect density per [KLOC](9) is roughly *fixed*, so volume is a risk quantity by itself. Owning less code means fewer defects.
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Volume is not a risk quantity
+
+    ## Against
+
+    - [F](1)
+
+    ## Denies
+
+    > volume is a risk quantity by itself
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    ---
+    # Fewer lines is not less liability
+
+    ## Against
+
+    - [F](1)
+
+    ## Denies
+
+    > fewer lines is less liability
+"};
+
+#[test]
+fn a_rebuttal_must_quote_what_it_denies() {
+    let argument = run(DENIES);
+    let messages: Vec<&str> = argument
+        .warnings
+        .iter()
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        vec!["denies nothing in '1': the quoted sentence is not in it"]
+    );
+    assert_eq!(argument.warnings[0].key, "3");
+}
+
+// 1 rests on 2, 2 rests on 1; 3 rests on 1.
+const SUPPORT_CYCLE: &str = indoc! {"
+    ---
+    type: pattern
+    ---
+    # A
+
+    ## Rests on
+
+    - [B](2)
+    _
+    ---
+    type: pattern
+    ---
+    # B
+
+    ## Rests on
+
+    - [A](1)
+    _
+    ---
+    type: pattern
+    ---
+    # C
+
+    ## Rests on
+
+    - [A](1)
+"};
+
+#[test]
+fn a_support_cycle_is_a_warning_and_stays_undecided() {
+    let argument = run(SUPPORT_CYCLE);
+    assert_statuses(
+        &argument,
+        &[
+            ("1", Status::Undecided),
+            ("2", Status::Undecided),
+            ("3", Status::Undecided),
+        ],
+    );
+    assert_eq!(argument.warnings.len(), 1);
+    assert_eq!(
+        argument.warnings[0].message,
+        "support cycle: 1 → 2 — a chain of Rests on that returns to itself never reaches the floor"
+    );
+}

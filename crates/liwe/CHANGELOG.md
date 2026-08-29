@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `argue`: `axiom` nodes (rest on nothing, cannot be attacked), the `## Denies` quote check on rebutting and undermining objections, and support-cycle warnings.
 - `argue`: a `particular` objection does not defeat a `generic` claim (reported as an exception warning); nodes carry `quantity`.
 - `$standing` filter operator: the standing `argue` computes (`in`, `out`, `undecided`), usable in any filter; non-argued documents never match. `Filter::Standing(StandingOp)`.
 - `query::diagnose(&Argument) -> Diagnosis`: root cycles of mutual dependence among undecided nodes (Tarjan SCC) with the moves that break them, downstream nodes, defeated claims with reinstatement moves, hypotheses pending observation; `Diagnosis::select`, `render_diagnosis_text`.

@@ -32,6 +32,10 @@ pub const CLAIM_TYPES: [&str; 6] = [
     "hypothesis",
 ];
 
+/// An axiom is a node that rests on nothing and cannot be attacked: a
+/// proposition whose denial, made in argument, presupposes it.
+pub const AXIOM_TYPE: &str = "axiom";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -147,6 +151,37 @@ struct Raw {
     against: Vec<Key>,
     undermines: Vec<Key>,
     rests_on: Vec<Key>,
+    /// What a rebutting or undermining objection quotes from its target.
+    denies: Option<String>,
+}
+
+/// Collapse whitespace and strip link and emphasis markup, so a quoted
+/// sentence can be matched against rendered markdown.
+fn normalize(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {}
+            ']' => {
+                if chars.peek() == Some(&'(') {
+                    for d in chars.by_ref() {
+                        if d == ')' {
+                            break;
+                        }
+                    }
+                }
+            }
+            '*' | '_' | '`' | '>' | '"' | '“' | '”' => {}
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
 }
 
 fn field(graph: &Graph, key: &Key, name: &str) -> Option<String> {
@@ -187,7 +222,7 @@ pub fn argue(graph: &Graph) -> Argument {
             ));
             continue;
         }
-        let is_claim = CLAIM_TYPES.contains(&kind.as_str());
+        let is_claim = CLAIM_TYPES.contains(&kind.as_str()) || kind == AXIOM_TYPE;
         let is_objection = kind == "objection";
         if !is_claim && !is_objection {
             continue;
@@ -222,7 +257,22 @@ pub fn argue(graph: &Graph) -> Argument {
             } else {
                 Vec::new()
             },
-            rests_on: section_targets(&index, "Rests on"),
+            rests_on: if kind == AXIOM_TYPE {
+                Vec::new()
+            } else {
+                section_targets(&index, "Rests on")
+            },
+            denies: if is_objection {
+                let text = index.render_content(&BlockPredicate::empty().within_section("Denies"));
+                let text = normalize(&text);
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            } else {
+                None
+            },
         });
     }
 
@@ -274,6 +324,32 @@ pub fn argue(graph: &Graph) -> Argument {
             });
             continue;
         };
+        if raws[t].kind == AXIOM_TYPE {
+            warnings.push(Warning {
+                key: raw.key.to_string(),
+                message: format!(
+                    "an axiom cannot be attacked: '{}' — its denial presupposes it",
+                    raws[t].key
+                ),
+            });
+            continue;
+        }
+        // A rebutting or undermining objection denies a sentence of its
+        // target; the quote must be there.
+        if matches!(objection_kind.as_str(), "rebuts" | "undermines") {
+            if let Some(quote) = &raw.denies {
+                let body = normalize(&graph.to_markdown_skip_frontmatter(&raws[t].key));
+                if !body.contains(quote.as_str()) {
+                    warnings.push(Warning {
+                        key: raw.key.to_string(),
+                        message: format!(
+                            "denies nothing in '{}': the quoted sentence is not in it",
+                            raws[t].key
+                        ),
+                    });
+                }
+            }
+        }
         if raw.state.as_deref() == Some("answered") {
             continue;
         }
@@ -293,6 +369,34 @@ pub fn argue(graph: &Graph) -> Argument {
         }
         if t != i {
             attackers[t].push((i, objection_kind));
+        }
+    }
+
+    // Support cycles: a chain of Rests on that returns to itself never
+    // reaches the floor, and everything on it stays undecided.
+    for i in 0..n {
+        let closure = premise_closure(&premises, i);
+        if closure.contains(&i) {
+            let first_on_cycle = closure
+                .iter()
+                .filter(|j| **j < i && premise_closure(&premises, **j).contains(&i))
+                .count()
+                == 0;
+            if first_on_cycle {
+                let mut members: Vec<&str> = closure
+                    .iter()
+                    .filter(|j| premise_closure(&premises, **j).contains(&i))
+                    .map(|j| raws[*j].key.as_str())
+                    .collect();
+                members.sort_unstable();
+                warnings.push(Warning {
+                    key: raws[i].key.to_string(),
+                    message: format!(
+                        "support cycle: {} — a chain of Rests on that returns to itself never reaches the floor",
+                        members.join(" → ")
+                    ),
+                });
+            }
         }
     }
 
