@@ -98,6 +98,12 @@ pub struct Configuration {
     pub schemas: HashMap<String, SchemaBinding>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub invariants: HashMap<String, Invariant>,
+    /// External checkers, run by `iwe schema validate` on a whole-store
+    /// validation: any program that reads the selected keys as JSON on stdin
+    /// and writes reports as JSON on stdout. IWE assumes nothing about what
+    /// the program is.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub checkers: HashMap<String, Checker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
@@ -227,6 +233,24 @@ pub struct Invariant {
     pub description: Option<String>,
 }
 
+/// An external checker: `command` is run through the shell with
+/// `{ "root": "<store dir>", "keys": [...] }` on stdin and must print a JSON
+/// array of `{ "key": "...", "violations": [ { "message": "...", "hint":
+/// "...", "pointer": "..." } ] }`. A non-zero exit is itself a violation.
+/// `warn` reports without failing the run; `always` runs it on every
+/// whole-store validation rather than only with `--checkers`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Checker {
+    pub command: String,
+    #[serde(default)]
+    pub warn: bool,
+    #[serde(default)]
+    pub always: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 impl Default for Configuration {
     fn default() -> Self {
         Self {
@@ -242,6 +266,7 @@ impl Default for Configuration {
             templates: Default::default(),
             schemas: Default::default(),
             invariants: Default::default(),
+            checkers: Default::default(),
         }
     }
 }
@@ -763,7 +788,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `commands`, `actions`, `templates`, `schemas`, `invariants`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
             "#}
         );
     }

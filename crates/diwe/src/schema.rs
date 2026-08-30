@@ -1223,6 +1223,142 @@ pub fn explain_documents_against_file(
     Ok(out)
 }
 
+/// Reports from the external checkers, split into those that fail the run
+/// and those configured to warn only.
+pub struct CheckerReports {
+    pub failing: Vec<KeyReport>,
+    pub warnings: Vec<KeyReport>,
+}
+
+/// Run the configured external checkers over `keys`. With `all` false only
+/// the `always` checkers run. Each checker's output is parsed into reports
+/// under `schema: "checker:<name>"`; a checker that exits non-zero or prints
+/// something other than the expected JSON produces one report under the
+/// synthetic key `checkers/<name>`.
+pub fn run_checkers(
+    config: &Configuration,
+    root: &std::path::Path,
+    keys: &[Key],
+    all: bool,
+) -> CheckerReports {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[derive(serde::Deserialize)]
+    struct RawViolation {
+        message: String,
+        #[serde(default)]
+        hint: Option<String>,
+        #[serde(default)]
+        pointer: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawReport {
+        key: String,
+        violations: Vec<RawViolation>,
+    }
+
+    let mut out = CheckerReports {
+        failing: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut names: Vec<&String> = config.checkers.keys().collect();
+    names.sort();
+    for name in names {
+        let checker = &config.checkers[name];
+        if !all && !checker.always {
+            continue;
+        }
+        let input = serde_json::json!({
+            "root": root.to_string_lossy(),
+            "keys": keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+        });
+        let failure = |message: String| KeyReport {
+            key: Key::name(&format!("checkers/{name}")),
+            schema: format!("checker:{name}"),
+            violations: vec![Violation {
+                breadcrumb: Vec::new(),
+                message,
+                hint: checker.description.clone(),
+                schema_pointer: format!("/checkers/{name}"),
+                keyword: "checker".to_string(),
+            }],
+        };
+        let mut child = match Command::new("sh")
+            .arg("-c")
+            .arg(&checker.command)
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                out.failing
+                    .push(failure(format!("checker could not start: {error}")));
+                continue;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.to_string().as_bytes());
+        }
+        let output = match child.wait_with_output() {
+            Ok(output) => output,
+            Err(error) => {
+                out.failing
+                    .push(failure(format!("checker failed: {error}")));
+                continue;
+            }
+        };
+        let target = if checker.warn {
+            &mut out.warnings
+        } else {
+            &mut out.failing
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            target.push(failure(format!(
+                "checker exited with {}: {}",
+                output.status,
+                stderr.trim()
+            )));
+            continue;
+        }
+        let parsed: Result<Vec<RawReport>, _> = serde_json::from_slice(&output.stdout);
+        match parsed {
+            Ok(reports) => {
+                for report in reports {
+                    if report.violations.is_empty() {
+                        continue;
+                    }
+                    target.push(KeyReport {
+                        key: Key::name(&report.key),
+                        schema: format!("checker:{name}"),
+                        violations: report
+                            .violations
+                            .into_iter()
+                            .map(|v| Violation {
+                                breadcrumb: Vec::new(),
+                                message: v.message,
+                                hint: v.hint,
+                                schema_pointer: v
+                                    .pointer
+                                    .unwrap_or_else(|| format!("/checkers/{name}")),
+                                keyword: "checker".to_string(),
+                            })
+                            .collect(),
+                    });
+                }
+            }
+            Err(error) => target.push(failure(format!(
+                "checker printed something other than a JSON array of reports: {error}"
+            ))),
+        }
+    }
+    out
+}
+
 pub fn render_reports_text(reports: &[KeyReport]) -> String {
     let mut out = String::new();
     for report in reports {

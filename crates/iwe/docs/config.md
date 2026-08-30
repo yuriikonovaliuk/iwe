@@ -319,6 +319,29 @@ expect = 0
 description = "a defeated stance is revised or demoted, not kept"
 ```
 
+## `[checkers]`
+
+External checkers: any program that reads the selected document keys as
+JSON on stdin and prints reports as JSON on stdout. IWE assumes nothing
+about what the program is — a script, a linter, a model behind a script —
+and its output merges with the schema's reports.
+
+```toml
+[checkers.terms]
+command = "python3 scripts/checkers/terms.py"
+warn = true        # report, but do not fail the run
+always = false     # false: runs only with `iwe schema validate --checkers`
+description = "every noun phrase in a claim names a concept"
+```
+
+Contract: stdin `{ "root": "<store dir>", "keys": ["a/b", …] }`; stdout a
+JSON array of `{ "key": "a/b", "violations": [ { "message": "…", "hint":
+"…", "pointer": "…" } ] }`. Reports appear under `schema: "checker:<name>"`
+with keyword `checker`; a non-zero exit or malformed output is one report
+under `checkers/<name>`. Checkers run only on a whole-store validation,
+never on a selection. `warn` checkers print to stderr prefixed `warning:`
+and leave the exit code alone.
+
 A filter may use `$standing` — the standing `iwe argue` computes — so an
 invariant can hold the graph to what the argument shows, not only to what
 the frontmatter says.

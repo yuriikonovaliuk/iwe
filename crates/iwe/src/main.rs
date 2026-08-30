@@ -983,6 +983,12 @@ struct SchemaValidate {
     )]
     explain: bool,
 
+    #[clap(
+        long,
+        help = "Also run the external checkers configured under [checkers] that are not always-on (whole-store validation only)"
+    )]
+    checkers: bool,
+
     #[clap(flatten)]
     selector: FilterArgs,
 }
@@ -2990,6 +2996,7 @@ fn schema_validate_command(args: SchemaValidate) {
     }
 
     let mut reports = run.reports;
+    let mut checker_warnings = Vec::new();
     if whole_graph {
         match diwe::schema::check_invariants(&config, &graph) {
             Ok(failed) => reports.extend(failed),
@@ -2998,6 +3005,26 @@ fn schema_validate_command(args: SchemaValidate) {
                     eprintln!("error: {}", error);
                 }
                 std::process::exit(2);
+            }
+        }
+        if !config.checkers.is_empty() {
+            let root = get_library_path(&config);
+            let checked = diwe::schema::run_checkers(&config, &root, &keys, args.checkers);
+            reports.extend(checked.failing);
+            checker_warnings = checked.warnings;
+        }
+    }
+    if !checker_warnings.is_empty() {
+        match args.format {
+            ValidateFormat::Text => {
+                for line in render_reports_text(&checker_warnings).lines() {
+                    eprintln!("warning: {line}");
+                }
+            }
+            ValidateFormat::Json => {
+                let json = serde_json::to_string_pretty(&checker_warnings)
+                    .expect("Failed to serialize reports");
+                eprintln!("{json}");
             }
         }
     }

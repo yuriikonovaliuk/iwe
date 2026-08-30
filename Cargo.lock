@@ -726,6 +726,7 @@ dependencies = [
  "rayon",
  "relative-path",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "tiktoken-rs",

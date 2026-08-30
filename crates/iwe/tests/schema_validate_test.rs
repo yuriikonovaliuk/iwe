@@ -1419,3 +1419,94 @@ fn asserts_compare_a_documents_own_fields() {
     expect("disputes/backwards: assertion fails: { stale_after: { $gt: $this.frontmatter.opened_at } }");
     expect("  hint: a dispute goes stale after it opens, not before");
 }
+
+// ---- external checkers ----
+
+fn write_config_with_checkers(
+    path: &std::path::Path,
+    checkers: HashMap<String, diwe::config::Checker>,
+) {
+    let config = Configuration {
+        library: LibraryOptions {
+            path: "".to_string(),
+            ..Default::default()
+        },
+        markdown: MarkdownOptions {
+            refs_extension: "".to_string(),
+            ..Default::default()
+        },
+        schemas: binding("fact", "facts/**"),
+        checkers,
+        ..Default::default()
+    };
+    write(
+        path.join(".iwe/config.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn external_checkers_merge_their_reports_and_warn_mode_does_not_fail() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("facts")).unwrap();
+    write(
+        temp_path.join(".iwe/schemas/fact.yaml"),
+        "frontmatter:\n  type: object\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("facts/a.md"),
+        "---\ntype: fact\n---\n\n# A\n",
+    )
+    .unwrap();
+    // A checker that echoes the keys it was given as violations.
+    write(
+        temp_path.join("checker.sh"),
+        "#!/bin/sh\ncat > in.json\ngrep -q '\"facts/a\"' in.json || exit 3\necho '[{\"key\":\"facts/a\",\"violations\":[{\"message\":\"term X is undefined\",\"hint\":\"define it\"}]}]'\n",
+    )
+    .unwrap();
+    let mut checkers = HashMap::new();
+    checkers.insert(
+        "terms".to_string(),
+        diwe::config::Checker {
+            command: "sh checker.sh".to_string(),
+            warn: false,
+            always: true,
+            description: None,
+        },
+    );
+    write_config_with_checkers(temp_path, checkers.clone());
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("facts/a: term X is undefined"), "{stdout}");
+    assert!(stdout.contains("  hint: define it"), "{stdout}");
+
+    // Warn mode: reported on stderr, exit 0.
+    checkers.get_mut("terms").unwrap().warn = true;
+    write_config_with_checkers(temp_path, checkers.clone());
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("warning: facts/a: term X is undefined"),
+        "{stderr}"
+    );
+
+    // Not always-on: silent without --checkers, run with it.
+    checkers.get_mut("terms").unwrap().always = false;
+    write_config_with_checkers(temp_path, checkers.clone());
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    let output = run_validate(&temp_dir, &["--checkers"]);
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("warning: facts/a"));
+
+    // A selection never runs checkers.
+    let output = run_validate(&temp_dir, &["--checkers", "-k", "facts/a"]);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
