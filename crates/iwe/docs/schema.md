@@ -512,6 +512,13 @@ a list), so a target can be required to agree or disagree with the
 document on a field — `proposition.polarity: { $ne:
 $this.frontmatter.proposition.polarity }` is the contrariety rule.
 
+`covers:` — a filter carrying a `$this.frontmatter.<path>` anchor that
+names a *list* (a dotted path descends into each element of a list of
+mappings, so `proposition.qualifiers.term` is every qualifier's term). For
+every value of that list there must be a link in scope whose key is that
+value and which satisfies the rest of the filter. Where `some:` asks for
+one, `covers:` asks for all.
+
 A `links` rule may carry `when:` — a filter over the document itself; the
 rule applies only to documents that satisfy it, so a rule can be
 conditioned on the document's own frontmatter (its `kind`, `quantity`,

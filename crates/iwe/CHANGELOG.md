@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `iwe schema validate --checkers`: run the external checkers configured under `[checkers]` (`iwe docs config`); `always = true` checkers run on every whole-store validation, `warn = true` ones report without failing.
+- `covers:` on `links` rules and `proposition.qualifiers` in `argue` (`iwe docs schema` §11, `iwe docs argue`).
 - `asserts` rules in schemas: a document must satisfy a filter over its own fields (`iwe docs schema` §12).
 - `iwe argue`: propositions and the contrariety check, strength ordering (attack ≠ defeat), conclusions; `$this.frontmatter.<path>` in schema `links` rules (`iwe docs argue`, `iwe docs schema` §11).
 - `iwe argue` knows `axiom` documents, checks that a rebutting or undermining objection's `## Denies` quotes its target, and warns on support cycles (`iwe docs argue`).

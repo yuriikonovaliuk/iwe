@@ -1199,3 +1199,71 @@ fn a_claim_contrary_to_an_axiom_cannot_stand() {
         "contrary of the axiom '1' — cannot stand; the terms must change"
     );
 }
+
+// Qualifiers are part of the terms: same qualifiers → contrary; different → not.
+const QUALIFIERS: &str = indoc! {"
+    ---
+    type: fact
+    proposition:
+      subject: rewrite
+      predicate: produces
+      object: release
+      detail: \"\"
+      qualifiers:
+        - { relation: located-in, term: netscape }
+        - { measure: { value: 3, unit: year } }
+    ---
+    # Netscape shipped nothing for three years
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    proposition:
+      subject: rewrite
+      predicate: produces
+      object: release
+      detail: \"\"
+      qualifiers:
+        - { measure: { value: 3, unit: year } }
+        - { relation: located-in, term: Netscape }
+      polarity: deny
+    ---
+    # It shipped
+
+    ## Against
+
+    - [F](1)
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    proposition:
+      subject: rewrite
+      predicate: produces
+      object: release
+      detail: \"\"
+      qualifiers:
+        - { relation: located-in, term: mozilla }
+      polarity: deny
+    ---
+    # About something else
+
+    ## Against
+
+    - [F](1)
+"};
+
+#[test]
+fn qualifiers_count_as_terms_regardless_of_order() {
+    let argument = run(QUALIFIERS);
+    let f = argument.node("1").unwrap();
+    let keys: Vec<&str> = f.attackers.iter().map(|a| a.key.as_str()).collect();
+    assert_eq!(keys, vec!["2"]);
+    assert_eq!(
+        f.proposition.as_ref().unwrap().qualifiers,
+        vec!["located-in=netscape", "measure=3 year"]
+    );
+    assert!(argument.warnings[0].message.starts_with("not an attack:"));
+}

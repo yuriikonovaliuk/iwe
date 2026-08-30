@@ -123,6 +123,10 @@ pub struct LinkRule {
     some: Option<Filter>,
     target_this: Option<Value>,
     some_this: Option<Value>,
+    /// `covers`: a filter with a `$this.frontmatter.<path>` list anchor; for
+    /// every value of that list there must be a link (in scope) whose key is
+    /// that value and which satisfies the rest of the filter.
+    covers: Option<(Value, String)>,
     reach: Option<Key>,
     description: Option<String>,
 }
@@ -453,6 +457,7 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
         some: None,
         target_this: None,
         some_this: None,
+        covers: None,
         reach: None,
         description: None,
     };
@@ -499,6 +504,16 @@ fn parse_link_rule(entry: &serde_yaml::Value) -> Result<LinkRule, String> {
                     rule.some =
                         Some(build_filter_value(value).map_err(|error| format!("some: {error}"))?);
                 }
+            }
+            "covers" => {
+                if !value.is_mapping() {
+                    return Err("covers: expected a filter mapping".into());
+                }
+                if !contains_this(value) {
+                    return Err("covers: expected a $this.frontmatter.<path> anchor".into());
+                }
+                check_this_filter(value, "covers")?;
+                rule.covers = Some((value.clone(), flow(value)));
             }
             "reach" => {
                 rule.reach = Some(Key::name(
@@ -664,6 +679,24 @@ fn substitute_this(
     }
 }
 
+/// The `$this.frontmatter.<path>` anchors inside a filter value, as paths.
+fn collect_frontmatter_anchors(value: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match value {
+        Value::String(s) if s.starts_with(THIS_FRONTMATTER_PREFIX) => {
+            out.push(s[THIS_FRONTMATTER_PREFIX.len()..].to_string())
+        }
+        Value::Sequence(items) => items
+            .iter()
+            .for_each(|v| out.extend(collect_frontmatter_anchors(v))),
+        Value::Mapping(map) => map
+            .iter()
+            .for_each(|(_, v)| out.extend(collect_frontmatter_anchors(v))),
+        _ => {}
+    }
+    out
+}
+
 /// The values at a dotted path in a document's frontmatter, as strings: a
 /// scalar gives one, a sequence of scalars gives each, anything else none.
 fn frontmatter_values(graph: &Graph, key: &Key, path: &str) -> Vec<String> {
@@ -677,6 +710,16 @@ fn frontmatter_values(graph: &Graph, key: &Key, path: &str) -> Vec<String> {
                 Some(v) => v.clone(),
                 None => return Vec::new(),
             },
+            // A list of mappings: the field of each element.
+            Value::Sequence(items) => Value::Sequence(
+                items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Mapping(map) => map.get(Value::String(segment.to_string())).cloned(),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
             _ => return Vec::new(),
         };
     }
@@ -825,6 +868,34 @@ fn check_links(
         if let Some(allowed) = some_allowed {
             if !targets.iter().any(|t| allowed.contains(t)) {
                 report(format!("no link{where_} satisfies the 'some' filter"));
+            }
+        }
+        if let Some((raw, text)) = &rule.covers {
+            // Every value of the anchored list must be a link target in scope
+            // that satisfies the filter.
+            let anchors: Vec<String> = collect_frontmatter_anchors(raw);
+            let mut wanted: Vec<String> = Vec::new();
+            for path in &anchors {
+                wanted.extend(frontmatter_values(graph, key, path));
+            }
+            wanted.sort();
+            wanted.dedup();
+            match this_filter_set(raw, key, index, &targets, graph) {
+                Ok(satisfied) => {
+                    for value in wanted {
+                        let k = Key::name(&value);
+                        if !targets.contains(&k) {
+                            report(format!(
+                                "'{value}' is named in the frontmatter but not linked{where_} ({text})"
+                            ));
+                        } else if !satisfied.contains(&k) {
+                            report(format!(
+                                "link to '{value}'{where_} does not satisfy the covers filter ({text})"
+                            ));
+                        }
+                    }
+                }
+                Err(error) => report(format!("covers filter cannot be resolved: {error}")),
             }
         }
         if let Some(reach) = &rule.reach {

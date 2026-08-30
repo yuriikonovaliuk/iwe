@@ -1510,3 +1510,75 @@ fn external_checkers_merge_their_reports_and_warn_mode_does_not_fail() {
     let output = run_validate(&temp_dir, &["--checkers", "-k", "facts/a"]);
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
+
+// ---- covers: every value of a frontmatter list must be a satisfying link ----
+
+#[test]
+fn covers_requires_a_link_for_every_listed_value() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("facts")).unwrap();
+    create_dir_all(temp_path.join("concepts")).unwrap();
+    write_config_with_invariants(temp_path, binding("fact", "facts/**"), HashMap::new());
+    write(
+        temp_path.join(".iwe/schemas/fact.yaml"),
+        indoc! {"
+            frontmatter:
+              type: object
+              properties:
+                type: { const: fact }
+            links:
+              - covers: { type: concept, $key: $this.frontmatter.proposition.qualifiers.term }
+                description: every qualifier term is a concept the document links
+        "},
+    )
+    .unwrap();
+    for c in ["a", "b"] {
+        write(
+            temp_path.join(format!("concepts/{c}.md")),
+            format!("---\ntype: concept\n---\n\n# {c}\n"),
+        )
+        .unwrap();
+    }
+    write(
+        temp_path.join("concepts/notion.md"),
+        "---\ntype: notion\n---\n\n# n\n",
+    )
+    .unwrap();
+    let fact = |name: &str, terms: &[&str], links: &[&str]| {
+        let quals: String = terms
+            .iter()
+            .map(|t| format!("    - {{ relation: r, term: concepts/{t} }}\n"))
+            .collect();
+        let body: String = links
+            .iter()
+            .map(|l| format!("- [x](../concepts/{l})\n"))
+            .collect();
+        write(
+            temp_path.join(format!("facts/{name}.md")),
+            format!("---\ntype: fact\nproposition:\n  qualifiers:\n{quals}---\n\n# {name}\n\n## Rests on\n\n{body}"),
+        )
+        .unwrap();
+    };
+    fact("complete", &["a", "b"], &["a", "b"]);
+    fact("missing-link", &["a", "b"], &["a"]);
+    fact("wrong-type", &["notion"], &["notion"]);
+    fact("no-qualifiers", &[], &[]);
+    let output = run_validate(
+        &temp_dir,
+        &["-k", "facts/complete", "-k", "facts/no-qualifiers"],
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_eq!(output.status.code(), Some(0));
+    let output = run_validate(
+        &temp_dir,
+        &["-k", "facts/missing-link", "-k", "facts/wrong-type"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let expect = |line: &str| assert!(stdout.contains(line), "missing {line:?} in:\n{stdout}");
+    expect("facts/missing-link: 'concepts/b' is named in the frontmatter but not linked");
+    expect("facts/wrong-type: link to 'concepts/notion' does not satisfy the covers filter");
+    expect("  hint: every qualifier term is a concept the document links");
+}

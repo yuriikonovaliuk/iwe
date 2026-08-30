@@ -42,8 +42,10 @@ before.
 
 A claim or objection may carry a structured **proposition** in its
 frontmatter — `proposition: { subject, predicate, object, detail, polarity }`,
-polarity `affirm` (default) or `deny`, `detail` an optional literal qualifier
-(a quantity, a locus, a case) that counts as part of the terms; all compared
+polarity `affirm` (default) or `deny`, `detail` an optional literal qualifier, and
+`qualifiers` an optional list of `{ relation, term }` pairs and
+`{ measure: { value, unit } }` entries — normalised, sorted, and part of
+the terms like `detail`; all compared
 case-insensitively. When
 both a rebutting or undermining objection and its target carry one, the
 attack counts only if the objection's proposition is a *contrary* of the

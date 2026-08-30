@@ -86,6 +86,10 @@ pub struct Proposition {
     /// of the terms; empty when absent.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub detail: String,
+    /// Structured qualifiers — `relation=term` pairs and `measure=value unit`
+    /// — normalised and sorted; part of the terms like `detail`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub qualifiers: Vec<String>,
     pub polarity: String,
 }
 
@@ -105,11 +109,52 @@ impl Proposition {
                 })
                 .map(|s| s.trim().to_lowercase())
         };
+        let mut qualifiers: Vec<String> = Vec::new();
+        if let Some(serde_yaml::Value::Sequence(items)) =
+            map.get(serde_yaml::Value::String("qualifiers".to_string()))
+        {
+            for item in items {
+                let Some(q) = item.as_mapping() else {
+                    continue;
+                };
+                let text = |name: &str| -> Option<String> {
+                    q.get(serde_yaml::Value::String(name.to_string()))
+                        .and_then(|v| match v {
+                            serde_yaml::Value::String(s) => Some(s.clone()),
+                            serde_yaml::Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        })
+                        .map(|s| s.trim().to_lowercase())
+                };
+                if let (Some(relation), Some(term)) = (text("relation"), text("term")) {
+                    qualifiers.push(format!("{relation}={term}"));
+                } else if let Some(serde_yaml::Value::Mapping(m)) =
+                    q.get(serde_yaml::Value::String("measure".to_string()))
+                {
+                    let value = m
+                        .get(serde_yaml::Value::String("value".to_string()))
+                        .map(|v| match v {
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            serde_yaml::Value::String(s) => s.clone(),
+                            _ => String::new(),
+                        })
+                        .unwrap_or_default();
+                    let unit = m
+                        .get(serde_yaml::Value::String("unit".to_string()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    qualifiers.push(format!("measure={value} {unit}").trim().to_string());
+                }
+            }
+        }
+        qualifiers.sort();
         Some(Proposition {
             subject: get("subject")?,
             predicate: get("predicate")?,
             object: get("object").unwrap_or_default(),
             detail: get("detail").unwrap_or_default(),
+            qualifiers,
             polarity: get("polarity").unwrap_or_else(|| "affirm".to_string()),
         })
     }
@@ -119,6 +164,7 @@ impl Proposition {
             && self.predicate == other.predicate
             && self.object == other.object
             && self.detail == other.detail
+            && self.qualifiers == other.qualifiers
     }
 
     pub fn is_contrary_of(&self, other: &Proposition) -> bool {
@@ -132,12 +178,17 @@ impl Proposition {
             self.subject,
             self.predicate,
             format!(
-                "{}{})",
+                "{}{}{})",
                 self.object,
                 if self.detail.is_empty() {
                     String::new()
                 } else {
                     format!(" [{}]", self.detail)
+                },
+                if self.qualifiers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", self.qualifiers.join("; "))
                 }
             )
             .trim()

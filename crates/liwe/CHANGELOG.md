@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `argue`: a claim whose proposition is the contrary of an axiom's is out, and reported.
+- `argue`: `proposition.qualifiers` — `{ relation, term }` pairs and `{ measure: { value, unit } }`, normalised and compared as terms.
 - `argue`: `proposition.detail`, an optional literal qualifier compared as part of the terms.
 - `argue`: structured `proposition` on nodes, the contrariety check (a non-contrary rebuttal or undermining is not an attack), weakest-link `strength` with defeat separated from attack (`Attacker::defeats`), and `conclusions` — a proposition justified when any argument for it is in.
 - `argue`: `axiom` nodes (rest on nothing, cannot be attacked), the `## Denies` quote check on rebutting and undermining objections, and support-cycle warnings.
