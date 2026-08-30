@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `maxTokens` budgets (document and section) count links as their label only — link targets no longer consume a document's token budget, so a budget does not depend on folder depth.
+
 ### Added
 
 - `iwe schema validate --checkers`: run the external checkers configured under `[checkers]` (`iwe docs config`); `always = true` checkers run on every whole-store validation, `warn = true` ones report without failing.

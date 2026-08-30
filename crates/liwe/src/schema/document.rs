@@ -7,7 +7,18 @@ use crate::graph::{Graph, GraphContext};
 use crate::model::node::{Node, NodeIter, NodePointer};
 use crate::model::{Key, NodeId};
 
-pub fn build_document(graph: &Graph, key: &Key, count: impl Fn(&str) -> usize + Copy) -> Document {
+/// Token budgets bound prose, not link targets: `[label](path)` counts as `label`.
+/// Links are the graph's edges and their paths vary with folder depth; charging
+/// them to `maxTokens` would make a document's budget depend on where it lives.
+pub fn prose_for_counting(text: &str) -> String {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    LINK.get_or_init(|| regex::Regex::new(r"\[([^\]]*)\]\([^)]*\)").expect("link regex"))
+        .replace_all(text, "$1")
+        .into_owned()
+}
+
+pub fn build_document(graph: &Graph, key: &Key, count_raw: impl Fn(&str) -> usize + Copy) -> Document {
+    let count = move |text: &str| count_raw(&prose_for_counting(text));
     let frontmatter = graph
         .frontmatter(key)
         .map(yaml_mapping_to_object)
@@ -539,5 +550,21 @@ frontmatter:
         let document = build_document(&graph, &Key::name("doc"), |_| 0);
         let violations = compile_schema(schema).unwrap().validate(&document);
         assert_eq!(violations, vec![]);
+    }
+}
+
+#[cfg(test)]
+mod prose_tests {
+    use super::prose_for_counting;
+
+    #[test]
+    fn link_targets_are_not_counted() {
+        let text = "Rests on [Tool](../../world/crew/concepts/tool.md) and [Token](../../../engineering/concepts/token.md).";
+        assert_eq!(prose_for_counting(text), "Rests on Tool and Token.");
+    }
+
+    #[test]
+    fn plain_text_is_unchanged() {
+        assert_eq!(prose_for_counting("no links [here] (or here)"), "no links [here] (or here)");
     }
 }

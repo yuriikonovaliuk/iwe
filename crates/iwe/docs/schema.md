@@ -93,7 +93,7 @@ The top level of a schema file:
 | `$schema`            | string                         | optional dialect id                                                     |
 | `description`        | string                         | default hint for document-level violations                              |
 | `frontmatter`        | JSON Schema                    | validates the frontmatter mapping                                       |
-| `maxTokens`          | integer                        | budget for the whole rendered body                                      |
+| `maxTokens`          | integer                        | budget for the whole rendered body; links count as their label only, never their target |
 | `maxDepth`           | integer                        | maximum heading nesting (`3` allows `###`, forbids `####`)              |
 | `allSections`        | reduced section schema (§6)    | applies to every section at every depth                                 |
 | `sections`           | array of section schemas       | ordered shapes for the top-level sections                               |
