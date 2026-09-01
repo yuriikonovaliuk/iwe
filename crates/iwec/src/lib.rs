@@ -2048,12 +2048,14 @@ impl IweServer {
                 key,
                 content,
                 prior_content.as_deref(),
+                diwe::permissions::WriteOperation::Write,
             ),
             None => diwe::permissions::check_write_permission_for_content(
                 &self.config,
                 key,
                 content,
                 prior_content.as_deref(),
+                diwe::permissions::WriteOperation::Write,
             ),
         };
         result.map_err(|rejected| rejected.to_string())
@@ -2176,11 +2178,15 @@ impl IweServer {
                 changes,
                 base_path,
                 self.config.format,
-                |key, content, prior_content| {
+                |key, content, prior_content, operation| {
                     // Same `project_path`-rooted resolution as
                     // `enforce_write_permission` above. `prior_content` is
                     // supplied by `apply_changes_with` itself, read from
                     // disk immediately before this document's write.
+                    // `operation` is `apply_changes_with`'s own explicit
+                    // M4/R1 signal (`WriteOperation::Delete` for
+                    // `changes.removes`, `::Write` otherwise) — forwarded
+                    // as-is, never re-inferred here.
                     match &self.project_path {
                         Some(root) => diwe::permissions::check_write_permission_for_content_in(
                             &self.config,
@@ -2188,12 +2194,14 @@ impl IweServer {
                             key,
                             content,
                             prior_content,
+                            operation,
                         ),
                         None => diwe::permissions::check_write_permission_for_content(
                             &self.config,
                             key,
                             content,
                             prior_content,
+                            operation,
                         ),
                     }
                 },

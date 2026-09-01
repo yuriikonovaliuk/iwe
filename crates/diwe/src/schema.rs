@@ -156,6 +156,7 @@ pub struct CompiledSchemaSet {
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
     pub mutable: Vec<MutabilityRule>,
+    pub deletable: Option<bool>,
 }
 
 /// One entry of a schema's `mutable` mapping (EXT-PER-PROPERTY-MUTABILITY,
@@ -186,6 +187,30 @@ pub struct MutabilityRule {
     pub mutable: bool,
 }
 
+/// A schema's `deletable` keyword (M4/R1, LAW-16's carrier — see
+/// `m2/design-deletion-carrier`): whether the *whole document* may be
+/// removed. Deliberately its own top-level keyword, not folded into
+/// `mutable:` — `mutable:` is a per-property construct about what a write
+/// may change on a document that continues to exist, while `deletable`
+/// governs a document ceasing to exist entirely, a distinct operation
+/// (`diwe::permissions::WriteOperation::Delete`) with its own lifetime: the
+/// two must be independently declarable, independently evaluated, and one
+/// must not stand or fall on the other (`m2/design-deletion-carrier`:
+/// "Incidental rejection is not the carrier ... it couples two laws whose
+/// lifetimes differ").
+///
+/// ```yaml
+/// deletable: false
+/// ```
+///
+/// Absent keyword: no rule, deletable by default (mirrors `mutable:`'s AB9
+/// default-mutable guarantee — a construct a document's schema never
+/// mentions restricts nothing). Represented as a plain `Option<bool>`
+/// throughout this crate (parsed by [`parse_deletable_rule`], read back by
+/// [`schema_deletable_rule`]): `None` for "no rule", `Some(false)` for
+/// "delete is rejected", `Some(true)` for an explicit (if redundant)
+/// "delete is allowed".
+
 /// One entry of a schema's `asserts` list — a condition the document itself
 /// must satisfy, written as a filter that may compare the document's own
 /// fields through `$this.frontmatter.<path>` (`stale_after: { $gt:
@@ -205,6 +230,7 @@ pub struct SchemaExtensions {
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
     pub mutable: Vec<MutabilityRule>,
+    pub deletable: Option<bool>,
 }
 
 /// Split a schema source into the part the document validator understands
@@ -216,7 +242,8 @@ pub fn split_links(source: &str) -> Result<(String, Vec<LinkRule>), Vec<String>>
 }
 
 /// Split a schema source into the document-schema part and IWE's own
-/// top-level keywords: `links`, `requires`, `asserts`, and `mutable`.
+/// top-level keywords: `links`, `requires`, `asserts`, `mutable`, and
+/// `deletable`.
 pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
     let passthrough = || SchemaExtensions {
         source: source.to_string(),
@@ -224,6 +251,7 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         requires: Vec::new(),
         asserts: Vec::new(),
         mutable: Vec::new(),
+        deletable: None,
     };
     let mut value: Value = match serde_yaml::from_str(source) {
         Ok(value) => value,
@@ -237,7 +265,13 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
     let requires = mapping.remove(Value::String("requires".to_string()));
     let asserts = mapping.remove(Value::String("asserts".to_string()));
     let mutable = mapping.remove(Value::String("mutable".to_string()));
-    if links.is_none() && requires.is_none() && asserts.is_none() && mutable.is_none() {
+    let deletable = mapping.remove(Value::String("deletable".to_string()));
+    if links.is_none()
+        && requires.is_none()
+        && asserts.is_none()
+        && mutable.is_none()
+        && deletable.is_none()
+    {
         return Ok(passthrough());
     }
     let mut errors = Vec::new();
@@ -269,6 +303,16 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         }),
         None => Vec::new(),
     };
+    let deletable = match deletable {
+        Some(deletable) => match parse_deletable_rule(&deletable) {
+            Ok(rule) => Some(rule),
+            Err(e) => {
+                errors.extend(e);
+                None
+            }
+        },
+        None => None,
+    };
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -280,6 +324,7 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         requires,
         asserts,
         mutable,
+        deletable,
     })
 }
 
@@ -346,6 +391,34 @@ pub fn schema_mutability_rules(dir: &Path, name: &str) -> Vec<MutabilityRule> {
     split_extensions(&source)
         .map(|extensions| extensions.mutable)
         .unwrap_or_default()
+}
+
+/// Parses a schema's `deletable` keyword (M4/R1, LAW-16's carrier): a plain
+/// boolean, unlike `mutable:`'s per-property mapping, since deletion is a
+/// whole-document operation with no property to select.
+///
+/// ```yaml
+/// deletable: false
+/// ```
+fn parse_deletable_rule(value: &Value) -> Result<bool, Vec<String>> {
+    value
+        .as_bool()
+        .ok_or_else(|| vec!["deletable: expected true or false".to_string()])
+}
+
+/// Loads just schema `name`'s `deletable` rule from
+/// `.iwe/schemas/<name>.yaml` under `dir`, for write-permission evaluation
+/// (`diwe::permissions::check_write_permission_with_mutability`) — the exact
+/// same read-just-this-one-keyword shape as [`schema_mutability_rules`], and
+/// for the same reason: a write-permission check must not fail because of an
+/// unrelated document-schema compile error elsewhere in the same file. A
+/// missing file, unparsable YAML, or a malformed `deletable` keyword all
+/// resolve to `None` ("no rule", deletable by default) rather than blocking
+/// writes on a schema problem unrelated to deletion.
+pub fn schema_deletable_rule(dir: &Path, name: &str) -> Option<bool> {
+    let path = dir.join(format!("{name}.yaml"));
+    let source = read_to_string(&path).ok()?;
+    split_extensions(&source).ok()?.deletable
 }
 
 fn parse_assert_rules(value: &Value) -> Result<Vec<AssertRule>, Vec<String>> {
@@ -1737,6 +1810,7 @@ fn compile_schemas(
                         requires: extensions.requires,
                         asserts: extensions.asserts,
                         mutable: extensions.mutable,
+                        deletable: extensions.deletable,
                     },
                 );
             }
@@ -2761,5 +2835,93 @@ mutable:
         let dir = temp.path().join(".iwe").join("schemas");
 
         assert!(schema_mutability_rules(&dir, "ghost").is_empty());
+    }
+
+    // M4/R1: LAW-16's `deletable:` schema keyword, parsed alongside
+    // `links`/`requires`/`asserts`/`mutable` by `split_extensions` -- its
+    // own distinct construct, not a `mutable:` entry, per
+    // `m2/design-deletion-carrier`.
+
+    #[test]
+    fn deletable_keyword_parses_alongside_mutable_and_links() {
+        let source = "\
+sections:
+  - header: { const: Summary }
+links:
+  - some: { type: concept }
+    description: a reference document links to a concept
+mutable:
+  $content: false
+deletable: false
+";
+        let extensions = split_extensions(source).expect("parses");
+        assert_eq!(extensions.links.len(), 1);
+        assert_eq!(extensions.mutable.len(), 1);
+        assert_eq!(extensions.deletable, Some(false));
+
+        // The document-schema part passed to the validator no longer
+        // mentions `deletable`, same "extension keywords are stripped
+        // before validator compilation" contract every other keyword here
+        // already has.
+        assert!(!extensions.source.contains("deletable"));
+    }
+
+    #[test]
+    fn schema_without_deletable_keyword_yields_no_rule() {
+        let source = "sections:\n  - header: { const: Summary }\n";
+        let extensions = split_extensions(source).expect("parses");
+        assert_eq!(extensions.deletable, None);
+    }
+
+    #[test]
+    fn deletable_keyword_rejects_a_non_boolean_value() {
+        let source = "deletable: \"nope\"\n";
+        let errors = match split_extensions(source) {
+            Err(errors) => errors,
+            Ok(_) => panic!("expected a parse error"),
+        };
+        assert_eq!(errors, vec!["deletable: expected true or false".to_string()]);
+    }
+
+    #[test]
+    fn deletable_keyword_accepts_an_explicit_true() {
+        let source = "deletable: true\n";
+        let extensions = split_extensions(source).expect("parses");
+        assert_eq!(extensions.deletable, Some(true));
+    }
+
+    #[test]
+    fn schema_deletable_rule_reads_the_named_schema_file_from_disk() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "mint-guard",
+            "sections:\n  - header: { const: Summary }\ndeletable: false\n",
+        );
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        assert_eq!(schema_deletable_rule(&dir, "mint-guard"), Some(false));
+    }
+
+    #[test]
+    fn schema_deletable_rule_is_none_for_a_schema_with_no_deletable_keyword() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "reference",
+            "sections:\n  - header: { const: Summary }\n",
+        );
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        assert_eq!(schema_deletable_rule(&dir, "reference"), None);
+    }
+
+    #[test]
+    fn schema_deletable_rule_is_none_for_a_missing_schema_file() {
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join(".iwe").join("schemas")).unwrap();
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        assert_eq!(schema_deletable_rule(&dir, "ghost"), None);
     }
 }
