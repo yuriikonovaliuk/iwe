@@ -8,10 +8,18 @@
     "operation": {
       "description": "An operation document of any of the four kinds.",
       "anyOf": [
-        { "$ref": "#/$defs/findOperation" },
-        { "$ref": "#/$defs/countOperation" },
-        { "$ref": "#/$defs/updateOperation" },
-        { "$ref": "#/$defs/deleteOperation" }
+        {
+          "$ref": "#/$defs/findOperation"
+        },
+        {
+          "$ref": "#/$defs/countOperation"
+        },
+        {
+          "$ref": "#/$defs/updateOperation"
+        },
+        {
+          "$ref": "#/$defs/deleteOperation"
+        }
       ]
     },
     "findOperation": {
@@ -19,16 +27,31 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "filter": { "$ref": "#/$defs/filter" },
-        "search": { "$ref": "#/$defs/search" },
-        "project": { "$ref": "#/$defs/projection" },
-        "addFields": { "$ref": "#/$defs/projectionFields" },
-        "sort": { "$ref": "#/$defs/sort" },
-        "limit": { "$ref": "#/$defs/limit" }
+        "filter": {
+          "$ref": "#/$defs/filter"
+        },
+        "search": {
+          "$ref": "#/$defs/search"
+        },
+        "project": {
+          "$ref": "#/$defs/projection"
+        },
+        "addFields": {
+          "$ref": "#/$defs/projectionFields"
+        },
+        "sort": {
+          "$ref": "#/$defs/sort"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit"
+        }
       },
       "not": {
         "description": "`project` and `addFields` are mutually exclusive.",
-        "required": ["project", "addFields"]
+        "required": [
+          "project",
+          "addFields"
+        ]
       }
     },
     "countOperation": {
@@ -36,34 +59,63 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "filter": { "$ref": "#/$defs/filter" },
-        "sort": { "$ref": "#/$defs/sort" },
-        "limit": { "$ref": "#/$defs/limit" }
+        "filter": {
+          "$ref": "#/$defs/filter"
+        },
+        "sort": {
+          "$ref": "#/$defs/sort"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit"
+        }
       }
     },
     "updateOperation": {
       "description": "`iwe update` — mutates frontmatter and blocks on each matched document; the filter is required, so operating on the whole corpus means passing `{}` on purpose.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["filter", "update"],
+      "required": [
+        "filter",
+        "update"
+      ],
       "properties": {
-        "filter": { "$ref": "#/$defs/filter" },
-        "update": { "$ref": "#/$defs/update" },
-        "sort": { "$ref": "#/$defs/sort" },
-        "limit": { "$ref": "#/$defs/limit" },
-        "expect": { "$ref": "#/$defs/expect" }
+        "filter": {
+          "$ref": "#/$defs/filter"
+        },
+        "update": {
+          "$ref": "#/$defs/update"
+        },
+        "sort": {
+          "$ref": "#/$defs/sort"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect"
+        }
       }
     },
     "deleteOperation": {
       "description": "`iwe delete` — removes each matched document and cleans up references; the filter is required.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["filter"],
+      "required": [
+        "filter"
+      ],
       "properties": {
-        "filter": { "$ref": "#/$defs/filter" },
-        "sort": { "$ref": "#/$defs/sort" },
-        "limit": { "$ref": "#/$defs/limit" },
-        "expect": { "$ref": "#/$defs/expect" }
+        "filter": {
+          "$ref": "#/$defs/filter"
+        },
+        "sort": {
+          "$ref": "#/$defs/sort"
+        },
+        "limit": {
+          "$ref": "#/$defs/limit"
+        },
+        "expect": {
+          "$ref": "#/$defs/expect"
+        }
       }
     },
     "filter": {
@@ -71,15 +123,36 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "$and": { "$ref": "#/$defs/filterList" },
-        "$or": { "$ref": "#/$defs/filterList" },
-        "$nor": { "$ref": "#/$defs/filterList" },
-        "$key": { "$ref": "#/$defs/keyOperator" },
-        "$includes": { "$ref": "#/$defs/inclusionAnchor" },
-        "$includedBy": { "$ref": "#/$defs/inclusionAnchor" },
-        "$references": { "$ref": "#/$defs/referenceAnchor" },
-        "$referencedBy": { "$ref": "#/$defs/referenceAnchor" },
-        "$content": { "$ref": "#/$defs/blockPredicate" }
+        "$and": {
+          "$ref": "#/$defs/filterList"
+        },
+        "$or": {
+          "$ref": "#/$defs/filterList"
+        },
+        "$nor": {
+          "$ref": "#/$defs/filterList"
+        },
+        "$key": {
+          "$ref": "#/$defs/keyOperator"
+        },
+        "$includes": {
+          "$ref": "#/$defs/inclusionAnchor"
+        },
+        "$includedBy": {
+          "$ref": "#/$defs/inclusionAnchor"
+        },
+        "$references": {
+          "$ref": "#/$defs/referenceAnchor"
+        },
+        "$referencedBy": {
+          "$ref": "#/$defs/referenceAnchor"
+        },
+        "$content": {
+          "$ref": "#/$defs/blockPredicate"
+        },
+        "$standing": {
+          "$ref": "#/$defs/standingOperator"
+        }
       },
       "patternProperties": {
         "^[^$.\\s\\x00-\\x1f\\x7f-\\x9f][^.\\s\\x00-\\x1f\\x7f-\\x9f]*(\\.[^$.\\s\\x00-\\x1f\\x7f-\\x9f][^.\\s\\x00-\\x1f\\x7f-\\x9f]*)*$": {
@@ -91,14 +164,24 @@
       "description": "A non-empty list of filter documents, the argument of `$and`, `$or` and `$nor`.",
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/filter" }
+      "items": {
+        "$ref": "#/$defs/filter"
+      }
     },
     "fieldValue": {
       "description": "The value of a bare field key: a scalar or list is bare equality (a scalar tests membership in an array field), a mapping of `$`-keys is an operator expression, and a mapping of bare keys addresses nested fields. Mixing `$`-keys and bare keys in one mapping is an error.",
       "anyOf": [
-        { "not": { "type": "object" } },
-        { "$ref": "#/$defs/fieldOperators" },
-        { "$ref": "#/$defs/nestedFields" }
+        {
+          "not": {
+            "type": "object"
+          }
+        },
+        {
+          "$ref": "#/$defs/fieldOperators"
+        },
+        {
+          "$ref": "#/$defs/nestedFields"
+        }
       ]
     },
     "fieldOperators": {
@@ -107,12 +190,24 @@
       "minProperties": 1,
       "additionalProperties": false,
       "properties": {
-        "$eq": { "description": "Equal to the value; cross-type comparisons are always false." },
-        "$ne": { "description": "Not equal to the value." },
-        "$gt": { "description": "Greater than the value." },
-        "$gte": { "description": "Greater than or equal to the value." },
-        "$lt": { "description": "Less than the value." },
-        "$lte": { "description": "Less than or equal to the value." },
+        "$eq": {
+          "description": "Equal to the value; cross-type comparisons are always false."
+        },
+        "$ne": {
+          "description": "Not equal to the value."
+        },
+        "$gt": {
+          "description": "Greater than the value."
+        },
+        "$gte": {
+          "description": "Greater than or equal to the value."
+        },
+        "$lt": {
+          "description": "Less than the value."
+        },
+        "$lte": {
+          "description": "Less than or equal to the value."
+        },
         "$in": {
           "description": "Equal to any value in the list.",
           "type": "array",
@@ -135,11 +230,15 @@
         "$type": {
           "description": "The field's YAML type, or any of a list of types.",
           "anyOf": [
-            { "$ref": "#/$defs/typeName" },
+            {
+              "$ref": "#/$defs/typeName"
+            },
             {
               "type": "array",
               "minItems": 1,
-              "items": { "$ref": "#/$defs/typeName" }
+              "items": {
+                "$ref": "#/$defs/typeName"
+              }
             }
           ]
         },
@@ -156,8 +255,12 @@
     "nestedFields": {
       "description": "A mapping of nested field names, equivalent to the dotted path shorthand.",
       "type": "object",
-      "propertyNames": { "$ref": "#/$defs/fieldPath" },
-      "additionalProperties": { "$ref": "#/$defs/fieldValue" }
+      "propertyNames": {
+        "$ref": "#/$defs/fieldPath"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/fieldValue"
+      }
     },
     "typeName": {
       "description": "A YAML type name, as a quoted string.",
@@ -175,18 +278,39 @@
     "countPredicate": {
       "description": "A count test: a non-negative integer is an `$eq` shorthand, a mapping of comparisons ANDs them together.",
       "anyOf": [
-        { "type": "integer", "minimum": 0 },
+        {
+          "type": "integer",
+          "minimum": 0
+        },
         {
           "type": "object",
           "minProperties": 1,
           "additionalProperties": false,
           "properties": {
-            "$eq": { "type": "integer", "minimum": 0 },
-            "$ne": { "type": "integer", "minimum": 0 },
-            "$gt": { "type": "integer", "minimum": 0 },
-            "$gte": { "type": "integer", "minimum": 0 },
-            "$lt": { "type": "integer", "minimum": 0 },
-            "$lte": { "type": "integer", "minimum": 0 }
+            "$eq": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "$ne": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "$gt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "$gte": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "$lt": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "$lte": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       ]
@@ -194,33 +318,63 @@
     "keyOperator": {
       "description": "`$key` — document identity. A scalar is the key itself; the mapping form carries exactly one of `$eq`, `$ne`, `$in`, `$nin`.",
       "oneOf": [
-        { "type": "string" },
         {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["$eq"],
-          "properties": { "$eq": { "type": "string" } }
+          "type": "string"
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["$ne"],
-          "properties": { "$ne": { "type": "string" } }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["$in"],
+          "required": [
+            "$eq"
+          ],
           "properties": {
-            "$in": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+            "$eq": {
+              "type": "string"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["$nin"],
+          "required": [
+            "$ne"
+          ],
           "properties": {
-            "$nin": { "type": "array", "minItems": 1, "items": { "type": "string" } }
+            "$ne": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "$in"
+          ],
+          "properties": {
+            "$in": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "$nin"
+          ],
+          "properties": {
+            "$nin": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       ]
@@ -228,7 +382,9 @@
     "inclusionAnchor": {
       "description": "The argument of `$includes` / `$includedBy`: a scalar key is the direct-edge shorthand; the mapping form takes an optional `match`, inclusion-walk bounds and an optional `$size`. Omitting `maxDepth` means direct edges; `maxDepth: 0` is the unbounded sentinel.",
       "anyOf": [
-        { "type": "string" },
+        {
+          "type": "string"
+        },
         {
           "type": "object",
           "minProperties": 1,
@@ -259,7 +415,9 @@
     "referenceAnchor": {
       "description": "The argument of `$references` / `$referencedBy`: a scalar key is the direct-edge shorthand; the mapping form takes an optional `match`, reference-walk bounds and an optional `$size`. Omitting `maxDistance` means direct edges; `maxDistance: 0` is the unbounded sentinel.",
       "anyOf": [
-        { "type": "string" },
+        {
+          "type": "string"
+        },
         {
           "type": "object",
           "minProperties": 1,
@@ -282,6 +440,17 @@
             "$size": {
               "description": "Test the count of related documents instead of mere existence.",
               "$ref": "#/$defs/countPredicate"
+            },
+            "via": {
+              "description": "Restricts which of a document's links count as reference edges, applied afresh at every hop: a section name, or a block predicate carrying contents.",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "$ref": "#/$defs/blockPredicate"
+                }
+              ]
             }
           }
         }
@@ -293,12 +462,20 @@
         "$text": {
           "description": "Own text contains the string, case-insensitively; `{ $eq: S }` matches the whole own text.",
           "anyOf": [
-            { "type": "string" },
+            {
+              "type": "string"
+            },
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["$eq"],
-              "properties": { "$eq": { "type": "string" } }
+              "required": [
+                "$eq"
+              ],
+              "properties": {
+                "$eq": {
+                  "type": "string"
+                }
+              }
             }
           ]
         },
@@ -308,7 +485,14 @@
         },
         "$within": {
           "description": "Blocks inside the selection, at any depth; a scalar names a section, and a mapping argument must select content.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$contains": {
           "description": "Blocks with a descendant matching the predicate, at any depth.",
@@ -316,27 +500,69 @@
         },
         "$section": {
           "description": "A header together with everything below it; a scalar is exact-text shorthand for the root header.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$header": {
           "description": "Heading lines alone, no implicit subtree; a scalar is exact-text shorthand.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$paragraph": {
           "description": "Paragraphs; a scalar is exact-text shorthand.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$item": {
           "description": "List items, excluding nested children; a scalar is exact-text shorthand.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$code": {
           "description": "Fenced code blocks, excluding the fence lines; a scalar is exact-text shorthand.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$table": {
           "description": "Tables, one line of own text per row; a scalar is exact-text shorthand.",
-          "anyOf": [{ "type": "string" }, { "$ref": "#/$defs/blockPredicate" }]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          ]
         },
         "$ref": {
           "description": "Block references, selected by target; text predicates match the authored link text alone, and the scalar shorthand is an error.",
@@ -362,44 +588,75 @@
           "description": "Every predicate in the list matches.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/blockPredicate" }
+          "items": {
+            "$ref": "#/$defs/blockPredicate"
+          }
         },
         "$or": {
           "description": "Any predicate in the list matches.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/blockPredicate" }
+          "items": {
+            "$ref": "#/$defs/blockPredicate"
+          }
         },
         "$nor": {
           "description": "No predicate in the list matches.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/blockPredicate" }
+          "items": {
+            "$ref": "#/$defs/blockPredicate"
+          }
         }
       }
     },
     "blockPredicate": {
       "description": "A mapping of block operators; `{}` matches every block, top-level keys AND together, and bare keys are errors.",
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/blockOperators" }],
-      "propertyNames": { "pattern": "^\\$" },
+      "allOf": [
+        {
+          "$ref": "#/$defs/blockOperators"
+        }
+      ],
+      "propertyNames": {
+        "pattern": "^\\$"
+      },
       "unevaluatedProperties": false
     },
     "emptyHeadPredicate": {
       "description": "A block predicate for a block with no own text: `$text` and `$matches` cannot apply directly — scope with `$within` or `$contains`.",
       "$ref": "#/$defs/blockPredicate",
       "not": {
-        "anyOf": [{ "required": ["$text"] }, { "required": ["$matches"] }]
+        "anyOf": [
+          {
+            "required": [
+              "$text"
+            ]
+          },
+          {
+            "required": [
+              "$matches"
+            ]
+          }
+        ]
       }
     },
     "matchesSource": {
       "description": "The argument of the `$matches` projection source: a regex scalar, or a mapping combining the bare `pattern` payload with `$`-keys that scope it.",
       "anyOf": [
-        { "type": "string" },
+        {
+          "type": "string"
+        },
         {
           "type": "object",
-          "allOf": [{ "$ref": "#/$defs/blockOperators" }],
-          "required": ["pattern"],
+          "allOf": [
+            {
+              "$ref": "#/$defs/blockOperators"
+            }
+          ],
+          "required": [
+            "pattern"
+          ],
           "properties": {
             "pattern": {
               "description": "The Rust regex applied to the own text of every block in scope.",
@@ -413,22 +670,37 @@
     "projection": {
       "description": "`project` — a mapping of output names to sources, or a block predicate directly, which reads as the document's `key` plus a `content` field narrowed to the selection.",
       "oneOf": [
-        { "$ref": "#/$defs/projectionFields" },
-        { "$ref": "#/$defs/blockPredicate", "minProperties": 1 }
+        {
+          "$ref": "#/$defs/projectionFields"
+        },
+        {
+          "$ref": "#/$defs/blockPredicate",
+          "minProperties": 1
+        }
       ]
     },
     "projectionFields": {
       "description": "A mapping of output names to projection sources.",
       "type": "object",
-      "propertyNames": { "$ref": "#/$defs/outputName" },
-      "additionalProperties": { "$ref": "#/$defs/projectionSource" }
+      "propertyNames": {
+        "$ref": "#/$defs/outputName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/projectionSource"
+      }
     },
     "projectionSource": {
       "description": "Where an output field's value comes from: `1`, `true` and YAML null take the frontmatter field of the same name, a dotted path takes a nested frontmatter field, a `$`-selector takes a system field, and the mapping forms read blocks.",
       "anyOf": [
-        { "const": 1 },
-        { "const": true },
-        { "type": "null" },
+        {
+          "const": 1
+        },
+        {
+          "const": true
+        },
+        {
+          "type": "null"
+        },
         {
           "enum": [
             "$key",
@@ -443,27 +715,47 @@
             "$blocks"
           ]
         },
-        { "$ref": "#/$defs/fieldPath" },
+        {
+          "$ref": "#/$defs/fieldPath"
+        },
         {
           "description": "The body narrowed to the selected blocks, rendered at their original depth.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["$content"],
-          "properties": { "$content": { "$ref": "#/$defs/blockPredicate" } }
+          "required": [
+            "$content"
+          ],
+          "properties": {
+            "$content": {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          }
         },
         {
           "description": "One entry per selected block: `type`, `path` and `text`.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["$blocks"],
-          "properties": { "$blocks": { "$ref": "#/$defs/blockPredicate" } }
+          "required": [
+            "$blocks"
+          ],
+          "properties": {
+            "$blocks": {
+              "$ref": "#/$defs/blockPredicate"
+            }
+          }
         },
         {
           "description": "Grep — one entry per matching line.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["$matches"],
-          "properties": { "$matches": { "$ref": "#/$defs/matchesSource" } }
+          "required": [
+            "$matches"
+          ],
+          "properties": {
+            "$matches": {
+              "$ref": "#/$defs/matchesSource"
+            }
+          }
         }
       ]
     },
@@ -488,8 +780,15 @@
       "type": "object",
       "minProperties": 1,
       "maxProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/fieldPath" },
-      "additionalProperties": { "enum": [1, -1] }
+      "propertyNames": {
+        "$ref": "#/$defs/fieldPath"
+      },
+      "additionalProperties": {
+        "enum": [
+          1,
+          -1
+        ]
+      }
     },
     "limit": {
       "description": "The maximum number of documents; `0` means no limit.",
@@ -499,14 +798,23 @@
     "expect": {
       "description": "A guard on the number of applications: an exact count, or a range with `min` and/or `max`.",
       "anyOf": [
-        { "type": "integer", "minimum": 0 },
+        {
+          "type": "integer",
+          "minimum": 0
+        },
         {
           "type": "object",
           "minProperties": 1,
           "additionalProperties": false,
           "properties": {
-            "min": { "type": "integer", "minimum": 0 },
-            "max": { "type": "integer", "minimum": 0 }
+            "min": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       ]
@@ -555,33 +863,51 @@
       "description": "Field paths to values; a mapping value replaces wholesale, so write subset leaves with the dotted shorthand.",
       "type": "object",
       "minProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/fieldPath" }
+      "propertyNames": {
+        "$ref": "#/$defs/fieldPath"
+      }
     },
     "unsetFields": {
       "description": "Field paths to remove; the values are ignored.",
       "type": "object",
       "minProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/fieldPath" }
+      "propertyNames": {
+        "$ref": "#/$defs/fieldPath"
+      }
     },
     "contentBlockUpdate": {
       "description": "A block update carrying markdown: the `$`-keys select, the bare `content` is the payload, and `expect` guards the number of targets.",
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/blockOperators" }],
-      "required": ["content"],
+      "allOf": [
+        {
+          "$ref": "#/$defs/blockOperators"
+        }
+      ],
+      "required": [
+        "content"
+      ],
       "properties": {
         "content": {
           "description": "The markdown payload, parsed and normalized on write.",
           "type": "string"
         },
-        "expect": { "$ref": "#/$defs/expect" }
+        "expect": {
+          "$ref": "#/$defs/expect"
+        }
       },
       "unevaluatedProperties": false
     },
     "replaceTextUpdate": {
       "description": "`$replaceText` — with `from`, that byte-exact substring of each selected block's own text becomes `to`; without it, `to` replaces the entire own text.",
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/blockOperators" }],
-      "required": ["to"],
+      "allOf": [
+        {
+          "$ref": "#/$defs/blockOperators"
+        }
+      ],
+      "required": [
+        "to"
+      ],
       "properties": {
         "from": {
           "description": "The substring to replace; must occur exactly once in each selected block's own text.",
@@ -591,16 +917,24 @@
           "description": "The replacement text.",
           "type": "string"
         },
-        "expect": { "$ref": "#/$defs/expect" }
+        "expect": {
+          "$ref": "#/$defs/expect"
+        }
       },
       "unevaluatedProperties": false
     },
     "deleteBlockUpdate": {
       "description": "`$delete` — the `$`-keys select and there is no payload; an argument with no `$`-keys selects every block.",
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/blockOperators" }],
+      "allOf": [
+        {
+          "$ref": "#/$defs/blockOperators"
+        }
+      ],
       "properties": {
-        "expect": { "$ref": "#/$defs/expect" }
+        "expect": {
+          "$ref": "#/$defs/expect"
+        }
       },
       "unevaluatedProperties": false
     },
@@ -613,6 +947,62 @@
       "description": "A projection output name: one path segment — no `.`, no leading `$`, no whitespace or control characters.",
       "type": "string",
       "pattern": "^[^$.\\s\\x00-\\x1f\\x7f-\\x9f][^.\\s\\x00-\\x1f\\x7f-\\x9f]*$"
+    },
+    "standingOperator": {
+      "description": "The argument of `$standing`: a bare status (in / out / undecided) tests equality; the mapping form takes exactly one of `$eq`, `$ne`, `$in`, `$nin` over statuses. Computed from the whole argument (`iwe argue`), then read off for the candidates.",
+      "anyOf": [
+        {
+          "enum": [
+            "in",
+            "out",
+            "undecided"
+          ]
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "$eq": {
+              "enum": [
+                "in",
+                "out",
+                "undecided"
+              ]
+            },
+            "$ne": {
+              "enum": [
+                "in",
+                "out",
+                "undecided"
+              ]
+            },
+            "$in": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "enum": [
+                  "in",
+                  "out",
+                  "undecided"
+                ]
+              }
+            },
+            "$nin": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "enum": [
+                  "in",
+                  "out",
+                  "undecided"
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
