@@ -1392,7 +1392,7 @@ All operators in one update document apply atomically per matched document: eith
 
 ### 10.2 Across-document
 
-Across-document atomicity is **not** provided. The engine itself is a pure function: given an `update` operation it returns `changes` — a list of `(key, new markdown)` pairs the host should write. A `delete` operation returns the list of keys to remove. The host applies these effects to its storage; how it sequences writes, recovers from partial application, or surfaces partial success is host-defined.
+Across-document atomicity is **not** provided by the engine. The engine itself is a pure function: given an `update` operation it returns `changes` — a list of `(key, new markdown)` pairs the host should write. A `delete` operation returns the list of keys to remove. The host applies these effects to its storage; how it sequences writes, recovers from partial application, or surfaces partial success is host-defined. See [Transactions](transactions.md) for how the IWE CLI/MCP host answers this.
 
 Because the engine never writes itself, a "preview-only mode" requires no special flag: the host simply consumes the outcome without applying it. Engine output contains everything needed to render the post-operation state in memory.
 
