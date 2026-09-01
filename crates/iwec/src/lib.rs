@@ -813,7 +813,33 @@ impl IweServer {
             let keys: Vec<Key> = params.keys.iter().map(|k| Key::name(k)).collect();
             reader.retrieve_many(&keys, &options)
         };
-        to_json_result_with_truncation(&output.documents, &output.truncation)
+
+        // A requested key with no document answers with what is owed there —
+        // a fill-in request — rather than nothing. Searching mode has no
+        // explicit keys, so there is nothing to miss.
+        let fill_ins: Vec<diwe::fill_in::FillInRequest> = if params.searching() {
+            Vec::new()
+        } else {
+            params
+                .keys
+                .iter()
+                .map(|k| Key::name(k))
+                .filter(|key| graph.maybe_key(key).is_none())
+                .filter_map(|key| diwe::fill_in::fill_in_request(&self.config, &graph, &key).ok())
+                .collect()
+        };
+        let mut result = to_json_result_with_truncation(&output.documents, &output.truncation)?;
+        if !fill_ins.is_empty() {
+            let note = serde_json::json!({
+                "fillIn": fill_ins,
+                "hint": "These requested keys have no document. Each entry says what the store expects there: the bound schemas, the type, the required frontmatter and sections, and who already references it.",
+            });
+            result.content.push(ContentBlock::text(
+                serde_json::to_string(&note)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            ));
+        }
+        Ok(result)
     }
 
     #[tool(

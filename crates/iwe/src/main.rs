@@ -989,6 +989,12 @@ struct SchemaValidate {
     )]
     checkers: bool,
 
+    #[clap(
+        long = "fill-in",
+        help = "Also emit a fill-in request for every referenced-but-missing document — the schemas it would bind to, the type the folder expects, the required frontmatter and sections, and who references it (whole-store validation only)"
+    )]
+    fill_in: bool,
+
     #[clap(flatten)]
     selector: FilterArgs,
 }
@@ -3028,19 +3034,71 @@ fn schema_validate_command(args: SchemaValidate) {
             }
         }
     }
-    if reports.is_empty() {
+    let fill_ins = if args.fill_in && whole_graph {
+        diwe::fill_in::missing_link_targets(&graph)
+            .iter()
+            .filter_map(|key| diwe::fill_in::fill_in_request(&config, &graph, key).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if reports.is_empty() && fill_ins.is_empty() {
         return;
     }
 
     match args.format {
-        ValidateFormat::Text => print!("{}", render_reports_text(&reports)),
+        ValidateFormat::Text => {
+            print!("{}", render_reports_text(&reports));
+            for request in &fill_ins {
+                print!("{}", render_fill_in_text(request));
+            }
+        }
         ValidateFormat::Json => {
-            let json = serde_json::to_string_pretty(&reports).expect("Failed to serialize reports");
-            println!("{}", json);
+            let json = if args.fill_in {
+                serde_json::json!({ "reports": reports, "fillIn": fill_ins })
+            } else {
+                serde_json::to_value(&reports).expect("Failed to serialize reports")
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json).expect("Failed to serialize reports")
+            );
         }
     }
 
+    if reports.is_empty() {
+        return;
+    }
     std::process::exit(1);
+}
+
+/// One fill-in request as text: the missing key, what the store expects
+/// there, and who is already waiting on it.
+fn render_fill_in_text(request: &diwe::fill_in::FillInRequest) -> String {
+    let mut out = format!("{}: missing — a document is owed here\n", request.key);
+    if let Some(expected) = &request.expected_type {
+        out.push_str(&format!("  type: {expected}\n"));
+    }
+    if !request.required_frontmatter.is_empty() {
+        out.push_str(&format!(
+            "  frontmatter: {}\n",
+            request.required_frontmatter.join(", ")
+        ));
+    }
+    if !request.required_sections.is_empty() {
+        out.push_str(&format!(
+            "  sections: {}\n",
+            request.required_sections.join(", ")
+        ));
+    }
+    for owed in &request.owed_links {
+        out.push_str(&format!("  owed: {owed}\n"));
+    }
+    for referrer in &request.referenced_by {
+        out.push_str(&format!("  referenced by: {}\n", referrer.key));
+    }
+    out
 }
 
 fn gate_pending(config: &Configuration, docs: &[(Key, String)]) {
