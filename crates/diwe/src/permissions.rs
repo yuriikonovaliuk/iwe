@@ -1081,4 +1081,57 @@ mod tests {
         let owner = PropertyRef::from_selector("owner");
         assert!(property_touched(&prior_fm, &next_fm, "", "", &owner));
     }
+
+    // =======================================================================
+    // D4 (M4-extension defect) fix: `iwe delete` on a document with an
+    // immutable body (or any other `mutable: false`/`freeze: true`
+    // property) used to panic (exit 101); once D1 landed, the same
+    // scenario instead silently succeeded, because `diwe::fs::
+    // apply_changes`'s removal check used to call this predicate with the
+    // document's existing content as *both* `content` and `prior_content`
+    // — indistinguishable, under D1's touched/untouched diff, from a
+    // no-op write. The actual fix is the call site
+    // (`crates/diwe/src/fs.rs`'s removal loop now passes `content = ""`),
+    // but these two tests pin down this predicate's own behavior for
+    // exactly the call shape a deletion now produces: `content = ""`,
+    // `prior_content = Some(<the document's on-disk content>)`.
+    // =======================================================================
+
+    /// A deletion-shaped call (`content = ""`) against a document whose
+    /// schema marks the body immutable is rejected — the fix target.
+    #[test]
+    fn d4_deletion_shaped_call_rejects_a_document_with_an_immutable_body() {
+        let doc_key = key("mind/mint-origin");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+        let mutability = vec![MutabilityRule {
+            selector: "$content".to_string(),
+            property: PropertyRef::Body,
+            mutable: false,
+        }];
+
+        let result =
+            check_write_permission_with_mutability(&doc_key, "", Some(prior), mutability);
+
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// A deletion-shaped call against an ordinary document (no `mutable:`
+    /// rule at all) still succeeds — AB9's default-mutable guarantee holds
+    /// for deletion exactly as it does for update/create.
+    #[test]
+    fn d4_deletion_shaped_call_succeeds_for_an_ordinary_document() {
+        let doc_key = key("mind/ordinary");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+
+        let result = check_write_permission_with_mutability(&doc_key, "", Some(prior), vec![]);
+
+        assert!(result.is_ok(), "{result:?}");
+    }
 }

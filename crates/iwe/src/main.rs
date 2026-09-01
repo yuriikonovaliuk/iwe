@@ -2850,8 +2850,20 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
 // as its hook here covers all four identically (see `apply_changes`'s own
 // doc comment for the transaction/abort composition this hook runs
 // inside).
+//
+// D4 fix (M4-extension defect): this used to `.expect(...)` the
+// `std::io::Result` `diwe::fs::apply_changes` returns, which turned any
+// rejection it reports — in particular a `WritePermissionError` surfaced
+// via `permission_denied` (e.g. `iwe delete` on a document with an
+// immutable body or another `mutable: false` property) — into a panic
+// (exit 101) instead of a clean, intentional rejection. Every other
+// write-permission call site in this file (`normalize_command`'s
+// `write_single_document_with`, `write_single_document`) already reports
+// this same kind of error via `eprintln!` + `std::process::exit(1)`; this
+// wrapper now matches that convention instead of being the one path that
+// panics on it.
 fn apply_changes(changes: &Changes, configuration: &Configuration) {
-    diwe::fs::apply_changes(
+    if let Err(e) = diwe::fs::apply_changes(
         changes,
         &get_library_path(configuration),
         configuration.format,
@@ -2863,8 +2875,10 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
                 prior_content,
             )
         },
-    )
-    .expect("Failed to write document file");
+    ) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 fn load_graph(configuration: &Configuration) -> Graph {
