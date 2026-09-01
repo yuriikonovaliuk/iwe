@@ -315,7 +315,7 @@ pub fn write_document(
         &prepared.content,
     ) {
         let _ = tx.abort();
-        return Err(rejected.message(&prepared.key));
+        return Err(rejected.to_string());
     }
 
     if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {

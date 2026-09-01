@@ -11,7 +11,9 @@ use liwe::model::Key;
 use liwe::operations::Changes;
 use liwe::query::block::{parse_block_predicate, BlockPredicate};
 use liwe::query::block_eval::BlockIndex;
-use liwe::query::{build_filter_value, evaluate, evaluate_within, parse_filter_expression, Filter};
+use liwe::query::{
+    build_filter_value, evaluate, evaluate_within, parse_filter_expression, Filter, PropertyRef,
+};
 use liwe::schema::{build_document, compile_schema, CompiledSchema, Crumb, Violation};
 use serde_yaml::Value;
 
@@ -152,6 +154,35 @@ pub struct CompiledSchemaSet {
     pub links: Vec<LinkRule>,
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
+    pub mutable: Vec<MutabilityRule>,
+}
+
+/// One entry of a schema's `mutable` mapping (EXT-PER-PROPERTY-MUTABILITY,
+/// LAW-09) — an IWE extension, like `links`/`requires`/`asserts`, checked by
+/// `diwe::permissions::check_write_permission` rather than the document
+/// validator. Declares whether one property of the document may be written.
+///
+/// The document body is one such property, addressed the very same way any
+/// frontmatter field is — through `PropertyRef::from_selector`'s reserved
+/// `$content` selector — rather than a bespoke fourth mechanism; the schema
+/// author learns only the one new concept, the `mutable:` flag itself.
+///
+/// A property absent from `mutable` entirely, or a schema with no `mutable`
+/// keyword at all, is mutable. `mutable` only ever *restricts* — it can
+/// never make a schema-less document, or an unmentioned property, anything
+/// other than writable exactly as it always was (`m2/design-extensions`'
+/// default-mutable guarantee, AB9).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MutabilityRule {
+    /// The selector exactly as written in the schema (`$content`, or a
+    /// possibly-dotted frontmatter field name), kept for rejection
+    /// messages.
+    pub selector: String,
+    /// Which property `selector` addresses, parsed the same way every other
+    /// property selector in IWE is (`PropertyRef::from_selector`).
+    pub property: PropertyRef,
+    /// Whether `property` may be written.
+    pub mutable: bool,
 }
 
 /// One entry of a schema's `asserts` list — a condition the document itself
@@ -172,6 +203,7 @@ pub struct SchemaExtensions {
     pub links: Vec<LinkRule>,
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
+    pub mutable: Vec<MutabilityRule>,
 }
 
 /// Split a schema source into the part the document validator understands
@@ -183,13 +215,14 @@ pub fn split_links(source: &str) -> Result<(String, Vec<LinkRule>), Vec<String>>
 }
 
 /// Split a schema source into the document-schema part and IWE's own
-/// top-level keywords, `links` and `requires`.
+/// top-level keywords: `links`, `requires`, `asserts`, and `mutable`.
 pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
     let passthrough = || SchemaExtensions {
         source: source.to_string(),
         links: Vec::new(),
         requires: Vec::new(),
         asserts: Vec::new(),
+        mutable: Vec::new(),
     };
     let mut value: Value = match serde_yaml::from_str(source) {
         Ok(value) => value,
@@ -202,7 +235,8 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
     let links = mapping.remove(Value::String("links".to_string()));
     let requires = mapping.remove(Value::String("requires".to_string()));
     let asserts = mapping.remove(Value::String("asserts".to_string()));
-    if links.is_none() && requires.is_none() && asserts.is_none() {
+    let mutable = mapping.remove(Value::String("mutable".to_string()));
+    if links.is_none() && requires.is_none() && asserts.is_none() && mutable.is_none() {
         return Ok(passthrough());
     }
     let mut errors = Vec::new();
@@ -227,6 +261,13 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         }),
         None => Vec::new(),
     };
+    let mutable = match mutable {
+        Some(mutable) => parse_mutability_rules(&mutable).unwrap_or_else(|e| {
+            errors.extend(e);
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -237,7 +278,73 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
         links,
         requires,
         asserts,
+        mutable,
     })
+}
+
+/// Parses a schema's `mutable` keyword: a mapping from property selector
+/// (`$content` for the document body, or a possibly-dotted frontmatter
+/// field name — the same selector convention `PropertyRef::from_selector`
+/// already governs everywhere else) to `true`/`false`.
+///
+/// ```yaml
+/// mutable:
+///   $content: false
+///   archived: true
+/// ```
+fn parse_mutability_rules(value: &Value) -> Result<Vec<MutabilityRule>, Vec<String>> {
+    let mapping = match value {
+        Value::Mapping(mapping) => mapping,
+        _ => {
+            return Err(vec![
+                "mutable: expected a mapping of property selector to true/false".to_string(),
+            ])
+        }
+    };
+    let mut rules = Vec::new();
+    let mut errors = Vec::new();
+    for (key, entry) in mapping {
+        let selector = match key.as_str() {
+            Some(selector) => selector.to_string(),
+            None => {
+                errors.push("mutable: property selectors must be strings".to_string());
+                continue;
+            }
+        };
+        match entry.as_bool() {
+            Some(mutable) => rules.push(MutabilityRule {
+                property: PropertyRef::from_selector(&selector),
+                selector,
+                mutable,
+            }),
+            None => errors.push(format!("mutable.{selector}: expected true or false")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(rules)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Loads just schema `name`'s `mutable` rules from `.iwe/schemas/<name>.yaml`
+/// under `dir`, for write-permission evaluation
+/// (`diwe::permissions::check_write_permission`). Reuses `split_extensions`'s
+/// parsing of top-level extension keywords without requiring the rest of the
+/// schema to compile as a document schema — a write-permission check must
+/// not fail (and block every write to every document bound to that schema)
+/// because of an unrelated document-schema compile error elsewhere in the
+/// same file. A missing file, unparsable YAML, or a malformed `mutable`
+/// keyword all resolve to "no rules" (mutable by default, AB9) rather than
+/// blocking writes on a schema problem unrelated to mutability.
+pub fn schema_mutability_rules(dir: &Path, name: &str) -> Vec<MutabilityRule> {
+    let path = dir.join(format!("{name}.yaml"));
+    let Ok(source) = read_to_string(&path) else {
+        return Vec::new();
+    };
+    split_extensions(&source)
+        .map(|extensions| extensions.mutable)
+        .unwrap_or_default()
 }
 
 fn parse_assert_rules(value: &Value) -> Result<Vec<AssertRule>, Vec<String>> {
@@ -1628,6 +1735,7 @@ fn compile_schemas(
                         links: extensions.links,
                         requires: extensions.requires,
                         asserts: extensions.asserts,
+                        mutable: extensions.mutable,
                     },
                 );
             }
@@ -2309,5 +2417,123 @@ match = [\"journal/*\", \"meetings/**\"]
             errors,
             vec!["schema 'person': .iwe/schemas/person.yaml not found".to_string()]
         );
+    }
+
+    // T11: EXT-PER-PROPERTY-MUTABILITY's `mutable:` schema keyword, parsed
+    // alongside `links`/`requires`/`asserts` by `split_extensions`.
+
+    #[test]
+    fn mutable_keyword_parses_body_and_frontmatter_selectors_alongside_links_and_requires() {
+        let source = "\
+sections:
+  - header: { const: Summary }
+links:
+  - some: { type: concept }
+    description: a reference document links to a concept
+requires:
+  - when: { kind: reference }
+    section: Summary
+mutable:
+  $content: false
+  archived: true
+  owner.name: false
+";
+        let extensions = split_extensions(source).expect("parses");
+        assert_eq!(extensions.links.len(), 1);
+        assert_eq!(extensions.requires.len(), 1);
+        assert_eq!(extensions.mutable.len(), 3);
+
+        let by_selector = |selector: &str| {
+            extensions
+                .mutable
+                .iter()
+                .find(|rule| rule.selector == selector)
+                .unwrap_or_else(|| panic!("no rule for '{selector}'"))
+        };
+        let content_rule = by_selector("$content");
+        assert_eq!(content_rule.property, PropertyRef::Body);
+        assert!(!content_rule.mutable);
+
+        let archived_rule = by_selector("archived");
+        assert_eq!(
+            archived_rule.property,
+            PropertyRef::from_selector("archived")
+        );
+        assert!(archived_rule.mutable);
+
+        let owner_rule = by_selector("owner.name");
+        assert_eq!(
+            owner_rule.property,
+            PropertyRef::from_selector("owner.name")
+        );
+        assert!(!owner_rule.mutable);
+
+        // The document-schema part passed to the validator no longer
+        // mentions `mutable`, `links`, or `requires` — same "extension
+        // keywords are stripped before validator compilation" contract
+        // `links`/`requires`/`asserts` already have.
+        assert!(!extensions.source.contains("mutable"));
+    }
+
+    #[test]
+    fn schema_without_mutable_keyword_yields_no_rules() {
+        let source = "sections:\n  - header: { const: Summary }\n";
+        let extensions = split_extensions(source).expect("parses");
+        assert!(extensions.mutable.is_empty());
+    }
+
+    #[test]
+    fn mutable_keyword_rejects_a_non_boolean_value() {
+        let source = "mutable:\n  $content: \"nope\"\n";
+        let errors = match split_extensions(source) {
+            Err(errors) => errors,
+            Ok(_) => panic!("expected a parse error"),
+        };
+        assert_eq!(
+            errors,
+            vec!["mutable.$content: expected true or false".to_string()]
+        );
+    }
+
+    #[test]
+    fn schema_mutability_rules_reads_the_named_schema_file_from_disk() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "reference",
+            "sections:\n  - header: { const: Summary }\nmutable:\n  $content: false\n  archived: true\n",
+        );
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        let rules = schema_mutability_rules(&dir, "reference");
+        assert_eq!(rules.len(), 2);
+        assert!(rules
+            .iter()
+            .any(|rule| rule.selector == "$content" && !rule.mutable));
+        assert!(rules
+            .iter()
+            .any(|rule| rule.selector == "archived" && rule.mutable));
+    }
+
+    #[test]
+    fn schema_mutability_rules_is_empty_for_a_schema_with_no_mutable_keyword() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "reference",
+            "sections:\n  - header: { const: Summary }\n",
+        );
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        assert!(schema_mutability_rules(&dir, "reference").is_empty());
+    }
+
+    #[test]
+    fn schema_mutability_rules_is_empty_for_a_missing_schema_file() {
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join(".iwe").join("schemas")).unwrap();
+        let dir = temp.path().join(".iwe").join("schemas");
+
+        assert!(schema_mutability_rules(&dir, "ghost").is_empty());
     }
 }

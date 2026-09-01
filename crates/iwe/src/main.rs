@@ -2794,11 +2794,13 @@ fn normalize_command(args: Normalize) {
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(key.clone(), normalized.clone()))
             .expect("no-op transaction backend never fails");
-        if let Err(rejected) =
-            diwe::permissions::check_write_permission_for_content(&configuration, &key, &normalized)
-        {
+        if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
+            &configuration,
+            &key,
+            &normalized,
+        ) {
             let _ = tx.abort();
-            eprintln!("Error: {}", rejected.message(&key));
+            eprintln!("Error: {rejected}");
             std::process::exit(1);
         }
         if std::fs::write(&path, &normalized).is_err() {
@@ -4026,7 +4028,7 @@ fn update_body(args: Update) {
         diwe::permissions::check_write_permission_for_content(&config, &key, &output)
     {
         let _ = tx.abort();
-        eprintln!("Error: {}", rejected.message(&key));
+        eprintln!("Error: {rejected}");
         std::process::exit(1);
     }
     std::fs::write(&file_path, &output).expect("Failed to write document file");
@@ -4264,7 +4266,7 @@ fn write_changed_documents(
                 diwe::permissions::check_write_permission_for_content(configuration, key, content)
             {
                 let _ = tx.abort();
-                eprintln!("Error: {}", rejected.message(key));
+                eprintln!("Error: {rejected}");
                 std::process::exit(1);
             }
             std::fs::write(&file_path, content).expect("Failed to write document file");
@@ -4437,7 +4439,7 @@ fn attach_command(args: Attach) {
             &new_content,
         ) {
             let _ = tx.abort();
-            eprintln!("Error: {}", rejected.message(&target_key));
+            eprintln!("Error: {rejected}");
             std::process::exit(1);
         }
         std::fs::write(&target_path, new_content).expect("Failed to write target file");

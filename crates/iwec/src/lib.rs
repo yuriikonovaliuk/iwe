@@ -2017,12 +2017,33 @@ impl IweServer {
     /// must be able to drive the transaction into its failed/aborted state
     /// rather than the transaction never having begun.
     ///
-    /// Returns the rejection's full message (document key + rule, via
-    /// `WritePermissionError::message`) rather than the error value itself,
-    /// since every caller only needs to surface it as an `McpError`.
+    /// Resolved from `self.project_path`, not `self.base_path`/cwd: same
+    /// `schemas_dir_in(root)` precedent `ensure_schema_clean` already uses,
+    /// so the schemas directory used to read `mutable:` rules matches the
+    /// one used to validate `--strict`/MCP schema compliance, and so tests
+    /// can run in-process against a temp directory without the server's
+    /// actual cwd having to match it.
+    ///
+    /// Returns the rejection's own `Display` message (document key + rule;
+    /// both `WritePermissionError::Frozen` and
+    /// `WritePermissionError::PropertyImmutable` carry their own key)
+    /// rather than the error value itself, since every caller only needs to
+    /// surface it — as an `McpError` (`write_file`'s callers) or as a log
+    /// line (`write_changes`, whose `diwe::fs::apply_changes` hook has no
+    /// room to propagate a message through to an MCP tool response).
     fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), String> {
-        diwe::permissions::check_write_permission_for_content(&self.config, key, content)
-            .map_err(|rejected| rejected.message(key))
+        let result = match &self.project_path {
+            Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                &self.config,
+                &schemas_dir_in(root),
+                key,
+                content,
+            ),
+            None => {
+                diwe::permissions::check_write_permission_for_content(&self.config, key, content)
+            }
+        };
+        result.map_err(|rejected| rejected.to_string())
     }
 
     // WP-12 (iwe_create/iwe_update/iwe_delete/iwe_query/iwe_rename/
@@ -2085,11 +2106,21 @@ impl IweServer {
         if let Some(base_path) = &self.base_path {
             let _ =
                 diwe::fs::apply_changes(changes, base_path, self.config.format, |key, content| {
-                    diwe::permissions::check_write_permission_for_content(
-                        &self.config,
-                        key,
-                        content,
-                    )
+                    // Same `project_path`-rooted resolution as
+                    // `enforce_write_permission` above.
+                    match &self.project_path {
+                        Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                            &self.config,
+                            &schemas_dir_in(root),
+                            key,
+                            content,
+                        ),
+                        None => diwe::permissions::check_write_permission_for_content(
+                            &self.config,
+                            key,
+                            content,
+                        ),
+                    }
                 });
         }
     }
