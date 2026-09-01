@@ -69,6 +69,9 @@ fn test_docs_query_schema() {
         current_query_schema()
     );
     assert!(INDEX.contains("query-schema"));
+}
+
+#[test]
 fn test_docs_argue() {
     let output = run_docs(&["argue"]);
     assert!(output.status.success());

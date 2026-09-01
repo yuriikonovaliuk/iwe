@@ -360,9 +360,12 @@ fn field(graph: &Graph, key: &Key, name: &str) -> Option<String> {
 
 /// A node's own strength: axioms 5; facts by warrant — observed 4,
 /// established 3, authority 2, inference unbounded (its premises decide);
-/// patterns, models and stances 3, bounded by their premises; conjectures
-/// and hypotheses by confidence — high 2, otherwise 1; objections
-/// unbounded (their grounds decide). A `strength` field overrides.
+/// patterns and models 3, bounded by their premises; stances by their
+/// `confidence` — the weight consulted when stances compete: high 4,
+/// medium 3, low 2 — so a rebuttal defeats a stance only when it is not
+/// weaker than that weight; conjectures and hypotheses by confidence —
+/// high 2, otherwise 1; objections unbounded (their grounds decide). A
+/// `strength` field overrides.
 fn base_strength(graph: &Graph, key: &Key, kind: &str) -> u8 {
     if let Some(explicit) = field(graph, key, "strength").and_then(|s| s.parse::<u8>().ok()) {
         return explicit.min(5);
@@ -375,7 +378,12 @@ fn base_strength(graph: &Graph, key: &Key, kind: &str) -> u8 {
             Some("authority") => 2,
             _ => 5,
         },
-        "pattern" | "model" | "stance" => 3,
+        "pattern" | "model" => 3,
+        "stance" => match field(graph, key, "confidence").as_deref() {
+            Some("high") => 4,
+            Some("low") => 2,
+            _ => 3,
+        },
         "conjecture" | "hypothesis" => match field(graph, key, "confidence").as_deref() {
             Some("high") => 2,
             _ => 1,
@@ -755,6 +763,103 @@ pub fn argue(graph: &Graph) -> Argument {
         }
         if !changed {
             break;
+        }
+    }
+
+    // Opposition among standing claims — the square of opposition, read
+    // off quantity (E-C5.3). Contraries and contradictories cannot both be
+    // true, so when both stand the graph is told; grounded semantics never
+    // forces one out without an attack document, so the warning names the
+    // debt, not a defeat. Subcontraries may both be true and stay quiet; a
+    // generic beside a particular denial is the exception rule's
+    // territory. A denial whose qualifiers extend the claim's own denies
+    // only that qualified region — partial contrariety (E-C5.4),
+    // irreconcilable only when the wider claim is universal.
+    {
+        let quantity_of =
+            |i: usize| -> &str { raws[i].quantity.as_deref().unwrap_or("generic") };
+        let subset = |smaller: &[String], larger: &[String]| {
+            smaller.iter().all(|q| larger.contains(q))
+        };
+        let mut groups: HashMap<(&str, &str, &str, &str), Vec<usize>> = HashMap::new();
+        for (i, raw) in raws.iter().enumerate() {
+            if raw.kind == "objection" || status[i] != Status::In {
+                continue;
+            }
+            if let Some(p) = &raw.proposition {
+                groups
+                    .entry((&p.subject, &p.predicate, &p.object, &p.detail))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        let mut opposed: Vec<(usize, String)> = Vec::new();
+        for members in groups.into_values() {
+            for (a, &i) in members.iter().enumerate() {
+                for &j in &members[a + 1..] {
+                    let (p, q) = (
+                        raws[i].proposition.as_ref().expect("grouped"),
+                        raws[j].proposition.as_ref().expect("grouped"),
+                    );
+                    if p.polarity == q.polarity {
+                        continue;
+                    }
+                    let (this, that) = (raws[i].key.to_string(), raws[j].key.to_string());
+                    if p.qualifiers == q.qualifiers {
+                        let mut kinds = [quantity_of(i), quantity_of(j)];
+                        kinds.sort();
+                        let message = match kinds {
+                            ["particular", "universal"] => format!(
+                                "'{this}' and '{that}' are contradictories — both stand, but exactly one is true"
+                            ),
+                            ["particular", "particular"] | ["generic", "particular"] => continue,
+                            _ => format!(
+                                "'{this}' and '{that}' are contraries — both stand, but both cannot be true"
+                            ),
+                        };
+                        opposed.push((i, message));
+                    } else {
+                        // One side more qualified than the other: partial.
+                        let (wide, narrow) = if subset(&p.qualifiers, &q.qualifiers) {
+                            (i, j)
+                        } else if subset(&q.qualifiers, &p.qualifiers) {
+                            (j, i)
+                        } else {
+                            continue;
+                        };
+                        if quantity_of(wide) != "universal" {
+                            continue;
+                        }
+                        let extra: Vec<&str> = raws[narrow]
+                            .proposition
+                            .as_ref()
+                            .expect("grouped")
+                            .qualifiers
+                            .iter()
+                            .filter(|q| {
+                                !raws[wide]
+                                    .proposition
+                                    .as_ref()
+                                    .expect("grouped")
+                                    .qualifiers
+                                    .contains(q)
+                            })
+                            .map(String::as_str)
+                            .collect();
+                        opposed.push((wide, format!(
+                            "'{}' and '{}' are partial contraries — the denial holds only under [{}], and the universal claim leaves it no room",
+                            raws[wide].key, raws[narrow].key, extra.join("; ")
+                        )));
+                    }
+                }
+            }
+        }
+        opposed.sort_by(|a, b| a.1.cmp(&b.1));
+        for (i, message) in opposed {
+            warnings.push(Warning {
+                key: raws[i].key.to_string(),
+                message,
+            });
         }
     }
 

@@ -1363,3 +1363,140 @@ fn a_contrary_does_not_carry_a_defeated_premise() {
     assert_eq!(claim.status, Status::Out);
     assert_eq!(claim.because, "premise '1' is out");
 }
+
+// The square of opposition, read off quantity (E-C5.3): standing claims
+// that cannot both be true are named — contraries (universal/universal),
+// contradictories (universal/particular) — while subcontraries and the
+// generic-with-exception pair stay quiet.
+const OPPOSITION: &str = indoc! {"
+    ---
+    type: fact
+    warrant: observed
+    quantity: universal
+    proposition: {subject: A, predicate: P, object: B, detail: ''}
+    ---
+    # All
+    _
+    ---
+    type: fact
+    warrant: observed
+    quantity: {q}
+    proposition: {subject: A, predicate: P, object: B, detail: '', polarity: deny}
+    ---
+    # Deny
+"};
+
+fn opposition_warnings(quantity: &str) -> Vec<String> {
+    let docs = OPPOSITION.replace("{q}", quantity);
+    run(&docs)
+        .warnings
+        .iter()
+        .map(|w| w.message.clone())
+        .filter(|m| m.contains("contrar") || m.contains("contradict"))
+        .collect()
+}
+
+#[test]
+fn standing_universal_opposites_are_contraries() {
+    let warnings = opposition_warnings("universal");
+    assert_eq!(
+        warnings,
+        vec!["'1' and '2' are contraries — both stand, but both cannot be true".to_string()]
+    );
+}
+
+#[test]
+fn a_universal_and_a_particular_denial_are_contradictories() {
+    let warnings = opposition_warnings("particular");
+    assert_eq!(
+        warnings,
+        vec!["'1' and '2' are contradictories — both stand, but exactly one is true".to_string()]
+    );
+}
+
+#[test]
+fn a_generic_with_a_particular_denial_is_the_exception_rules_territory() {
+    let docs = OPPOSITION
+        .replace("quantity: universal", "quantity: generic")
+        .replace("{q}", "particular");
+    let warnings: Vec<String> = run(&docs)
+        .warnings
+        .iter()
+        .map(|w| w.message.clone())
+        .filter(|m| m.contains("contrar") || m.contains("contradict"))
+        .collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+// E-C5.4: a denial whose qualifiers extend the claim's denies only that
+// region — partial contrariety, irreconcilable only with a universal.
+#[test]
+fn a_qualified_denial_of_a_universal_is_a_partial_contrary() {
+    let docs = OPPOSITION.replace("{q}", "particular").replace(
+        "proposition: {subject: A, predicate: P, object: B, detail: '', polarity: deny}",
+        "proposition: {subject: A, predicate: P, object: B, detail: '', polarity: deny, qualifiers: [{relation: R, term: T}]}",
+    );
+    let warnings: Vec<String> = run(&docs)
+        .warnings
+        .iter()
+        .map(|w| w.message.clone())
+        .filter(|m| m.contains("partial contraries"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("[r=t]"), "{warnings:?}");
+}
+
+// E-F2.3: a stance's confidence is the weight consulted when attacked —
+// high outweighs a rebuttal grounded on authority, low falls to it.
+const WEIGHED_STANCE: &str = indoc! {"
+    ---
+    type: stance
+    confidence: {c}
+    quantity: generic
+    proposition: {subject: S, predicate: P, object: O, detail: ''}
+    ---
+    # Stance
+    _
+    ---
+    type: fact
+    warrant: authority
+    proposition: {subject: L, predicate: P, object: M, detail: ''}
+    ---
+    # Ground
+    _
+    ---
+    type: objection
+    kind: rebuts
+    state: open
+    proposition: {subject: S, predicate: P, object: O, detail: '', polarity: deny}
+    ---
+    # Rebut
+
+    ## Against
+
+    - [Stance](1)
+
+    ## Rests on
+
+    - [Ground](2)
+
+    ## Denies
+
+    x
+"};
+
+#[test]
+fn high_confidence_stance_outweighs_a_weaker_rebuttal() {
+    let argument = run(&WEIGHED_STANCE.replace("{c}", "high"));
+    assert_eq!(argument.node("1").unwrap().status, Status::In);
+    assert_eq!(
+        argument.node("1").unwrap().because,
+        "attacks fail, weaker (3)"
+    );
+}
+
+#[test]
+fn low_confidence_stance_falls_to_the_same_rebuttal() {
+    let argument = run(&WEIGHED_STANCE.replace("{c}", "low"));
+    assert_eq!(argument.node("1").unwrap().status, Status::Out);
+}
