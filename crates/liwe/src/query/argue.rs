@@ -13,6 +13,15 @@
 //! support: a node is *in* when every attacker is out and every premise is
 //! in; *out* when some attacker is in or some premise is out; otherwise
 //! *undecided*. Nothing is accepted that the argument does not force.
+//!
+//! Support resolves per use, at the proposition (ASPIC+ sub-argument
+//! closure, the diamond case): a `Rests on` link names one document, but
+//! what the claim leans on is that document's proposition. When the named
+//! document is defeated while a sibling document asserting the identical
+//! proposition (terms, qualifiers and polarity alike) still stands, the
+//! premise is carried by the sibling — reported as `stood_in_by` — and the
+//! resting claim is not poisoned by the one defeated route. A premise
+//! fails only when every argument for its proposition is out.
 
 use std::collections::{HashMap, HashSet};
 
@@ -209,6 +218,10 @@ pub struct Conclusion {
 pub struct Premise {
     pub key: String,
     pub status: Status,
+    /// When the named document is not in but a sibling asserting the same
+    /// proposition is, the sibling that carries this use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stood_in_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -676,6 +689,31 @@ pub fn argue(graph: &Graph) -> Argument {
         }
     }
 
+    // Per-use support (R-A13): a premise names one document, but the claim
+    // leans on its proposition — any sibling document asserting the
+    // identical proposition can carry the use when the named one falls.
+    // Siblings share the full proposition, polarity included, and
+    // objections neither carry nor are carried (they argue against, not
+    // for). Same grouping as the conclusions below.
+    let siblings: Vec<Vec<usize>> = {
+        let mut by_proposition: HashMap<&Proposition, Vec<usize>> = HashMap::new();
+        for (i, raw) in raws.iter().enumerate() {
+            if raw.kind == "objection" {
+                continue;
+            }
+            if let Some(p) = &raw.proposition {
+                by_proposition.entry(p).or_default().push(i);
+            }
+        }
+        let mut siblings = vec![Vec::new(); n];
+        for group in by_proposition.into_values() {
+            for &i in &group {
+                siblings[i] = group.iter().copied().filter(|&j| j != i).collect();
+            }
+        }
+        siblings
+    };
+
     // Grounded fixpoint with deductive support.
     let mut status = vec![Status::Undecided; n];
     for i in 0..n {
@@ -692,7 +730,12 @@ pub fn argue(graph: &Graph) -> Argument {
             let attacked = attackers[i]
                 .iter()
                 .any(|(a, _, defeats)| *defeats && status[*a] == Status::In);
-            let premise_out = premises[i].iter().any(|p| status[*p] == Status::Out);
+            // A premise fails only when every argument for its proposition
+            // is out — the named document and each of its siblings.
+            let premise_out = premises[i].iter().any(|p| {
+                status[*p] == Status::Out
+                    && siblings[*p].iter().all(|q| status[*q] == Status::Out)
+            });
             if attacked || premise_out {
                 status[i] = Status::Out;
                 changed = true;
@@ -701,7 +744,10 @@ pub fn argue(graph: &Graph) -> Argument {
             let all_attackers_out = attackers[i]
                 .iter()
                 .all(|(a, _, defeats)| !*defeats || status[*a] == Status::Out);
-            let all_premises_in = premises[i].iter().all(|p| status[*p] == Status::In);
+            let all_premises_in = premises[i].iter().all(|p| {
+                status[*p] == Status::In
+                    || siblings[*p].iter().any(|q| status[*q] == Status::In)
+            });
             if all_attackers_out && all_premises_in {
                 status[i] = Status::In;
                 changed = true;
@@ -789,9 +835,23 @@ pub fn argue(graph: &Graph) -> Argument {
                 .collect();
             let premises: Vec<Premise> = premises[i]
                 .iter()
-                .map(|p| Premise {
-                    key: raws[*p].key.to_string(),
-                    status: status[*p],
+                .map(|p| {
+                    let stood_in_by = (status[*p] != Status::In)
+                        .then(|| {
+                            let mut carriers: Vec<&str> = siblings[*p]
+                                .iter()
+                                .filter(|q| status[**q] == Status::In)
+                                .map(|q| raws[*q].key.as_str())
+                                .collect();
+                            carriers.sort();
+                            carriers.first().map(|k| k.to_string())
+                        })
+                        .flatten();
+                    Premise {
+                        key: raws[*p].key.to_string(),
+                        status: status[*p],
+                        stood_in_by,
+                    }
                 })
                 .collect();
             let because = explain(status[i], &attackers, &premises);
@@ -1019,7 +1079,7 @@ pub fn diagnose(argument: &Argument) -> Diagnosis {
             }
         }
         for p in &node.premises {
-            if p.status == Status::Undecided {
+            if p.status == Status::Undecided && p.stood_in_by.is_none() {
                 if let Some(&j) = position.get(p.key.as_str()) {
                     deps[i].push(j);
                 }
@@ -1270,7 +1330,11 @@ pub fn diagnose(argument: &Argument) -> Diagnosis {
                 "attack '{}' with a counter-objection grounded outside this dispute",
                 a.key
             ));
-        } else if let Some(p) = node.premises.iter().find(|p| p.status == Status::Out) {
+        } else if let Some(p) = node
+            .premises
+            .iter()
+            .find(|p| p.status == Status::Out && p.stood_in_by.is_none())
+        {
             moves.push(format!("resolves with '{}'", p.key));
         }
         defeated.push(Defeated {
@@ -1400,7 +1464,20 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
                     ));
                 }
                 if !premises.is_empty() {
-                    parts.push("premises in".to_string());
+                    let carried: Vec<String> = premises
+                        .iter()
+                        .filter(|p| p.status != Status::In)
+                        .filter_map(|p| {
+                            p.stood_in_by
+                                .as_ref()
+                                .map(|by| format!("'{}' stood in by '{}'", p.key, by))
+                        })
+                        .collect();
+                    if carried.is_empty() {
+                        parts.push("premises in".to_string());
+                    } else {
+                        parts.push(format!("premises in ({})", carried.join(", ")));
+                    }
                 }
                 parts.join("; ")
             }
@@ -1409,7 +1486,9 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
             if attackers
                 .iter()
                 .all(|a| !(a.defeats && a.status == Status::In))
-                && premises.iter().all(|p| p.status != Status::Out)
+                && premises
+                    .iter()
+                    .all(|p| p.status != Status::Out || p.stood_in_by.is_some())
             {
                 "contrary of an axiom".to_string()
             } else if let Some(a) = attackers
@@ -1417,7 +1496,10 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
                 .find(|a| a.defeats && a.status == Status::In)
             {
                 format!("defeated by '{}' ({})", a.key, a.kind)
-            } else if let Some(p) = premises.iter().find(|p| p.status == Status::Out) {
+            } else if let Some(p) = premises
+                .iter()
+                .find(|p| p.status == Status::Out && p.stood_in_by.is_none())
+            {
                 format!("premise '{}' is out", p.key)
             } else {
                 "out".to_string()
@@ -1429,7 +1511,10 @@ fn explain(status: Status, attackers: &[Attacker], premises: &[Premise]) -> Stri
                 .find(|a| a.defeats && a.status == Status::Undecided)
             {
                 format!("attacker '{}' ({}) is undecided", a.key, a.kind)
-            } else if let Some(p) = premises.iter().find(|p| p.status == Status::Undecided) {
+            } else if let Some(p) = premises
+                .iter()
+                .find(|p| p.status == Status::Undecided && p.stood_in_by.is_none())
+            {
                 format!("premise '{}' is undecided", p.key)
             } else {
                 "undecided".to_string()

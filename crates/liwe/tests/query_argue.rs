@@ -1267,3 +1267,99 @@ fn qualifiers_count_as_terms_regardless_of_order() {
     );
     assert!(argument.warnings[0].message.starts_with("not an attack:"));
 }
+
+// Per-use standing (the ASPIC+ diamond): a premise names one document, but
+// the claim leans on its proposition — a sibling asserting the identical
+// proposition carries the use when the named document falls.
+// 1: X1 (A P B).  2: X2 (A P B).  3: claim resting on X1.  4: undercut of X1.
+const DIAMOND: &str = indoc! {"
+    ---
+    type: fact
+    warrant: authority
+    proposition: {subject: A, predicate: P, object: B, detail: ''}
+    ---
+    # X1
+    _
+    ---
+    type: fact
+    warrant: observed
+    proposition: {subject: A, predicate: P, object: B, detail: ''}
+    ---
+    # X2
+    _
+    ---
+    type: fact
+    warrant: inference
+    proposition: {subject: C, predicate: P, object: D, detail: ''}
+    ---
+    # Claim
+
+    ## Rests on
+
+    - [X1](1)
+    _
+    ---
+    type: objection
+    kind: undercuts
+    state: open
+    ---
+    # O1
+
+    ## Against
+
+    - [X1](1)
+"};
+
+#[test]
+fn defeated_premise_is_carried_by_a_proposition_sibling() {
+    let argument = run(DIAMOND);
+    assert_statuses(
+        &argument,
+        &[
+            ("1", Status::Out),
+            ("2", Status::In),
+            ("3", Status::In),
+            ("4", Status::In),
+        ],
+    );
+    let claim = argument.node("3").unwrap();
+    assert_eq!(claim.premises[0].stood_in_by.as_deref(), Some("2"));
+    assert_eq!(claim.because, "premises in ('1' stood in by '2')");
+}
+
+#[test]
+fn premise_fails_once_every_argument_for_its_proposition_is_out() {
+    let docs = format!(
+        "{DIAMOND}{}",
+        indoc! {"
+            _
+            ---
+            type: objection
+            kind: undercuts
+            state: open
+            ---
+            # O2
+
+            ## Against
+
+            - [X2](2)
+        "}
+    );
+    let argument = run(&docs);
+    let claim = argument.node("3").unwrap();
+    assert_eq!(claim.status, Status::Out);
+    assert_eq!(claim.because, "premise '1' is out");
+    assert!(claim.premises[0].stood_in_by.is_none());
+}
+
+#[test]
+fn a_contrary_does_not_carry_a_defeated_premise() {
+    let docs = DIAMOND.replace(
+        "proposition: {subject: A, predicate: P, object: B, detail: ''}\n---\n# X2",
+        "proposition: {subject: A, predicate: P, object: B, detail: '', polarity: deny}\n---\n# X2",
+    );
+    let argument = run(&docs);
+    let claim = argument.node("3").unwrap();
+    assert_eq!(claim.status, Status::Out);
+    assert_eq!(claim.because, "premise '1' is out");
+}
