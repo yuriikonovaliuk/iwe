@@ -188,23 +188,66 @@ pub fn write_store_at_path(
     format: Format,
     check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
 ) -> std::io::Result<()> {
+    write_store_at_path_with(store, to, format, check, NoopTransaction::new)
+}
+
+/// Generic core of [`write_store_at_path`], parameterized over the
+/// transaction backend via a factory (`new_tx`) called once per document
+/// to build the transaction used for that document's write.
+/// `write_store_at_path` always calls this with `NoopTransaction::new`;
+/// T6's tests call it with a factory that builds a call-recording stub
+/// instead (`liwe::transaction::RecordingTransaction`), to prove this call
+/// site actually drives `begin`/`write`/`commit`/`abort`, rather than
+/// merely compiling against the trait.
+///
+/// `commit` is attempted before the real filesystem write, not after: see
+/// the note on [`apply_changes_with`], which this function mirrors.
+pub fn write_store_at_path_with<TX: Transaction>(
+    store: &State,
+    to: &Path,
+    format: Format,
+    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    mut new_tx: impl FnMut() -> TX,
+) -> std::io::Result<()> {
     for (key, content) in store.iter() {
         let doc_key = Key::name(key);
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(doc_key.clone(), content.clone()))
-            .expect("no-op transaction backend never fails");
+        let mut tx = new_tx();
+        tx.begin()
+            .map_err(|_| transaction_backend_failed(&doc_key))?;
+
+        if tx
+            .write(TxWrite::Put(doc_key.clone(), content.clone()))
+            .is_err()
+        {
+            let _ = tx.commit();
+            let _ = tx.abort();
+            return Err(transaction_backend_failed(&doc_key));
+        }
         if let Err(rejected) = check(&doc_key, content) {
             let _ = tx.abort();
             return Err(permission_denied(&doc_key, rejected));
         }
-        if let Err(e) = write_file(key, content, to, format) {
+        if tx.commit().is_err() {
             let _ = tx.abort();
+            return Err(transaction_backend_failed(&doc_key));
+        }
+        if let Err(e) = write_file(key, content, to, format) {
             return Err(e);
         }
-        tx.commit().expect("no-op transaction backend never fails");
     }
     Ok(())
+}
+
+/// Turns a transaction backend's refusal (a rejected write, a refused
+/// commit) into the `std::io::Result` `apply_changes`/`write_store_at_
+/// path` already return for every other kind of write failure, so a
+/// refusal halts the caller (and is reported to it) exactly the way an
+/// I/O error already does, instead of being silently swallowed.
+fn transaction_backend_failed(key: &Key) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("write rejected by transaction backend for '{}'", key),
+    )
 }
 
 /// Turns a write-permission rejection into the `std::io::Result` this
@@ -246,14 +289,51 @@ pub fn apply_changes(
     format: Format,
     check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
 ) -> std::io::Result<()> {
+    apply_changes_with(changes, base_path, format, check, NoopTransaction::new)
+}
+
+/// Generic core of [`apply_changes`], parameterized over the transaction
+/// backend via a factory (`new_tx`) called once per document to build the
+/// transaction used for that document's write or removal. `apply_changes`
+/// always calls this with `NoopTransaction::new`; T6's tests call it with
+/// a factory that builds a call-recording stub instead
+/// (`liwe::transaction::RecordingTransaction`), to prove every one of
+/// these call sites (WP-06..WP-09 CLI, WP-12 MCP) actually drives
+/// `begin`/`write`/`commit`/`abort`, rather than merely compiling against
+/// the trait.
+///
+/// `commit` is attempted before the real filesystem operation, not after:
+/// a real backend makes writes durable in `commit`, so a commit refusal
+/// must prevent the write (or removal) from landing rather than merely
+/// being noticed once it already has. This is a no-op change in
+/// observable behavior under `NoopTransaction` (whose `commit` never
+/// fails), and matters only once a real backend is wired in.
+///
+/// If the transaction backend itself rejects a `write` call (T10/T11's
+/// eventual real freeze/mutability logic, not yet landed as of T6),
+/// `commit` is attempted anyway — rather than skipping straight to
+/// `abort` — so that the failed-state contract on `Transaction::write`
+/// (a rejected write must make `commit` refuse) is what this call site
+/// actually observes, not merely assumes.
+pub fn apply_changes_with<TX: Transaction>(
+    changes: &Changes,
+    base_path: &Path,
+    format: Format,
+    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    mut new_tx: impl FnMut() -> TX,
+) -> std::io::Result<()> {
     let extension = format.extension();
 
     for key in &changes.removes {
         let file_path = base_path.join(format!("{}.{}", key, extension));
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Remove(key.clone()))
-            .expect("no-op transaction backend never fails");
+        let mut tx = new_tx();
+        tx.begin().map_err(|_| transaction_backend_failed(key))?;
+
+        if tx.write(TxWrite::Remove(key.clone())).is_err() {
+            let _ = tx.commit();
+            let _ = tx.abort();
+            return Err(transaction_backend_failed(key));
+        }
         if file_path.exists() {
             if let Ok(existing) = fs::read_to_string(&file_path) {
                 if let Err(rejected) = check(key, &existing) {
@@ -261,13 +341,17 @@ pub fn apply_changes(
                     return Err(permission_denied(key, rejected));
                 }
             }
-            if let Err(e) = fs::remove_file(&file_path) {
+            if tx.commit().is_err() {
                 let _ = tx.abort();
+                return Err(transaction_backend_failed(key));
+            }
+            if let Err(e) = fs::remove_file(&file_path) {
                 return Err(e);
             }
+        } else {
+            let _ = tx.commit();
         }
         prune_empty_dirs(file_path.parent(), base_path);
-        tx.commit().expect("no-op transaction backend never fails");
     }
 
     for (key, markdown) in &changes.creates {
@@ -275,36 +359,54 @@ pub fn apply_changes(
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(key.clone(), markdown.clone()))
-            .expect("no-op transaction backend never fails");
+        let mut tx = new_tx();
+        tx.begin().map_err(|_| transaction_backend_failed(key))?;
+
+        if tx
+            .write(TxWrite::Put(key.clone(), markdown.clone()))
+            .is_err()
+        {
+            let _ = tx.commit();
+            let _ = tx.abort();
+            return Err(transaction_backend_failed(key));
+        }
         if let Err(rejected) = check(key, markdown) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
-        if let Err(e) = fs::write(&file_path, markdown) {
+        if tx.commit().is_err() {
             let _ = tx.abort();
+            return Err(transaction_backend_failed(key));
+        }
+        if let Err(e) = fs::write(&file_path, markdown) {
             return Err(e);
         }
-        tx.commit().expect("no-op transaction backend never fails");
     }
 
     for (key, markdown) in &changes.updates {
         let file_path = base_path.join(format!("{}.{}", key, extension));
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(key.clone(), markdown.clone()))
-            .expect("no-op transaction backend never fails");
+        let mut tx = new_tx();
+        tx.begin().map_err(|_| transaction_backend_failed(key))?;
+
+        if tx
+            .write(TxWrite::Put(key.clone(), markdown.clone()))
+            .is_err()
+        {
+            let _ = tx.commit();
+            let _ = tx.abort();
+            return Err(transaction_backend_failed(key));
+        }
         if let Err(rejected) = check(key, markdown) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
-        if let Err(e) = fs::write(&file_path, markdown) {
+        if tx.commit().is_err() {
             let _ = tx.abort();
+            return Err(transaction_backend_failed(key));
+        }
+        if let Err(e) = fs::write(&file_path, markdown) {
             return Err(e);
         }
-        tx.commit().expect("no-op transaction backend never fails");
     }
 
     Ok(())
@@ -442,6 +544,193 @@ mod tests {
         assert!(!filter.includes(&base.path().join(".iwe/config.md")));
         assert!(!filter.includes(Path::new("/elsewhere/note.md")));
         assert!(filter.includes(&base.path().join("note.md")));
+    }
+
+    // T6: `apply_changes_with` is the generic core behind WP-06 (CLI
+    // `delete`), WP-07 (CLI `rename`), WP-08 (CLI `extract`), WP-09 (CLI
+    // `inline`), and WP-12 (every MCP write tool that removes/creates/
+    // updates a document, via `iwec`'s `write_changes` — which calls
+    // `apply_changes` directly, with no additional logic of its own, per
+    // its own doc comment). `write_store_at_path_with` is the generic
+    // core behind WP-11's whole-graph normalize (`write_graph` ->
+    // `write_store_at_path`). These tests drive both generic cores
+    // directly with a `liwe::transaction::RecordingTransaction` in place
+    // of `NoopTransaction` to prove the wiring at every one of those call
+    // sites is real.
+    mod transaction_tests {
+        use super::*;
+        use liwe::transaction::{RecordingTransaction, TransactionLog};
+
+        fn allow(_key: &Key, _content: &str) -> Result<(), WritePermissionError> {
+            Ok(())
+        }
+
+        /// WP-06 (delete): removing a document drives exactly one `begin`
+        /// and one `commit`, and the file is actually gone afterward.
+        #[test]
+        fn delete_drives_begin_and_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.md"), "# A\n").unwrap();
+            let changes = Changes::new().remove(Key::name("a"));
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::new(log.clone())
+            });
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(log.begin_count(), 1);
+            assert_eq!(log.commit_count(), 1);
+            assert!(!dir.path().join("a.md").exists());
+        }
+
+        /// WP-07 (rename): a remove + create pair each drive their own
+        /// `begin`/`commit`, per the "one transaction per write" wiring
+        /// documented on `apply_changes_with`.
+        #[test]
+        fn rename_drives_begin_and_commit_for_each_of_its_writes() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("old.md"), "# Old\n").unwrap();
+            let changes = Changes::new()
+                .remove(Key::name("old"))
+                .create(Key::name("new"), "# Old\n".to_string());
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::new(log.clone())
+            });
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(log.begin_count(), 2);
+            assert_eq!(log.commit_count(), 2);
+            assert!(!dir.path().join("old.md").exists());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("new.md")).unwrap(),
+                "# Old\n"
+            );
+        }
+
+        /// WP-08 (extract): the new document lands via `creates`, driving
+        /// begin/commit for that write.
+        #[test]
+        fn extract_create_drives_begin_and_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            let changes = Changes::new().create(Key::name("extracted"), "# Extracted\n".into());
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::new(log.clone())
+            });
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(log.begin_count(), 1);
+            assert_eq!(log.commit_count(), 1);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("extracted.md")).unwrap(),
+                "# Extracted\n"
+            );
+        }
+
+        /// WP-09 (inline): the target document is rewritten via
+        /// `updates`, driving begin/commit for that write.
+        #[test]
+        fn inline_update_drives_begin_and_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("host.md"), "# Host\n").unwrap();
+            let changes = Changes::new().update(Key::name("host"), "# Host\n\ninlined\n".into());
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::new(log.clone())
+            });
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(log.begin_count(), 1);
+            assert_eq!(log.commit_count(), 1);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("host.md")).unwrap(),
+                "# Host\n\ninlined\n"
+            );
+        }
+
+        /// WP-11 (normalize, whole-graph branch): each rewritten document
+        /// drives its own begin/commit.
+        #[test]
+        fn write_store_at_path_drives_begin_and_commit() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = State::new();
+            store.insert("a".to_string(), "# A\n".to_string());
+            let log = TransactionLog::new();
+
+            let result = write_store_at_path_with(&store, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::new(log.clone())
+            });
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(log.begin_count(), 1);
+            assert_eq!(log.commit_count(), 1);
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("a.md")).unwrap(),
+                "# A\n"
+            );
+        }
+
+        /// A commit refusal from the backend surfaces as an `Err` (not
+        /// silently swallowed) and the write never lands on disk.
+        #[test]
+        fn commit_refusal_prevents_the_write_and_surfaces_as_an_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::refusing_commit(log.clone())
+            });
+
+            assert!(result.is_err());
+            assert_eq!(log.commit_count(), 1, "commit must actually be attempted");
+            assert_eq!(log.abort_count(), 1, "a refused commit must be aborted");
+            assert!(
+                !dir.path().join("a.md").exists(),
+                "the write must not land on disk when commit is refused"
+            );
+        }
+
+        /// A write-permission rejection mid-transaction (standing in for
+        /// T10/T11's real freeze/mutability logic, not yet landed as of
+        /// T6): `commit` is attempted and refuses per the failed-state
+        /// contract on `Transaction::write`, `abort` succeeds, and no
+        /// partial state persists. NOTE for whoever integrates T10/T11:
+        /// re-run this test's intent against the real freeze/mutability
+        /// construct once it lands, in place of
+        /// `RecordingTransaction::rejecting_next_write`.
+        #[test]
+        fn write_rejection_mid_transaction_refuses_commit_and_aborts_cleanly() {
+            let dir = tempfile::tempdir().unwrap();
+            let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
+            let log = TransactionLog::new();
+
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+                let log = log.clone();
+                move || RecordingTransaction::rejecting_next_write(log.clone())
+            });
+
+            assert!(result.is_err());
+            assert_eq!(log.begin_count(), 1);
+            assert_eq!(log.write_count(), 1);
+            assert_eq!(log.commit_count(), 1, "commit must actually be attempted");
+            assert_eq!(log.abort_count(), 1);
+            assert!(
+                !dir.path().join("a.md").exists(),
+                "no partial state must persist after a mid-transaction rejection"
+            );
+        }
     }
 
     #[test]
