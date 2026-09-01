@@ -2786,29 +2786,21 @@ fn normalize_command(args: Normalize) {
         }
 
         // WP-11 (per-key branch): normalize_command's durable write for a
-        // single document, routed through the no-op Transaction interface.
-        // The write-permission check runs inside this transaction bracket
-        // (after `begin()`, before the actual filesystem write), same
-        // composition as `write_document`/`write_file`.
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(key.clone(), normalized.clone()))
-            .expect("no-op transaction backend never fails");
-        if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
-            &configuration,
+        // single document, routed through the shared
+        // `write_single_document_with` transaction composition (see its
+        // doc comment; T6 made this generic/testable).
+        if let Err(e) = write_single_document_with(
             &key,
             &normalized,
+            &path,
+            |key, content| {
+                diwe::permissions::check_write_permission_for_content(&configuration, key, content)
+            },
+            NoopTransaction::new,
         ) {
-            let _ = tx.abort();
-            eprintln!("Error: {rejected}");
+            eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-        if std::fs::write(&path, &normalized).is_err() {
-            let _ = tx.abort();
-            eprintln!("Error: Failed to write '{}'", path.display());
-            std::process::exit(1);
-        }
-        tx.commit().expect("no-op transaction backend never fails");
         println!("{}", path.display());
     }
 }
@@ -3946,6 +3938,72 @@ fn update_command(args: Update) {
     }
 }
 
+// T6: shared generic core behind WP-04 (`update_body`), WP-05
+// (`write_changed_documents`), WP-10 (`attach_command`), and the per-key
+// branch of WP-11 (`normalize_command`) — each of those call sites wrote
+// this exact begin/write/check/commit/write-to-disk composition inline,
+// once per site. Consolidated here and made generic over the transaction
+// backend via a factory (`new_tx`, called once to build the transaction
+// used for this write) so T6's tests can drive each call site with a
+// `liwe::transaction::RecordingTransaction` in place of `NoopTransaction`,
+// proving the wiring is real. Every production call site passes
+// `NoopTransaction::new`.
+//
+// `commit` is attempted before the real filesystem write, not after: a
+// real backend makes writes durable in `commit`, so a commit refusal must
+// prevent the write from landing rather than merely being noticed once it
+// already has (a no-op change in observable behavior under
+// `NoopTransaction`, whose `commit` never fails). If the transaction
+// backend itself rejects the `write` call (T10/T11's eventual real
+// freeze/mutability logic, not yet landed as of T6), `commit` is
+// attempted anyway — rather than skipping straight to `abort` — so that
+// the failed-state contract on `Transaction::write` (a rejected write
+// must make `commit` refuse) is what this call site actually observes,
+// not merely assumes.
+fn write_single_document_with<TX: Transaction>(
+    key: &Key,
+    content: &str,
+    path: &std::path::Path,
+    check: impl Fn(&Key, &str) -> Result<(), diwe::permissions::WritePermissionError>,
+    mut new_tx: impl FnMut() -> TX,
+) -> Result<(), String> {
+    let mut tx = new_tx();
+    tx.begin()
+        .map_err(|_| format!("transaction backend failed to begin for '{key}'"))?;
+
+    if tx
+        .write(TxWrite::Put(key.clone(), content.to_string()))
+        .is_err()
+    {
+        let commit_result = tx.commit();
+        debug_assert!(
+            commit_result.is_err(),
+            "a transaction with a rejected write must refuse commit"
+        );
+        let _ = tx.abort();
+        return Err(format!("write rejected by transaction backend for '{key}'"));
+    }
+
+    // `rejected`'s own `Display` already names the document (both
+    // `WritePermissionError::Frozen` and `WritePermissionError::
+    // PropertyImmutable` carry their own key), so it is returned as-is —
+    // callers must not append a further "for '<key>'" suffix to it.
+    if let Err(rejected) = check(key, content) {
+        let _ = tx.abort();
+        return Err(rejected.to_string());
+    }
+
+    if tx.commit().is_err() {
+        let _ = tx.abort();
+        return Err(format!(
+            "write rejected: transaction backend refused to commit for '{key}'"
+        ));
+    }
+
+    std::fs::write(path, content)
+        .map_err(|e| format!("Failed to write document file for '{key}': {e}"))
+}
+
 fn update_body(args: Update) {
     let config = get_configuration();
     let mut graph = load_graph(&config);
@@ -4013,26 +4071,19 @@ fn update_body(args: Update) {
         gate_pending(&config, &[(key.clone(), output.clone())]);
     }
 
-    // WP-04: update_body's durable write, routed through the no-op
-    // Transaction interface before the actual filesystem write. The
-    // write-permission check runs inside this transaction bracket — after
-    // `begin()`, before the actual filesystem write — so a rejection can
-    // drive the transaction into its aborted state, per
-    // `m2/design-transactions` (same composition as `write_document`/
-    // `write_file`).
-    let mut tx = NoopTransaction::new();
-    tx.begin().expect("no-op transaction backend never fails");
-    tx.write(TxWrite::Put(key.clone(), output.clone()))
-        .expect("no-op transaction backend never fails");
-    if let Err(rejected) =
-        diwe::permissions::check_write_permission_for_content(&config, &key, &output)
-    {
-        let _ = tx.abort();
-        eprintln!("Error: {rejected}");
+    // WP-04: update_body's durable write, routed through the shared
+    // `write_single_document_with` transaction composition (see its doc
+    // comment; T6 made this generic/testable).
+    if let Err(e) = write_single_document_with(
+        &key,
+        &output,
+        &file_path,
+        |key, content| diwe::permissions::check_write_permission_for_content(&config, key, content),
+        NoopTransaction::new,
+    ) {
+        eprintln!("Error: {}", e);
         std::process::exit(1);
     }
-    std::fs::write(&file_path, &output).expect("Failed to write document file");
-    tx.commit().expect("no-op transaction backend never fails");
 
     if args.strict {
         graph.update_document(key.clone(), output.clone());
@@ -4253,24 +4304,25 @@ fn write_changed_documents(
                 std::fs::create_dir_all(parent).ok();
             }
             // WP-05: update_mutation's per-document durable write, routed
-            // through the no-op Transaction interface — one implicit
-            // single-write transaction per changed document. The
-            // write-permission check runs inside this transaction bracket
-            // (after `begin()`, before the actual filesystem write), same
-            // composition as `write_document`/`write_file`.
-            let mut tx = NoopTransaction::new();
-            tx.begin().expect("no-op transaction backend never fails");
-            tx.write(TxWrite::Put(key.clone(), content.clone()))
-                .expect("no-op transaction backend never fails");
-            if let Err(rejected) =
-                diwe::permissions::check_write_permission_for_content(configuration, key, content)
-            {
-                let _ = tx.abort();
-                eprintln!("Error: {rejected}");
+            // through the shared `write_single_document_with` transaction
+            // composition (see its doc comment; T6 made this
+            // generic/testable) — one transaction per changed document.
+            if let Err(e) = write_single_document_with(
+                key,
+                content,
+                &file_path,
+                |key, content| {
+                    diwe::permissions::check_write_permission_for_content(
+                        configuration,
+                        key,
+                        content,
+                    )
+                },
+                NoopTransaction::new,
+            ) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            std::fs::write(&file_path, content).expect("Failed to write document file");
-            tx.commit().expect("no-op transaction backend never fails");
         }
         changed += 1;
     }
@@ -4424,26 +4476,21 @@ fn attach_command(args: Attach) {
         if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        // WP-10: attach_command's durable write, routed through the no-op
-        // Transaction interface before the actual filesystem write. The
-        // write-permission check runs inside this transaction bracket
-        // (after `begin()`, before the actual filesystem write), same
-        // composition as `write_document`/`write_file`.
-        let mut tx = NoopTransaction::new();
-        tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(target_key.clone(), new_content.clone()))
-            .expect("no-op transaction backend never fails");
-        if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
-            &config,
+        // WP-10: attach_command's durable write, routed through the
+        // shared `write_single_document_with` transaction composition
+        // (see its doc comment; T6 made this generic/testable).
+        if let Err(e) = write_single_document_with(
             &target_key,
             &new_content,
+            &target_path,
+            |key, content| {
+                diwe::permissions::check_write_permission_for_content(&config, key, content)
+            },
+            NoopTransaction::new,
         ) {
-            let _ = tx.abort();
-            eprintln!("Error: {rejected}");
+            eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-        std::fs::write(&target_path, new_content).expect("Failed to write target file");
-        tx.commit().expect("no-op transaction backend never fails");
 
         if !args.quiet {
             println!(
@@ -4546,5 +4593,99 @@ mod prompt_tests {
             );
         }
         assert_eq!(PromptName::value_variants().len(), PROMPTS.len());
+    }
+}
+
+// T6: `write_single_document_with` is the generic core shared by WP-04
+// (`update_body`), WP-05 (`write_changed_documents`), WP-10
+// (`attach_command`), and the per-key branch of WP-11
+// (`normalize_command`) — see its doc comment. These tests drive it
+// directly with a `liwe::transaction::RecordingTransaction` in place of
+// `NoopTransaction` to prove the wiring at each of those call sites is
+// real, since none of `update_body`/`write_changed_documents`/
+// `attach_command`/`normalize_command` themselves are practical to call
+// directly from a test (they parse CLI-shaped args, read process-wide
+// configuration, and call `std::process::exit` on error).
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use liwe::transaction::{RecordingTransaction, TransactionLog, TxEvent};
+
+    fn allow(_key: &Key, _content: &str) -> Result<(), diwe::permissions::WritePermissionError> {
+        Ok(())
+    }
+
+    /// An ordinary write (standing in for WP-04/WP-05/WP-10/WP-11's
+    /// per-key branch, which all share this exact composition) drives
+    /// exactly one `begin` and one `commit`, and the content lands on
+    /// disk.
+    #[test]
+    fn ordinary_write_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        let log = TransactionLog::new();
+
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        });
+
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(log.abort_count(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Note\n");
+    }
+
+    /// A commit refusal from the backend surfaces as an `Err` (not
+    /// silently swallowed) and the write never lands on disk.
+    #[test]
+    fn commit_refusal_prevents_the_write_and_surfaces_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        let log = TransactionLog::new();
+
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+            let log = log.clone();
+            move || RecordingTransaction::refusing_commit(log.clone())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(log.commit_count(), 1, "commit must actually be attempted");
+        assert_eq!(log.abort_count(), 1, "a refused commit must be aborted");
+        assert!(
+            !path.exists(),
+            "the write must not land on disk when commit is refused"
+        );
+    }
+
+    /// A write-permission rejection mid-transaction (standing in for
+    /// T10/T11's real freeze/mutability logic, not yet landed as of T6):
+    /// `commit` is attempted and refuses per the failed-state contract on
+    /// `Transaction::write`, `abort` succeeds, and no partial state
+    /// persists. NOTE for whoever integrates T10/T11: re-run this test's
+    /// intent against the real freeze/mutability construct once it lands,
+    /// in place of `RecordingTransaction::rejecting_next_write`.
+    #[test]
+    fn write_rejection_mid_transaction_refuses_commit_and_aborts_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        let log = TransactionLog::new();
+
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+            let log = log.clone();
+            move || RecordingTransaction::rejecting_next_write(log.clone())
+        });
+
+        assert!(result.is_err());
+        let events = log.events();
+        assert_eq!(events[0], TxEvent::Begin);
+        assert!(matches!(events[1], TxEvent::Write(_)));
+        assert_eq!(events[2], TxEvent::Commit);
+        assert_eq!(events[3], TxEvent::Abort);
+        assert!(
+            !path.exists(),
+            "no partial state must persist after a mid-transaction rejection"
+        );
     }
 }
