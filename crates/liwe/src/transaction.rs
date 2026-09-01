@@ -246,8 +246,7 @@ impl TransactionLog {
 /// path actually drives `begin` and `commit` on whatever `Transaction` it
 /// is given — rather than merely compiling against the trait — and that a
 /// refusal from the backend (a rejected write, a refused commit) is
-/// neither silently swallowed nor allowed to let the write land. See `T6`
-/// in `efforts/knowledge-compositor`.
+/// neither silently swallowed nor allowed to let the write land.
 #[derive(Debug, Clone)]
 pub struct RecordingTransaction {
     log: TransactionLog,

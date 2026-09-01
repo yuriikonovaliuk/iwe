@@ -2097,9 +2097,8 @@ impl IweServer {
     /// itself correctly staying dormant as the default. Making this `pub`
     /// (mirroring `diwe::fs::apply_changes_with` /
     /// `diwe::fs::write_store_at_path_with` / `iwe::new::write_document_with`,
-    /// which were already `pub`) is what lets a future caller — the
-    /// compositor, in a later milestone — install a different backend
-    /// without rewriting this call site. T6's tests already call this with
+    /// which were already `pub`) is what lets a future caller
+    /// install a different backend without rewriting this call site. T6's tests already call this with
     /// a factory that builds a call-recording stub
     /// (`liwe::transaction::RecordingTransaction`), to prove this MCP call
     /// site actually drives `begin`/`write`/`commit`/`abort`, rather than
