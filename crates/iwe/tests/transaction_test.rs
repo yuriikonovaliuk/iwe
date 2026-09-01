@@ -21,11 +21,12 @@
 //! Developer's parallel implementation of WP-02..WP-13 -- independence is
 //! the point (see `roles/delivery/test-builder`).
 
-use diwe::config::Configuration;
-use diwe::fs::run_transactional_write;
+use diwe::config::{Configuration, Format};
+use diwe::fs::apply_changes_with;
+use liwe::operations::Changes;
 use iwe::new::{write_document_with, PreparedDocument};
 use liwe::model::Key;
-use liwe::transaction::testing::{Call, CallLog, RecordingTransaction};
+use liwe::transaction::{RecordingTransaction, TransactionLog, TxEvent};
 use liwe::transaction::Write as TxWrite;
 
 fn prepared(dir: &std::path::Path, key: &str, content: &str) -> PreparedDocument {
@@ -46,10 +47,12 @@ fn write_document_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     let config = Configuration::default();
     let doc = prepared(dir.path(), "note", "# Note\n");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::new(log.clone());
+    let log = TransactionLog::new();
 
-    let result = write_document_with(&mut tx, &config, &doc);
+    let result = write_document_with(&config, &doc, {
+        let log = log.clone();
+        move || RecordingTransaction::new(log.clone())
+    });
 
     assert!(result.is_ok());
     assert_eq!(
@@ -57,11 +60,11 @@ fn write_document_begins_and_commits_on_the_stub() {
         "# Note\n"
     );
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(Key::name("note"), "# Note\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(Key::name("note"), "# Note\n".to_string())),
+            TxEvent::Commit,
         ]
     );
 }
@@ -71,10 +74,12 @@ fn write_document_commit_refusal_surfaces_as_an_error_not_swallowed() {
     let dir = tempfile::tempdir().unwrap();
     let config = Configuration::default();
     let doc = prepared(dir.path(), "note", "# Note\n");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::refusing_commit(log.clone());
+    let log = TransactionLog::new();
 
-    let result = write_document_with(&mut tx, &config, &doc);
+    let result = write_document_with(&config, &doc, {
+        let log = log.clone();
+        move || RecordingTransaction::refusing_commit(log.clone())
+    });
 
     assert!(
         result.is_err(),
@@ -82,11 +87,12 @@ fn write_document_commit_refusal_surfaces_as_an_error_not_swallowed() {
          `.expect(\"no-op transaction backend never fails\")`-style panic"
     );
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(Key::name("note"), "# Note\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(Key::name("note"), "# Note\n".to_string())),
+            TxEvent::Commit,
+            TxEvent::Abort,
         ]
     );
 }
@@ -109,25 +115,24 @@ fn write_document_commit_refusal_surfaces_as_an_error_not_swallowed() {
 fn wp04_update_body_bracket_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("doc.md");
+    std::fs::write(&file_path, "old\n").unwrap();
     let key = Key::name("doc");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::new(log.clone());
+    let log = TransactionLog::new();
 
-    let result = run_transactional_write(
-        &mut tx,
-        TxWrite::Put(key.clone(), "updated body\n".to_string()),
-        || Ok(()),
-        || std::fs::write(&file_path, "updated body\n"),
-    );
+    let changes = Changes::new().update(key.clone(), "updated body\n".to_string());
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+        let log = log.clone();
+        move || RecordingTransaction::new(log.clone())
+    });
 
     assert!(result.is_ok());
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "updated body\n");
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(key, "updated body\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(key, "updated body\n".to_string())),
+            TxEvent::Commit,
         ]
     );
 }
@@ -136,25 +141,24 @@ fn wp04_update_body_bracket_begins_and_commits_on_the_stub() {
 fn wp05_write_changed_documents_bracket_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("bulk.md");
+    std::fs::write(&file_path, "old\n").unwrap();
     let key = Key::name("bulk");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::new(log.clone());
+    let log = TransactionLog::new();
 
-    let result = run_transactional_write(
-        &mut tx,
-        TxWrite::Put(key.clone(), "mutated\n".to_string()),
-        || Ok(()),
-        || std::fs::write(&file_path, "mutated\n"),
-    );
+    let changes = Changes::new().update(key.clone(), "mutated\n".to_string());
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+        let log = log.clone();
+        move || RecordingTransaction::new(log.clone())
+    });
 
     assert!(result.is_ok());
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "mutated\n");
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(key, "mutated\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(key, "mutated\n".to_string())),
+            TxEvent::Commit,
         ]
     );
 }
@@ -163,25 +167,24 @@ fn wp05_write_changed_documents_bracket_begins_and_commits_on_the_stub() {
 fn wp10_attach_command_bracket_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("daily.md");
+    std::fs::write(&file_path, "old\n").unwrap();
     let key = Key::name("daily");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::new(log.clone());
+    let log = TransactionLog::new();
 
-    let result = run_transactional_write(
-        &mut tx,
-        TxWrite::Put(key.clone(), "- [Note]\n".to_string()),
-        || Ok(()),
-        || std::fs::write(&file_path, "- [Note]\n"),
-    );
+    let changes = Changes::new().update(key.clone(), "- [Note]\n".to_string());
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+        let log = log.clone();
+        move || RecordingTransaction::new(log.clone())
+    });
 
     assert!(result.is_ok());
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "- [Note]\n");
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(key, "- [Note]\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(key, "- [Note]\n".to_string())),
+            TxEvent::Commit,
         ]
     );
 }
@@ -190,28 +193,24 @@ fn wp10_attach_command_bracket_begins_and_commits_on_the_stub() {
 fn wp11_normalize_per_key_bracket_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("messy.md");
+    std::fs::write(&file_path, "old\n").unwrap();
     let key = Key::name("messy");
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::new(log.clone());
+    let log = TransactionLog::new();
 
-    let result = run_transactional_write(
-        &mut tx,
-        TxWrite::Put(key.clone(), "# Normalized\n".to_string()),
-        || Ok(()),
-        || std::fs::write(&file_path, "# Normalized\n"),
-    );
+    let changes = Changes::new().update(key.clone(), "# Normalized\n".to_string());
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+        let log = log.clone();
+        move || RecordingTransaction::new(log.clone())
+    });
 
     assert!(result.is_ok());
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "# Normalized\n");
     assert_eq!(
-        std::fs::read_to_string(&file_path).unwrap(),
-        "# Normalized\n"
-    );
-    assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(TxWrite::Put(key, "# Normalized\n".to_string())),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(TxWrite::Put(key, "# Normalized\n".to_string())),
+            TxEvent::Commit,
         ]
     );
 }

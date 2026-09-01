@@ -4,13 +4,13 @@
 //! `--strict` — a store fixture written to a `TempDir`, a real subprocess
 //! invocation, and assertions on stdout/stderr/exit-code/on-disk content.
 //!
-//! This build's own `mutable:` syntax (see `diwe::permissions` for the
-//! rationale): `SchemaBinding.mutable` is a `HashMap<String, bool>` keyed
-//! by the same property-selector string `PropertyRef::from_selector`
-//! already uses everywhere else — `"$content"` for the document body, a
-//! (possibly dotted) frontmatter field path otherwise. A property absent
-//! from the map is mutable by default; only an explicit `false` marks it
-//! immutable.
+//! (Adapted at merge time: the Test-builder's stub put `mutable` on the
+//! config-level `SchemaBinding`; the shipped design carries `mutable:` in
+//! the schema file itself, keyed by the same property-selector strings.
+//! The fixtures below write the mapping into `.iwe/schemas/vault.yaml`
+//! accordingly; assertions are unchanged. A property absent from the
+//! mapping is mutable by default; only an explicit `false` marks it
+//! immutable.)
 //!
 //! Fixtures below are deliberately layer-free: no layer/assembly/origin/
 //! package vocabulary from the law exemplars. `vault/sealed-record` and a
@@ -36,12 +36,10 @@ fn setup_body_immutable() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     create_dir_all(temp.path().join(".iwe/schemas")).unwrap();
     create_dir_all(temp.path().join("vault")).unwrap();
-    let mut mutable = HashMap::new();
-    mutable.insert("$content".to_string(), false);
-    write_config(temp.path(), binding("vault", "vault/**", mutable));
+    write_config(temp.path(), binding("vault", "vault/**"));
     write(
         temp.path().join(".iwe/schemas/vault.yaml"),
-        "sections: []\n",
+        "sections: []\nmutable:\n  $content: false\n",
     )
     .unwrap();
     write(temp.path().join("vault/sealed-record.md"), SEALED).unwrap();
@@ -54,7 +52,7 @@ fn setup_default_mutable() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     create_dir_all(temp.path().join(".iwe/schemas")).unwrap();
     create_dir_all(temp.path().join("vault")).unwrap();
-    write_config(temp.path(), binding("vault", "vault/**", HashMap::new()));
+    write_config(temp.path(), binding("vault", "vault/**"));
     write(
         temp.path().join(".iwe/schemas/vault.yaml"),
         "sections: []\n",
@@ -64,17 +62,12 @@ fn setup_default_mutable() -> TempDir {
     temp
 }
 
-fn binding(
-    name: &str,
-    pattern: &str,
-    mutable: HashMap<String, bool>,
-) -> HashMap<String, SchemaBinding> {
+fn binding(name: &str, pattern: &str) -> HashMap<String, SchemaBinding> {
     let mut schemas = HashMap::new();
     schemas.insert(
         name.to_string(),
         SchemaBinding {
             r#match: Patterns::One(pattern.to_string()),
-            mutable,
         },
     );
     schemas
@@ -160,7 +153,7 @@ fn body_write_rejected_identically_ordinary_and_strict() {
     assert!(ordinary_stderr.contains("vault"), "{ordinary_stderr}");
     assert!(ordinary_stderr.contains("$content"), "{ordinary_stderr}");
     assert!(
-        ordinary_stderr.contains("not mutable"),
+        ordinary_stderr.contains("mutable: false"),
         "{ordinary_stderr}"
     );
 

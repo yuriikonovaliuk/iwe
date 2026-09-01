@@ -17,10 +17,10 @@
 //! T10/T11 land.
 
 use diwe::config::Format;
-use diwe::fs::{apply_changes, write_store_at_path, TransactionalWriteError};
+use diwe::fs::{apply_changes_with, write_store_at_path_with};
 use liwe::model::{Key, State};
 use liwe::operations::Changes;
-use liwe::transaction::testing::{Call, CallLog, RecordingTransaction};
+use liwe::transaction::{RecordingTransaction, TransactionLog, TxEvent};
 
 fn read(path: &std::path::Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
@@ -34,10 +34,10 @@ fn apply_changes_remove_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.md"), "# A\n").unwrap();
 
-    let log = CallLog::new();
+    let log = TransactionLog::new();
     let changes = Changes::new().remove(Key::name("a"));
 
-    apply_changes(&changes, dir.path(), Format::Markdown, |_, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -45,11 +45,11 @@ fn apply_changes_remove_begins_and_commits_on_the_stub() {
 
     assert!(!dir.path().join("a.md").exists());
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(liwe::transaction::Write::Remove(Key::name("a"))),
-            Call::Commit,
+            TxEvent::Begin,
+            TxEvent::Write(liwe::transaction::Write::Remove(Key::name("a"))),
+            TxEvent::Commit,
         ]
     );
 }
@@ -65,10 +65,10 @@ fn apply_changes_remove_begins_and_commits_on_the_stub() {
 #[test]
 fn apply_changes_create_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
-    let log = CallLog::new();
+    let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("new-doc"), "# New\n".to_string());
 
-    apply_changes(&changes, dir.path(), Format::Markdown, |_, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -76,14 +76,14 @@ fn apply_changes_create_begins_and_commits_on_the_stub() {
 
     assert_eq!(read(&dir.path().join("new-doc.md")).unwrap(), "# New\n");
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(liwe::transaction::Write::Put(
+            TxEvent::Begin,
+            TxEvent::Write(liwe::transaction::Write::Put(
                 Key::name("new-doc"),
                 "# New\n".to_string()
             )),
-            Call::Commit,
+            TxEvent::Commit,
         ]
     );
 }
@@ -96,10 +96,10 @@ fn apply_changes_update_begins_and_commits_on_the_stub() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.md"), "# Old\n").unwrap();
 
-    let log = CallLog::new();
+    let log = TransactionLog::new();
     let changes = Changes::new().update(Key::name("a"), "# New\n".to_string());
 
-    apply_changes(&changes, dir.path(), Format::Markdown, |_, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -107,14 +107,14 @@ fn apply_changes_update_begins_and_commits_on_the_stub() {
 
     assert_eq!(read(&dir.path().join("a.md")).unwrap(), "# New\n");
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(liwe::transaction::Write::Put(
+            TxEvent::Begin,
+            TxEvent::Write(liwe::transaction::Write::Put(
                 Key::name("a"),
                 "# New\n".to_string()
             )),
-            Call::Commit,
+            TxEvent::Commit,
         ]
     );
 }
@@ -130,20 +130,20 @@ fn write_store_at_path_begins_and_commits_once_per_document() {
     store.insert("a".to_string(), "# A\n".to_string());
     store.insert("b".to_string(), "# B\n".to_string());
 
-    let log = CallLog::new();
-    write_store_at_path(&store, dir.path(), Format::Markdown, |_, _| Ok(()), {
+    let log = TransactionLog::new();
+    write_store_at_path_with(&store, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
     .unwrap();
 
-    let calls = log.calls();
+    let calls = log.events();
     assert_eq!(calls.len(), 6, "begin+write+commit per document: {calls:?}");
     // Both documents were committed exactly once each; order between them
     // is not guaranteed (`State` iteration order), so count rather than
     // match position.
-    assert_eq!(calls.iter().filter(|c| **c == Call::Begin).count(), 2);
-    assert_eq!(calls.iter().filter(|c| **c == Call::Commit).count(), 2);
+    assert_eq!(calls.iter().filter(|c| **c == TxEvent::Begin).count(), 2);
+    assert_eq!(calls.iter().filter(|c| **c == TxEvent::Commit).count(), 2);
     assert_eq!(read(&dir.path().join("a.md")).unwrap(), "# A\n");
     assert_eq!(read(&dir.path().join("b.md")).unwrap(), "# B\n");
 }
@@ -157,14 +157,14 @@ fn write_store_at_path_begins_and_commits_once_per_document() {
 #[test]
 fn always_rejecting_check_hook_aborts_and_leaves_no_partial_state() {
     let dir = tempfile::tempdir().unwrap();
-    let log = CallLog::new();
+    let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("blocked"), "# Blocked\n".to_string());
 
-    let always_rejecting = |_key: &Key, _content: &str| {
-        Err(diwe::permissions::WritePermissionError::Placeholder)
+    let always_rejecting = |key: &Key, _content: &str, _prior: Option<&str>| {
+        Err(diwe::permissions::WritePermissionError::Frozen { key: key.clone() })
     };
 
-    let result = apply_changes(&changes, dir.path(), Format::Markdown, always_rejecting, {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, always_rejecting, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -178,14 +178,14 @@ fn always_rejecting_check_hook_aborts_and_leaves_no_partial_state() {
     // ever calling `commit` for this write -- the transaction never
     // reaches a state where a partial write could be made durable.
     assert_eq!(
-        log.calls(),
+        log.events(),
         vec![
-            Call::Begin,
-            Call::Write(liwe::transaction::Write::Put(
+            TxEvent::Begin,
+            TxEvent::Write(liwe::transaction::Write::Put(
                 Key::name("blocked"),
                 "# Blocked\n".to_string()
             )),
-            Call::Abort,
+            TxEvent::Abort,
         ]
     );
 
@@ -193,10 +193,12 @@ fn always_rejecting_check_hook_aborts_and_leaves_no_partial_state() {
     // a write is rejected for lack of permission, `commit` must refuse
     // (`CommitError::Failed`) and only `abort` remains available. Proven
     // directly against the hand-built always-rejecting stub, matching
-    // `RecordingTransaction::always_rejecting`'s own unit test in
-    // `liwe::transaction::testing`.
+    // `RecordingTransaction::rejecting_next_write`'s own unit tests in
+    // `liwe::transaction`. (Adapted at merge time: the real constructor
+    // rejects the next write, which for this single-write scenario is
+    // the always-rejecting stub's exact behaviour.)
     use liwe::transaction::{CommitError, Transaction, WriteRejected};
-    let mut tx = RecordingTransaction::always_rejecting(CallLog::new());
+    let mut tx = RecordingTransaction::rejecting_next_write(TransactionLog::new());
     tx.begin().unwrap();
     let rejected = tx.write(liwe::transaction::Write::Remove(Key::name("secret")));
     assert!(matches!(rejected, Err(WriteRejected::PermissionDenied)));
@@ -215,29 +217,21 @@ fn always_rejecting_check_hook_aborts_and_leaves_no_partial_state() {
 // `.expect("no-op transaction backend never fails")` would have panicked
 // past it instead of returning a clean `Err`.
 //
-// The "write doesn't land" half does **not** hold today, and this test
-// documents that rather than asserting something false: `persist` (the
-// real `std::fs::write`) runs *before* `tx.commit()` in every WP-02..WP-13
-// call site (see `run_transactional_write`'s ordering, which mirrors the
-// original hand-written brackets it replaced), and is never gated by
-// `tx`'s own outcome. So when a backend's `commit` refuses for a reason
-// unrelated to the failed-state rule (`CommitError::Other`, as opposed to
-// `CommitError::Failed`, which -- per the `Transaction::write` contract --
-// only ever follows a write already rejected and hence never persisted),
-// the file has already been written to disk by the time that refusal is
-// discovered. This is the central interface-sufficiency finding T6
-// surfaces: `Transaction` today runs alongside the real storage effect as
-// a parallel, currently-inert bookkeeping trail, not (yet) the mechanism
-// that performs or gates it. See the T6 report's interface-sufficiency
-// statement for the full argument.
+// The "write doesn't land" half holds in the merged implementation:
+// `apply_changes_with` attempts `tx.commit()` *before* the real
+// filesystem operation, so a commit refusal prevents the write from
+// landing (T6's original interface-sufficiency finding -- persist ran
+// ungated before commit -- was resolved by the t21 fix wave; this test
+// was adapted at merge time from documenting the insufficiency to
+// asserting the fixed contract).
 // ---------------------------------------------------------------------
 #[test]
-fn backend_commit_refusal_surfaces_as_an_error_but_the_write_already_landed() {
+fn backend_commit_refusal_surfaces_as_an_error_and_the_write_does_not_land() {
     let dir = tempfile::tempdir().unwrap();
-    let log = CallLog::new();
+    let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("doomed"), "# Doomed\n".to_string());
 
-    let result = apply_changes(&changes, dir.path(), Format::Markdown, |_, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::refusing_commit(log.clone())
     });
@@ -247,48 +241,50 @@ fn backend_commit_refusal_surfaces_as_an_error_but_the_write_already_landed() {
         "a backend commit refusal must surface as Err, not be swallowed"
     );
     assert!(
-        dir.path().join("doomed.md").exists(),
-        "documents today's actual (insufficient) behavior: persist runs before \
-         commit and is not gated by it, so the write lands on disk even though \
-         the transaction backend went on to refuse the commit -- see this \
-         test's doc comment"
+        !dir.path().join("doomed.md").exists(),
+        "a refused commit must prevent the write from landing (commit is \
+         attempted before the filesystem operation and gates it)"
     );
     assert_eq!(
-        log.calls(),
-        vec![
-            Call::Begin,
-            Call::Write(liwe::transaction::Write::Put(
+        &log.events()[..3],
+        &[
+            TxEvent::Begin,
+            TxEvent::Write(liwe::transaction::Write::Put(
                 Key::name("doomed"),
                 "# Doomed\n".to_string()
             )),
-            Call::Commit,
+            TxEvent::Commit,
         ],
-        "persist ran (the file write already happened) before commit refused"
+        "begin and write were driven, and commit was attempted (and refused) \
+         before any persist"
     );
 }
 
 // ---------------------------------------------------------------------
-// Sanity check that the error variant produced by a backend commit
-// refusal is in fact the `Commit` variant of `TransactionalWriteError` --
-// not, say, silently downgraded to a generic I/O error indistinguishable
-// from an unrelated failure. `run_transactional_write` is exercised
-// directly here (not through `apply_changes`'s I/O-error conversion) so
-// the error's shape, not just its presence, is checked.
+// Sanity check that a backend commit refusal surfaces distinctly -- not
+// silently downgraded to an error indistinguishable from an unrelated
+// failure. The merged implementation reports it as an I/O error whose
+// message names the transaction backend (`transaction_backend_failed`),
+// distinct from the permission-denied shape. (Adapted at merge time: the
+// Test-builder's stub `run_transactional_write`/`TransactionalWriteError`
+// surface never shipped; the assertion intent is preserved against the
+// real reporting path.)
 // ---------------------------------------------------------------------
 #[test]
-fn run_transactional_write_reports_commit_refusal_distinctly() {
-    let log = CallLog::new();
-    let mut tx = RecordingTransaction::refusing_commit(log);
+fn backend_commit_refusal_is_distinguishable_from_permission_denial() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = TransactionLog::new();
+    let changes = Changes::new().create(Key::name("x"), "content".to_string());
 
-    let result = diwe::fs::run_transactional_write(
-        &mut tx,
-        liwe::transaction::Write::Put(Key::name("x"), "content".to_string()),
-        || Ok(()),
-        || Ok(()),
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+        let log = log.clone();
+        move || RecordingTransaction::refusing_commit(log.clone())
+    });
+
+    let err = result.expect_err("commit refusal must surface");
+    assert!(
+        err.to_string().contains("transaction backend"),
+        "refusal names the transaction backend, distinguishing it from a \
+         write-permission denial; got: {err}"
     );
-
-    assert!(matches!(
-        result,
-        Err(TransactionalWriteError::Commit(liwe::transaction::CommitError::Other(_)))
-    ));
 }

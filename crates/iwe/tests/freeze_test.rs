@@ -7,9 +7,11 @@
 // independently-built implementation and test suite — not the Developer's,
 // who is working the same construct in a separate, unseen worktree.
 //
-// Chosen freeze surface (see `diwe::permissions` for the full rationale):
-// a document is frozen when its own frontmatter carries a top-level
-// boolean field named `frozen` set to `true`. No layer/assembly/origin/
+// Freeze surface (adapted at merge time to the shipped design): a
+// document is frozen when its own frontmatter carries a top-level
+// boolean field named `freeze` set to `true` (the Test-builder's
+// independent build chose `frozen`; assertions unchanged, marker and
+// message aligned to the merged implementation). No layer/assembly/origin/
 // package vocabulary appears anywhere in these fixtures or assertions,
 // matching LAW-12's structural shape ("Frozen document content
 // immutable... rejected at write time by IWE itself").
@@ -26,7 +28,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
-const FROZEN_DOC: &str = "---\nfrozen: true\nstatus: draft\n---\n\n# Frozen Note\n\nOriginal body.\n";
+const FROZEN_DOC: &str = "---\nfreeze: true\nstatus: draft\n---\n\n# Frozen Note\n\nOriginal body.\n";
 const PLAIN_DOC: &str = "---\nstatus: draft\n---\n\n# Plain Note\n\nOriginal body.\n";
 
 fn setup() -> TempDir {
@@ -64,7 +66,7 @@ fn run_update(work_dir: &Path, args: &[&str]) -> Output {
 }
 
 const REJECTION_MESSAGE: &str =
-    "Error: write rejected: document 'frozen-note' is frozen (EXT-FREEZE)\n";
+    "Error: write to 'frozen-note' rejected: document is frozen (unset 'freeze' to allow writes)\n";
 
 #[test]
 fn update_ordinary_rejects_a_write_to_a_frozen_document() {

@@ -1,7 +1,8 @@
 //! T11 (independent verification build of `EXT-PER-PROPERTY-MUTABILITY`):
 //! MCP-side companion to `crates/iwe/tests/mutability_test.rs`'s CLI
-//! ordinary/`--strict` pair — same schema, same `mutable:` syntax
-//! (`SchemaBinding.mutable: HashMap<String, bool>`, `"$content"` for the
+//! ordinary/`--strict` pair — same schema. (Adapted at merge time: the
+//! shipped design carries `mutable:` in the schema file, not on the
+//! config binding; fixtures updated, assertions unchanged. `"$content"` for the
 //! body), reached through `iwe_update` instead of a CLI subprocess, to
 //! demonstrate the rejection fires from the MCP surface too (this test
 //! plus the CLI pair together satisfy "rejection fires identically across
@@ -35,14 +36,11 @@ fn write_permissive_schema_file(base: &std::path::Path, name: &str) {
 }
 
 fn body_immutable_config() -> Configuration {
-    let mut mutable = HashMap::new();
-    mutable.insert("$content".to_string(), false);
     let mut schemas = HashMap::new();
     schemas.insert(
         "vault".to_string(),
         SchemaBinding {
             r#match: Patterns::One("vault/**".to_string()),
-            mutable,
         },
     );
     Configuration {
@@ -51,13 +49,24 @@ fn body_immutable_config() -> Configuration {
     }
 }
 
+/// Writes the vault schema with the body marked immutable — the shipped
+/// design's home for the `mutable:` mapping.
+fn write_body_immutable_schema_file(base: &std::path::Path, name: &str) {
+    fs::create_dir_all(base.join(".iwe/schemas")).unwrap();
+    fs::write(
+        base.join(format!(".iwe/schemas/{name}.yaml")),
+        "sections: []\nmutable:\n  $content: false\n",
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn update_rejects_body_write_when_schema_marks_content_immutable() {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     fs::create_dir_all(base.join("vault")).unwrap();
     fs::write(base.join("vault/sealed-record.md"), SEALED).unwrap();
-    write_permissive_schema_file(&base, "vault");
+    write_body_immutable_schema_file(&base, "vault");
 
     let f = Fixture::with_path(base.to_str().unwrap(), body_immutable_config()).await;
 
@@ -74,7 +83,7 @@ async fn update_rejects_body_write_when_schema_marks_content_immutable() {
     assert!(message.contains("vault/sealed-record"), "{message}");
     assert!(message.contains("vault"), "{message}");
     assert!(message.contains("$content"), "{message}");
-    assert!(message.contains("not mutable"), "{message}");
+    assert!(message.contains("mutable: false"), "{message}");
 
     // The rejected write must not reach disk.
     let on_disk = fs::read_to_string(base.join("vault/sealed-record.md")).unwrap();
@@ -94,7 +103,7 @@ async fn update_allows_body_write_when_schema_has_no_mutable_table() {
         "vault".to_string(),
         SchemaBinding {
             r#match: Patterns::One("vault/**".to_string()),
-            mutable: HashMap::new(),
+
         },
     );
     let config = Configuration {
