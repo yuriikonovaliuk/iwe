@@ -23,8 +23,13 @@ fn writes_dj_extension() {
     let mut state = liwe::model::State::new();
     state.insert("note".to_string(), "# Title\n".to_string());
 
-    diwe::fs::write_store_at_path(&state, dir.path(), Format::Djot, |_key, _content| Ok(()))
-        .unwrap();
+    diwe::fs::write_store_at_path(
+        &state,
+        dir.path(),
+        Format::Djot,
+        |_key, _content, _prior_content| Ok(()),
+    )
+    .unwrap();
 
     assert!(dir.path().join("note.dj").exists());
     assert!(!dir.path().join("note.md").exists());

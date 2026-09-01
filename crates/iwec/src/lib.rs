@@ -2031,17 +2031,30 @@ impl IweServer {
     /// surface it — as an `McpError` (`write_file`'s callers) or as a log
     /// line (`write_changes`, whose `diwe::fs::apply_changes` hook has no
     /// room to propagate a message through to an MCP tool response).
+    ///
+    /// Reads `key`'s prior on-disk content itself (via `self.document_path`,
+    /// `None` if it doesn't exist yet) before evaluating — the fix for M2's
+    /// freeze-bypass defect (`m2/design-freeze-semantics`): a predicate fed
+    /// only the outgoing `content` can't enforce a rule about a transition
+    /// (e.g. "frozen, unless this write's sole effect is lifting freeze").
     fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), String> {
+        let prior_content = self
+            .document_path(key)
+            .and_then(|path| std::fs::read_to_string(path).ok());
         let result = match &self.project_path {
             Some(root) => diwe::permissions::check_write_permission_for_content_in(
                 &self.config,
                 &schemas_dir_in(root),
                 key,
                 content,
+                prior_content.as_deref(),
             ),
-            None => {
-                diwe::permissions::check_write_permission_for_content(&self.config, key, content)
-            }
+            None => diwe::permissions::check_write_permission_for_content(
+                &self.config,
+                key,
+                content,
+                prior_content.as_deref(),
+            ),
         };
         result.map_err(|rejected| rejected.to_string())
     }
@@ -2070,13 +2083,28 @@ impl IweServer {
 
     /// Generic core of [`Self::write_file`], parameterized over the
     /// transaction backend via a factory (`new_tx`) called once to build
-    /// the transaction used for this write. `write_file` always calls
-    /// this with `NoopTransaction::new`; T6's tests call it with a
-    /// factory that builds a call-recording stub instead
-    /// (`liwe::transaction::RecordingTransaction`), to prove this MCP
-    /// call site actually drives `begin`/`write`/`commit`/`abort`, rather
-    /// than merely compiling against the trait.
-    fn write_file_with<TX: Transaction>(
+    /// the transaction used for this write. `write_file` (every MCP tool
+    /// call's actual write path) always calls this with
+    /// `NoopTransaction::new`, per AB9's "transactions default to no-op
+    /// passthrough" — that default is unchanged.
+    ///
+    /// `pub`, not merely `pub(crate)`/private: this is the interface
+    /// boundary itself, and M2's fix-wave found it *not* genuinely routed
+    /// through by any production path outside this module — every real
+    /// call site hardcoded `NoopTransaction::new` with no override
+    /// reachable from outside `iwec`, which is a defect distinct from
+    /// [`AffectedSetTransaction`](diwe::validating_transaction::AffectedSetTransaction)
+    /// itself correctly staying dormant as the default. Making this `pub`
+    /// (mirroring `diwe::fs::apply_changes_with` /
+    /// `diwe::fs::write_store_at_path_with` / `iwe::new::write_document_with`,
+    /// which were already `pub`) is what lets a future caller — the
+    /// compositor, in a later milestone — install a different backend
+    /// without rewriting this call site. T6's tests already call this with
+    /// a factory that builds a call-recording stub
+    /// (`liwe::transaction::RecordingTransaction`), to prove this MCP call
+    /// site actually drives `begin`/`write`/`commit`/`abort`, rather than
+    /// merely compiling against the trait.
+    pub fn write_file_with<TX: Transaction>(
         &self,
         key: &Key,
         content: &str,
@@ -2137,28 +2165,36 @@ impl IweServer {
     }
 
     /// Generic core of [`Self::write_changes`], parameterized over the
-    /// transaction backend the same way [`Self::write_file_with`] is;
-    /// see that method's doc comment.
-    fn write_changes_with<TX: Transaction>(&self, changes: &Changes, new_tx: impl FnMut() -> TX) {
+    /// transaction backend the same way [`Self::write_file_with`] is —
+    /// `pub` for the same reason; see that method's doc comment.
+    pub fn write_changes_with<TX: Transaction>(
+        &self,
+        changes: &Changes,
+        new_tx: impl FnMut() -> TX,
+    ) {
         if let Some(base_path) = &self.base_path {
             let _ = diwe::fs::apply_changes_with(
                 changes,
                 base_path,
                 self.config.format,
-                |key, content| {
+                |key, content, prior_content| {
                     // Same `project_path`-rooted resolution as
-                    // `enforce_write_permission` above.
+                    // `enforce_write_permission` above. `prior_content` is
+                    // supplied by `apply_changes_with` itself, read from
+                    // disk immediately before this document's write.
                     match &self.project_path {
                         Some(root) => diwe::permissions::check_write_permission_for_content_in(
                             &self.config,
                             &schemas_dir_in(root),
                             key,
                             content,
+                            prior_content,
                         ),
                         None => diwe::permissions::check_write_permission_for_content(
                             &self.config,
                             key,
                             content,
+                            prior_content,
                         ),
                     }
                 },

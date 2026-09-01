@@ -186,7 +186,7 @@ pub fn write_store_at_path(
     store: &State,
     to: &Path,
     format: Format,
-    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
 ) -> std::io::Result<()> {
     write_store_at_path_with(store, to, format, check, NoopTransaction::new)
 }
@@ -202,15 +202,25 @@ pub fn write_store_at_path(
 ///
 /// `commit` is attempted before the real filesystem write, not after: see
 /// the note on [`apply_changes_with`], which this function mirrors.
+///
+/// `check` is given both `content` (the outgoing write) and the document's
+/// prior on-disk content (`None` if it doesn't exist yet), read from `to`
+/// immediately before this document's write — the fix for M2's freeze-
+/// bypass defect (`m2/design-freeze-semantics`): a write-permission
+/// predicate fed only the outgoing content can't enforce a rule about a
+/// transition (e.g. "frozen, unless this write's sole effect is lifting
+/// freeze"), since it never sees what the document looked like before.
 pub fn write_store_at_path_with<TX: Transaction>(
     store: &State,
     to: &Path,
     format: Format,
-    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
     mut new_tx: impl FnMut() -> TX,
 ) -> std::io::Result<()> {
     for (key, content) in store.iter() {
         let doc_key = Key::name(key);
+        let file_path = to.join(format!("{}.{}", key, format.extension()));
+        let prior_content = fs::read_to_string(&file_path).ok();
         let mut tx = new_tx();
         tx.begin()
             .map_err(|_| transaction_backend_failed(&doc_key))?;
@@ -223,7 +233,7 @@ pub fn write_store_at_path_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(&doc_key));
         }
-        if let Err(rejected) = check(&doc_key, content) {
+        if let Err(rejected) = check(&doc_key, content, prior_content.as_deref()) {
             let _ = tx.abort();
             return Err(permission_denied(&doc_key, rejected));
         }
@@ -279,13 +289,21 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 //
 // For `changes.removes`, `check` is given the document's on-disk content as
 // it exists immediately before removal (there is no "new" content for a
-// removal). If that content can't be read, the removal proceeds without a
-// check rather than blocking on an unrelated I/O failure.
+// removal) as both `content` and the prior-content argument. If that
+// content can't be read, the removal proceeds without a check rather than
+// blocking on an unrelated I/O failure. For `changes.creates` and
+// `changes.updates`, `check` additionally receives the document's prior
+// on-disk content (`None` if it doesn't exist yet), read from `base_path`
+// immediately before that document's write — the fix for M2's freeze-
+// bypass defect (`m2/design-freeze-semantics`): a write-permission
+// predicate fed only the outgoing content can't enforce a rule about a
+// transition (e.g. "frozen, unless this write's sole effect is lifting
+// freeze"), since it never sees what the document looked like before.
 pub fn apply_changes(
     changes: &Changes,
     base_path: &Path,
     format: Format,
-    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
 ) -> std::io::Result<()> {
     apply_changes_with(changes, base_path, format, check, NoopTransaction::new)
 }
@@ -317,7 +335,7 @@ pub fn apply_changes_with<TX: Transaction>(
     changes: &Changes,
     base_path: &Path,
     format: Format,
-    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
     mut new_tx: impl FnMut() -> TX,
 ) -> std::io::Result<()> {
     let extension = format.extension();
@@ -334,7 +352,7 @@ pub fn apply_changes_with<TX: Transaction>(
         }
         if file_path.exists() {
             if let Ok(existing) = fs::read_to_string(&file_path) {
-                if let Err(rejected) = check(key, &existing) {
+                if let Err(rejected) = check(key, &existing, Some(&existing)) {
                     let _ = tx.abort();
                     return Err(permission_denied(key, rejected));
                 }
@@ -354,6 +372,7 @@ pub fn apply_changes_with<TX: Transaction>(
 
     for (key, markdown) in &changes.creates {
         let file_path = base_path.join(format!("{}.{}", key, extension));
+        let prior_content = fs::read_to_string(&file_path).ok();
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -368,7 +387,7 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
-        if let Err(rejected) = check(key, markdown) {
+        if let Err(rejected) = check(key, markdown, prior_content.as_deref()) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
@@ -383,6 +402,7 @@ pub fn apply_changes_with<TX: Transaction>(
 
     for (key, markdown) in &changes.updates {
         let file_path = base_path.join(format!("{}.{}", key, extension));
+        let prior_content = fs::read_to_string(&file_path).ok();
         let mut tx = new_tx();
         tx.begin().map_err(|_| transaction_backend_failed(key))?;
 
@@ -394,7 +414,7 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
-        if let Err(rejected) = check(key, markdown) {
+        if let Err(rejected) = check(key, markdown, prior_content.as_deref()) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
@@ -559,7 +579,7 @@ mod tests {
         use super::*;
         use liwe::transaction::{RecordingTransaction, TransactionLog};
 
-        fn allow(_key: &Key, _content: &str) -> Result<(), WritePermissionError> {
+        fn allow(_key: &Key, _content: &str, _prior_content: Option<&str>) -> Result<(), WritePermissionError> {
             Ok(())
         }
 
