@@ -29,6 +29,7 @@ use liwe::graph::{Graph, GraphContext};
 use liwe::model::node::NodePointer;
 use liwe::model::tree::{Tree, TreeIter};
 use liwe::model::{strip_doc_extension, Key};
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::operations::{
     attach_reference, delete as op_delete, extract as op_extract, inline as op_inline, references,
     rename as op_rename, sections, select_reference, select_section, AttachTarget, Changes,
@@ -2000,7 +2001,13 @@ impl IweServer {
     /// placeholder match-all binding and `document` reflects only what is
     /// cheaply available at this call site; T10/T11/T12 replace both with
     /// the real resolved schema and target document state.
-    fn enforce_write_permission(&self, key: &Key, content: &str) {
+    ///
+    /// Called from inside `write_file`'s transaction bracket (after
+    /// `begin()`, before the actual filesystem write) rather than before it
+    /// starts: per `m2/design-transactions`, a write-permission rejection
+    /// must be able to drive the transaction into its failed/aborted state
+    /// rather than the transaction never having begun.
+    fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), ()> {
         let (front, _body) = liwe::model::split_raw_frontmatter(content);
         let document = liwe::model::document::Document {
             blocks: Vec::new(),
@@ -2010,21 +2017,46 @@ impl IweServer {
             r#match: Patterns::Many(Vec::new()),
         };
         let _ = key;
-        if let Err(_rejected) =
-            check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema)
-        {
-            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-            // implemented. The placeholder check never returns Err today.
+        match check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema) {
+            Ok(()) => Ok(()),
+            Err(_rejected) => {
+                // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+                // implemented. The placeholder check never returns Err
+                // today, so this arm is unreachable in practice.
+                Err(())
+            }
         }
     }
 
+    // WP-12 (iwe_create/iwe_update/iwe_delete/iwe_query/iwe_rename/
+    // iwe_extract/iwe_inline/iwe_attach that write content, not just remove
+    // it) and WP-13 (iwe_normalize) share this single call site; wrapping
+    // it here covers both. Routed through the no-op Transaction interface,
+    // with the write-permission check running inside the transaction
+    // bracket (after `begin()`, before the actual filesystem write) so a
+    // rejection aborts the transaction instead of the write never having
+    // been attempted.
     fn write_file(&self, key: &Key, content: &str) {
-        self.enforce_write_permission(key, content);
         if let Some(file_path) = self.document_path(key) {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&file_path, content).ok();
+            let mut tx = NoopTransaction::new();
+            tx.begin().expect("no-op transaction backend never fails");
+            tx.write(TxWrite::Put(key.clone(), content.to_string()))
+                .expect("no-op transaction backend never fails");
+            if self.enforce_write_permission(key, content).is_err() {
+                let _ = tx.abort();
+                return;
+            }
+            match std::fs::write(&file_path, content) {
+                Ok(()) => {
+                    tx.commit().expect("no-op transaction backend never fails");
+                }
+                Err(_) => {
+                    let _ = tx.abort();
+                }
+            }
         }
     }
 
@@ -2032,9 +2064,17 @@ impl IweServer {
         std::fs::read_to_string(self.document_path(key)?).ok()
     }
 
+    // NOTE (merge of T3 + T5): unlike `write_file`, this check runs before
+    // `diwe::fs::apply_changes` is entered rather than inside its per-key
+    // transaction brackets. `apply_changes` is also the shared write path
+    // for the CLI's delete/rename/extract/inline commands, which T3 did
+    // not wire for write-permission checking; moving this check into
+    // `apply_changes` itself would silently extend enforcement to those
+    // un-wired CLI sites too. Left outside the transaction here rather
+    // than guessing at that scope expansion — see merge report.
     fn write_changes(&self, changes: &Changes) {
         for (key, content) in changes.creates.iter().chain(changes.updates.iter()) {
-            self.enforce_write_permission(key, content);
+            let _ = self.enforce_write_permission(key, content);
         }
         if let Some(base_path) = &self.base_path {
             let _ = diwe::fs::apply_changes(changes, base_path, self.config.format);

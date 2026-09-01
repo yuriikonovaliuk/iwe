@@ -10,11 +10,8 @@ use clap_complete_nushell::Nushell;
 mod help;
 use itertools::Itertools;
 
-use diwe::config::{
-    load_config, ActionDefinition, Configuration, InlineType, LinkType, Patterns, SchemaBinding,
-};
+use diwe::config::{load_config, ActionDefinition, Configuration, InlineType, LinkType};
 use diwe::graph_from_path;
-use diwe::permissions::check_write_permission;
 use diwe::schema::{
     explain_documents, explain_documents_against_file, pending_from_changes, render_reports_text,
     validate_pending_documents,
@@ -49,6 +46,7 @@ use liwe::locale::get_locale;
 use liwe::model::node::NodePointer;
 use liwe::model::tree::TreeIter;
 use liwe::model::{split_raw_frontmatter, Frontmatter, Key};
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::operations::{
     attach_reference, delete as op_delete, extract as op_extract, inline as op_inline, references,
     rename as op_rename, sections, select_reference, select_section, AttachTarget, Changes,
@@ -2196,7 +2194,9 @@ fn new_command(args: New) {
 
     match creator.prepare(options) {
         Ok(Some(prepared)) => {
-            enforce_write_permission(&prepared.key, &prepared.content);
+            // Write-permission is checked inside `write_document`'s
+            // transaction bracket (see `iwe::new::write_document`), not
+            // here, so a rejection can drive the transaction's abort path.
             match write_document(&prepared) {
                 Ok(doc) => {
                     println!("{}", doc.path.display());
@@ -2254,8 +2254,9 @@ fn create_command(args: Create) {
         gate_pending(&config, &[(prepared.key.clone(), prepared.content.clone())]);
     }
 
-    enforce_write_permission(&prepared.key, &prepared.content);
-
+    // Write-permission is checked inside `write_document`'s transaction
+    // bracket (see `iwe::new::write_document`), not here, so a rejection
+    // can drive the transaction's abort path.
     match write_document(&prepared) {
         Ok(doc) => {
             println!("{}", doc.path.display());
@@ -2784,10 +2785,18 @@ fn normalize_command(args: Normalize) {
             continue;
         }
 
+        // WP-11 (per-key branch): normalize_command's durable write for a
+        // single document, routed through the no-op Transaction interface.
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(key.clone(), normalized.clone()))
+            .expect("no-op transaction backend never fails");
         if std::fs::write(&path, &normalized).is_err() {
+            let _ = tx.abort();
             eprintln!("Error: Failed to write '{}'", path.display());
             std::process::exit(1);
         }
+        tx.commit().expect("no-op transaction backend never fails");
         println!("{}", path.display());
     }
 }
@@ -3109,32 +3118,12 @@ fn render_fill_in_text(request: &diwe::fill_in::FillInRequest) -> String {
     out
 }
 
-/// T3 proof-of-concept insertion point: calls the shared write-permission
-/// site (`diwe::permissions::check_write_permission`) immediately before a
-/// write reaches disk. Unconditional — unlike `gate_pending`, this is never
-/// wrapped in `if args.strict`, because write-permission evaluation must
-/// fire identically under ordinary and strict invocation. WP-02..WP-13 are
-/// not implemented yet, so `schema` here is a placeholder match-all binding
-/// and `document` reflects only what is cheaply available at this call
-/// site; T10/T11/T12 replace both with the real resolved schema and target
-/// document state when they implement the checks.
-fn enforce_write_permission(key: &Key, content: &str) {
-    let (front, _body) = split_raw_frontmatter(content);
-    let document = liwe::model::document::Document {
-        blocks: Vec::new(),
-        frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
-    };
-    let schema = SchemaBinding {
-        r#match: Patterns::Many(Vec::new()),
-    };
-    let _ = key;
-    if let Err(_rejected) =
-        check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema)
-    {
-        // T10/T11/T12: surface the rejection to the caller once WP-02..WP-13
-        // are implemented. The placeholder check never returns Err today.
-    }
-}
+// The T3 proof-of-concept `enforce_write_permission` helper that used to
+// live here (called from `new_command`/`create_command` before invoking
+// `write_document`) was folded into `iwe::new::write_document` itself
+// during the T3+T5 merge, so the check runs inside `write_document`'s
+// transaction bracket rather than before the transaction begins. See
+// `iwe::new::write_document` for the check that replaces it.
 
 fn gate_pending(config: &Configuration, docs: &[(Key, String)]) {
     match validate_pending_documents(config, docs) {
@@ -4000,7 +3989,14 @@ fn update_body(args: Update) {
         gate_pending(&config, &[(key.clone(), output.clone())]);
     }
 
+    // WP-04: update_body's durable write, routed through the no-op
+    // Transaction interface before the actual filesystem write.
+    let mut tx = NoopTransaction::new();
+    tx.begin().expect("no-op transaction backend never fails");
+    tx.write(TxWrite::Put(key.clone(), output.clone()))
+        .expect("no-op transaction backend never fails");
     std::fs::write(&file_path, &output).expect("Failed to write document file");
+    tx.commit().expect("no-op transaction backend never fails");
 
     if args.strict {
         graph.update_document(key.clone(), output.clone());
@@ -4218,7 +4214,15 @@ fn write_changed_documents(
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            // WP-05: update_mutation's per-document durable write, routed
+            // through the no-op Transaction interface — one implicit
+            // single-write transaction per changed document.
+            let mut tx = NoopTransaction::new();
+            tx.begin().expect("no-op transaction backend never fails");
+            tx.write(TxWrite::Put(key.clone(), content.clone()))
+                .expect("no-op transaction backend never fails");
             std::fs::write(&file_path, content).expect("Failed to write document file");
+            tx.commit().expect("no-op transaction backend never fails");
         }
         changed += 1;
     }
@@ -4372,7 +4376,14 @@ fn attach_command(args: Attach) {
         if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
+        // WP-10: attach_command's durable write, routed through the no-op
+        // Transaction interface before the actual filesystem write.
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(target_key.clone(), new_content.clone()))
+            .expect("no-op transaction backend never fails");
         std::fs::write(&target_path, new_content).expect("Failed to write target file");
+        tx.commit().expect("no-op transaction backend never fails");
 
         if !args.quiet {
             println!(

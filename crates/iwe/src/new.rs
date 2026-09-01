@@ -8,13 +8,16 @@ use minijinja::Environment;
 use rand::distr::Alphanumeric;
 use rand::Rng;
 
-use diwe::config::{Configuration, NoteTemplate, DEFAULT_KEY_DATE_FORMAT};
+use diwe::config::{Configuration, NoteTemplate, Patterns, SchemaBinding, DEFAULT_KEY_DATE_FORMAT};
+use diwe::permissions::check_write_permission;
 use liwe::graph::Graph;
 use liwe::locale::get_locale;
 use liwe::markdown::MarkdownReader;
 use liwe::model::{
     prepend_frontmatter, split_raw_frontmatter, strip_doc_extension, Frontmatter, Key,
 };
+use liwe::query::PropertyRef;
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
 pub const BODY_VARIABLE: &str = "body";
 pub const LEGACY_BODY_VARIABLE: &str = "content";
@@ -276,6 +279,20 @@ pub fn normalize_content(config: &Configuration, key: &Key, content: &str) -> St
     }
 }
 
+// WP-02 (create_command) / WP-03 (new_command): both CLI commands funnel their
+// durable write through this single call site, so wrapping it here covers
+// both. The write is routed through the storage-agnostic `Transaction`
+// interface (begin -> write(Put) -> commit) using the no-op default backend;
+// the actual persistence still happens via `std::fs::write` below, since
+// `NoopTransaction` performs no storage of its own (see transaction.rs).
+//
+// The write-permission check (T3's `diwe::permissions::check_write_
+// permission`) runs inside this transaction bracket — after `begin()`,
+// before the actual filesystem write — rather than at the `new_command`/
+// `create_command` call sites before `write_document` is even invoked.
+// Per `m2/design-transactions`, a write-permission rejection must be able
+// to drive the transaction into its failed/aborted state, which requires
+// the transaction to already be open when the check runs.
 pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, String> {
     if let Some(parent) = prepared.path.parent() {
         if !parent.exists() {
@@ -284,8 +301,35 @@ pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, St
         }
     }
 
-    std::fs::write(&prepared.path, &prepared.content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    let mut tx = NoopTransaction::new();
+    tx.begin().expect("no-op transaction backend never fails");
+    tx.write(TxWrite::Put(prepared.key.clone(), prepared.content.clone()))
+        .expect("no-op transaction backend never fails");
+
+    let (front, _body) = split_raw_frontmatter(&prepared.content);
+    let permission_document = liwe::model::document::Document {
+        blocks: Vec::new(),
+        frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
+    };
+    let permission_schema = SchemaBinding {
+        r#match: Patterns::Many(Vec::new()),
+    };
+    if check_write_permission(&permission_document, &PropertyRef::Body, &permission_schema)
+        .is_err()
+    {
+        // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+        // implemented. The placeholder check never returns Err today, so
+        // this arm is unreachable in practice.
+        let _ = tx.abort();
+        return Err("write rejected by write-permission check".to_string());
+    }
+
+    if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {
+        let _ = tx.abort();
+        return Err(format!("Failed to write file: {}", e));
+    }
+
+    tx.commit().expect("no-op transaction backend never fails");
 
     Ok(CreatedDocument {
         path: prepared
