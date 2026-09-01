@@ -6,6 +6,7 @@ mod completions_test;
 mod create_test;
 mod delete_test;
 mod docs_test;
+mod enforcement_mode_matrix_test;
 mod export_dot_test;
 mod extract_test;
 mod find_test;

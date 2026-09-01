@@ -3,6 +3,7 @@ mod fixture;
 mod attach_test;
 mod extract_test;
 mod find_test;
+mod freeze_dominates_mutability_test;
 mod http_transport_test;
 mod inline_test;
 mod mutability_test;
