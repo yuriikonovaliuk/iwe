@@ -12,6 +12,7 @@ mod find_test;
 mod init_test;
 mod inline_test;
 mod internal_test;
+mod mutability_test;
 mod new_test;
 mod normalize_test;
 mod prompt_test;

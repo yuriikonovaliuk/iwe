@@ -210,12 +210,12 @@ pub fn write_store_at_path(
 /// Turns a write-permission rejection into the `std::io::Result` this
 /// function already returns for every other kind of write failure, so a
 /// rejection halts `apply_changes` (and is reported to the caller) exactly
-/// the way an I/O error already does.
-fn permission_denied(key: &Key, _rejected: WritePermissionError) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::PermissionDenied,
-        format!("write rejected by write-permission check for '{}'", key),
-    )
+/// the way an I/O error already does. Uses `rejected`'s own `Display` (e.g.
+/// T11's `WritePermissionError::PropertyImmutable`, which names document,
+/// rule, and property) rather than a generic message, so callers surfacing
+/// this error to a user get the specific reason, not just "which key".
+fn permission_denied(_key: &Key, rejected: WritePermissionError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, rejected.to_string())
 }
 
 // WP-06..WP-09 (CLI delete/rename/extract/inline, via main.rs's

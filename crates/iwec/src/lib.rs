@@ -2008,12 +2008,33 @@ impl IweServer {
     /// must be able to drive the transaction into its failed/aborted state
     /// rather than the transaction never having begun.
     fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), ()> {
-        match diwe::permissions::check_write_permission_for_content(&self.config, key, content) {
+        // Resolved from `self.project_path`, not `self.base_path`/cwd: same
+        // `schemas_dir_in(root)` precedent `ensure_schema_clean` already
+        // uses, so the schemas directory used to read `mutable:` rules
+        // matches the one used to validate `--strict`/MCP schema
+        // compliance, and so tests can run in-process against a temp
+        // directory without the server's actual cwd having to match it.
+        let result = match &self.project_path {
+            Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                &self.config,
+                &schemas_dir_in(root),
+                key,
+                content,
+            ),
+            None => diwe::permissions::check_write_permission_for_content(&self.config, key, content),
+        };
+        match result {
             Ok(()) => Ok(()),
-            Err(_rejected) => {
-                // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-                // implemented. The placeholder check never returns Err
-                // today, so this arm is unreachable in practice.
+            Err(rejected) => {
+                // WP-12/WP-13 (this call site's callers, `write_file`/
+                // `write_changes`): the write itself is blocked identically
+                // to the CLI (the file is never written), same as `m2/
+                // design-enforcement-modes`'s "one mechanism, not two"
+                // requires. Threading the rejection's message through to
+                // an MCP tool response is a larger surface (every write
+                // tool's result-construction) than this call site owns;
+                // logging it here at least makes it discoverable.
+                tracing::warn!("write rejected for '{key}': {rejected}");
                 Err(())
             }
         }
@@ -2067,11 +2088,21 @@ impl IweServer {
         if let Some(base_path) = &self.base_path {
             let _ =
                 diwe::fs::apply_changes(changes, base_path, self.config.format, |key, content| {
-                    diwe::permissions::check_write_permission_for_content(
-                        &self.config,
-                        key,
-                        content,
-                    )
+                    // Same `project_path`-rooted resolution as
+                    // `enforce_write_permission` above.
+                    match &self.project_path {
+                        Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                            &self.config,
+                            &schemas_dir_in(root),
+                            key,
+                            content,
+                        ),
+                        None => diwe::permissions::check_write_permission_for_content(
+                            &self.config,
+                            key,
+                            content,
+                        ),
+                    }
                 });
         }
     }
