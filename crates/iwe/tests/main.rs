@@ -11,6 +11,7 @@ mod export_dot_test;
 mod extract_test;
 mod find_test;
 mod freeze_dominates_mutability_test;
+mod freeze_multi_property_write_test;
 mod init_test;
 mod inline_test;
 mod internal_test;

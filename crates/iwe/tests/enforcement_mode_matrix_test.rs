@@ -108,6 +108,45 @@
 //
 // Layer-free fixtures only: no `origin:`/`mint:`/package vocabulary
 // anywhere in this file or the fixtures it drives.
+//
+// # T21 addendum — the second axis this matrix was missing
+//
+// `efforts/knowledge-compositor/m2/design-freeze-semantics` names a real
+// gap in the matrix above: it records *which* property a write touched
+// (body vs. one frontmatter field) but never *how many* properties a
+// single call touched — and EXT-FREEZE's write-permission predicate turns
+// out to be outgoing-content-shaped (no comparison against the document as
+// it stands), so a single call that lifts freeze and changes something
+// else in the same breath bypasses the whole-document rejection this
+// matrix otherwise verified. That second axis, and the sole-effect rule
+// that closes the bypass, is covered in a sibling pair of files rather
+// than by widening the table above:
+//
+//   - `freeze_multi_property_write_test.rs` (this crate) — CLI ordinary
+//     and `--strict`.
+//   - `crates/iwec/tests/freeze_multi_property_write_test.rs` — MCP.
+//
+// Both are deliberately NOT folded into the "verified" table above: that
+// table only records cells this project has *empirically confirmed
+// enforced*, and as of this addendum several of the new cases (the exact
+// bypass, its marker-removal variant, and — a further finding beyond the
+// ruling's own headline example — freezing a previously-unfrozen document
+// bundled with another change) are confirmed *not yet* enforced against
+// this worktree's `crates/diwe/src/permissions.rs`. Recording a known gap
+// in the same table that certifies coverage would misstate what has
+// actually been verified. See the two files above for the full
+// per-case derivation (which cases already pass today and why, which fail
+// and why) and for the C13 enforcement-mode observation once the fix
+// lands: because every case reaches the same WP-04/WP-05/WP-12/WP-13 call
+// sites this matrix already source-traced as identical across CLI
+// ordinary/`--strict`/MCP, mode one is expected uniformly across all three
+// once fixed — no new call site, and hence no new enforcement-mode
+// question, is introduced by the fix this gap calls for.
+//
+// This addendum record is itself the extensible shape the M2 task brief
+// asks for: a later milestone's own rejects-every-write construct can add
+// its own sibling `..._multi_property_write_test.rs` pair and note it here
+// the same way, without restructuring either this file or the table above.
 
 use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
 use std::fs::{create_dir_all, write};
