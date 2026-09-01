@@ -33,3 +33,6 @@ mod t13_enforcement_mode_matrix_test;
 mod tree_test;
 mod update_test;
 mod write_permission_test;
+mod transaction_test;
+mod freeze_test;
+mod t11_mutability_independent_test;

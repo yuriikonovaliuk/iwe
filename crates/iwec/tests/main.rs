@@ -23,3 +23,4 @@ mod tree_test;
 mod watcher_test;
 mod write_permission_test;
 mod write_test;
+mod t11_mutability_independent_test;

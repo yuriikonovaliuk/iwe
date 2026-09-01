@@ -338,6 +338,25 @@ fn strict_with_all_guards_applies() {
     assert_eq!(read_to_string(temp.path().join("d.md")).unwrap(), "# Doc\n");
 }
 
+/// T5 (independent, test-only wiring): black-box confirmation that the
+/// `iwe update` (body-overwrite mode) CLI entry point — which now records
+/// its write on a NoopTransaction via crates/iwe/src/main.rs's
+/// `write_update_body` before writing to disk — still produces exactly
+/// the on-disk result body-overwrite mode is documented to produce. See
+/// `update_body_write_is_unchanged_by_transaction_wiring` in
+/// crates/iwe/src/main.rs for the unit-level before/after comparison
+/// against the pre-wiring filesystem logic directly.
+#[test]
+fn body_overwrite_writes_through_the_wired_transaction_path_unchanged() {
+    let temp = setup(vec![("d", "# Doc\n\nold\n")]);
+    let output = run_update(temp.path(), &["-k", "d", "--content", "# Doc\n\nnew\n"]);
+    assert!(output.status.success());
+    assert_eq!(
+        read_to_string(temp.path().join("d.md")).unwrap(),
+        "# Doc\n\nnew\n"
+    );
+}
+
 #[test]
 fn body_overwrite_preserves_dot_closed_frontmatter() {
     let temp = setup(vec![("d", "---\ntype: note\n...\n\n# Doc\n\npara\n")]);

@@ -69,6 +69,27 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).expect("Valid UTF-8 output")
 }
 
+/// T5 (independent, test-only wiring): black-box confirmation that the
+/// `iwe create` CLI entry point — which now records its write on a
+/// NoopTransaction via crates/iwe/src/new.rs's `write_document` before
+/// writing to disk — still produces exactly the on-disk result content
+/// mode is documented to produce. See
+/// `write_document_is_unchanged_by_transaction_wiring` in
+/// crates/iwe/src/new.rs for the unit-level before/after comparison
+/// against the pre-wiring filesystem logic directly.
+#[test]
+fn content_mode_writes_through_the_wired_transaction_path_unchanged() {
+    let temp = setup();
+    let document = "# Wired\n\nBody.\n";
+    let output = run(temp.path(), &["wired", "--content", document]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        read_to_string(temp.path().join("wired.md")).unwrap(),
+        document
+    );
+}
+
 #[test]
 fn content_mode_writes_the_document_verbatim() {
     let temp = setup();
