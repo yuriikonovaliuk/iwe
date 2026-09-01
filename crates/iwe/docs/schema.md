@@ -603,7 +603,45 @@ asserts:
     description: a dispute goes stale after it opens, not before
 ```
 
-## 13. Examples
+## 13. Freeze — an IWE extension
+
+A document's own frontmatter may carry `freeze: true`. Once set, every
+write to that document is rejected — the body, and every frontmatter
+field alike — regardless of which schema (if any) the document is bound
+to, and on every write path (CLI, `--strict`, MCP). There is no flag that
+bypasses it; unset `freeze` to make the document writable again. Only a
+literal `true` freezes — `freeze: false`, an absent field, or a
+non-boolean value leave the document exactly as writable as it always
+was.
+
+Rejection: `write to '<key>' rejected: document is frozen (unset 'freeze'
+to allow writes)`.
+
+The full reference, with examples, lives in `docs/document-schema.md`
+(§11, "Freeze") in the repository.
+
+## 14. Per-property mutability — an IWE extension
+
+`mutable` is a mapping, at a schema's top level, from a property selector
+to `true` or `false`: `$content` addresses the document body, anything
+else is a possibly-dotted frontmatter field path. A property absent from
+the mapping — or a schema with no `mutable` keyword at all — is mutable:
+the keyword only ever *restricts*, it never grants, so a document whose
+schema never mentions `mutable` sees no change in what can be written to
+it. Checked at write time, on every write path, the same way freeze is —
+not by `iwe schema validate`.
+
+Rejection: `write rejected: document '<key>', rule 'mutable: false',
+property '<selector>'`, with `(the document body)` appended when the
+rejected property is `$content`.
+
+Freeze takes priority over mutability: a frozen document rejects every
+write, including to a property its own schema marks `mutable: true`.
+
+The full reference, with examples, lives in `docs/document-schema.md`
+(§12, "Per-property mutability") in the repository.
+
+## 15. Examples
 
 Header discipline for a whole store — every header capitalized and short,
 every section within budget, nothing deeper than `###`:

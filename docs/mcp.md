@@ -84,7 +84,7 @@ A successful `iwe_create`, `iwe_update`, or `iwe_query` (`update` / `delete`) ma
 - **dangling-link** — a link whose target document does not exist.
 - **similar-page** — a just-authored page that is near-identical to another (only on `create` / `update`; see [Detecting similar pages](cli-stats.md#detecting-similar-pages)).
 
-These warnings are **advisory** — nothing is ever blocked by them (schema validation remains the only hard reject). Each finding is reported **once per session**, so the first mutation surfaces the store's standing issues and later calls surface only what changed. Resolve reported warnings before ending the session; each carries the fix in its message.
+These warnings are **advisory** — nothing is ever blocked by them. The hard rejects are schema validation (under `--strict` / the always-strict `iwe_query`), and, on every write regardless of strictness, a frozen document or a property a schema marks `mutable: false` (see [Document Schema](document-schema.md#11-freeze)). Each finding is reported **once per session**, so the first mutation surfaces the store's standing issues and later calls surface only what changed. Resolve reported warnings before ending the session; each carries the fix in its message.
 
 The per-document `iwe_stats` result (call `iwe_stats` with a `key`) also carries a `similarPages` array — other documents near-identical to that page.
 

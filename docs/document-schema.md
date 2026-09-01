@@ -457,7 +457,60 @@ violations:
   match and starves the entries after it; or an entry whose identity exactly
   duplicates an earlier one, since the earlier always binds first.
 
-## 11. Examples
+## 11. Freeze
+
+`freeze: true` on a document's own frontmatter rejects every write to
+that document — the body, and any frontmatter field, including `freeze`
+itself — unconditionally, on every write path (CLI `create` / `update` /
+`delete` / `rename` / `extract` / `inline` / `attach` / `normalize`, and
+the MCP write tools). It is checked at write time, not by `iwe schema
+validate`, and applies regardless of which schema (if any) the document
+is bound to:
+
+```markdown
+---
+status: signed
+freeze: true
+---
+
+# Signed Contract
+
+The terms below are final.
+```
+
+A rejected write reports `write to '<key>' rejected: document is frozen
+(unset 'freeze' to allow writes)`. Only a literal `true` freezes;
+`freeze: false`, an absent field, or a non-boolean value leaves the
+document writable.
+
+## 12. Per-property mutability
+
+The schema keyword `mutable` maps a property selector — `$content` for
+the document body, or a dotted frontmatter path — to `true` or `false`,
+protecting specific fields (a tooling-maintained `checksum`, an `id` set
+once at creation) while the rest of the document stays freely authored:
+
+```yaml
+mutable:
+  $content: false
+  id: false
+  archived: true
+```
+
+A property absent from `mutable` entirely — including every property on a
+document whose schema never mentions the keyword — is mutable by default;
+`mutable` only ever restricts. A write to a property marked `mutable:
+false` is rejected, naming the document, the rule, and the specific
+property: `write rejected: document '<key>', rule 'mutable: false',
+property '<selector>'` (with `(the document body)` appended for
+`$content`).
+
+Like `freeze`, this is checked at write time on every write path, not by
+`iwe schema validate`. **Freeze dominates**: when a document is both
+frozen and carries a property explicitly marked `mutable: true`, the
+write is rejected as frozen, and `mutable` is never consulted.
+
+## 13. Examples
 
 Header discipline for a whole store — every header capitalized and short,
 every section within budget, nothing deeper than `###`:
@@ -517,3 +570,6 @@ frontmatter:
   binding.
 - [Query Language](spec.md) — the corpus model and the field names the
   language cannot address.
+- [Transactions](transactions.md) — how a write, or a batch of writes,
+  reaches durable storage; how a rejected write (freeze, `mutable`, or a
+  strict-mode schema violation) leaves nothing written.

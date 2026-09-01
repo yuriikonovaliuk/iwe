@@ -225,3 +225,5 @@ iwe create docs/one --content "$(cat one.md)" --strict
 
 - [`iwe update`](cli-update.md) — replace or mutate an existing document
 - [`iwe new`](cli-new.md) — title-first quick capture with `library.default_template`
+- [Document Schema](document-schema.md#11-freeze) — a write to a frozen document, or a property a schema marks `mutable: false`, is rejected regardless of `--strict`.
+- [Transactions](transactions.md) — how a write (or a batch of writes) reaches durable storage.

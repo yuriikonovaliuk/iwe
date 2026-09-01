@@ -52,6 +52,10 @@
 
 [Query Language Specification](spec.md)
 
+[Document Schema](document-schema.md)
+
+[Transactions](transactions.md)
+
 ## Features
 
 [Notes Search](feature-search.md)
