@@ -12,7 +12,7 @@ use liwe::model::{Content, Key, State};
 use liwe::operations::Changes;
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
-use crate::permissions::WritePermissionError;
+use crate::permissions::{WriteOperation, WritePermissionError};
 
 pub fn write_file(
     key: &String,
@@ -307,19 +307,25 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 // changes every property in it, including the immutable ones, from
 // present to gone.) If the on-disk content can't be read, the removal
 // proceeds without a check rather than blocking on an unrelated I/O
-// failure. For `changes.creates` and
+// failure. `check` is also given [`WriteOperation::Delete`] here — M4/R1's
+// explicit operation signal (`m2/design-deletion-carrier`; see
+// `diwe::permissions::WriteOperation`'s own doc comment), so a
+// delete-specific rule (LAW-16's `deletable: false`) can be evaluated only
+// for a genuine removal, never inferred from `content` happening to be
+// `""`. For `changes.creates` and
 // `changes.updates`, `check` additionally receives the document's prior
 // on-disk content (`None` if it doesn't exist yet), read from `base_path`
 // immediately before that document's write — the fix for M2's freeze-
 // bypass defect (`m2/design-freeze-semantics`): a write-permission
 // predicate fed only the outgoing content can't enforce a rule about a
 // transition (e.g. "frozen, unless this write's sole effect is lifting
-// freeze"), since it never sees what the document looked like before.
+// freeze") — and [`WriteOperation::Write`], since neither ever removes a
+// document.
 pub fn apply_changes(
     changes: &Changes,
     base_path: &Path,
     format: Format,
-    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
 ) -> std::io::Result<()> {
     apply_changes_with(changes, base_path, format, check, NoopTransaction::new)
 }
@@ -351,7 +357,7 @@ pub fn apply_changes_with<TX: Transaction>(
     changes: &Changes,
     base_path: &Path,
     format: Format,
-    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
     mut new_tx: impl FnMut() -> TX,
 ) -> std::io::Result<()> {
     let extension = format.extension();
@@ -372,8 +378,12 @@ pub fn apply_changes_with<TX: Transaction>(
                 // comment above `apply_changes_with` for why) rather than
                 // `&existing` — a removal's outgoing state is "nothing",
                 // not "unchanged", so a mutability/freeze rule can actually
-                // see the removal as the change it is.
-                if let Err(rejected) = check(key, "", Some(&existing)) {
+                // see the removal as the change it is. M4/R1: also pass
+                // `WriteOperation::Delete` explicitly — this is the one
+                // call site that actually knows a removal is happening, so
+                // it is the one call site responsible for saying so, rather
+                // than leaving `check` to infer it from `content == ""`.
+                if let Err(rejected) = check(key, "", Some(&existing), WriteOperation::Delete) {
                     let _ = tx.abort();
                     return Err(permission_denied(key, rejected));
                 }
@@ -408,7 +418,7 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
-        if let Err(rejected) = check(key, markdown, prior_content.as_deref()) {
+        if let Err(rejected) = check(key, markdown, prior_content.as_deref(), WriteOperation::Write) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
@@ -435,7 +445,7 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
-        if let Err(rejected) = check(key, markdown, prior_content.as_deref()) {
+        if let Err(rejected) = check(key, markdown, prior_content.as_deref(), WriteOperation::Write) {
             let _ = tx.abort();
             return Err(permission_denied(key, rejected));
         }
@@ -604,6 +614,17 @@ mod tests {
             Ok(())
         }
 
+        /// Same as [`allow`], but shaped for `apply_changes_with`'s `check`
+        /// closure (M4/R1: it additionally takes a [`WriteOperation`]).
+        fn allow4(
+            _key: &Key,
+            _content: &str,
+            _prior_content: Option<&str>,
+            _operation: WriteOperation,
+        ) -> Result<(), WritePermissionError> {
+            Ok(())
+        }
+
         /// WP-06 (delete): removing a document drives exactly one `begin`
         /// and one `commit`, and the file is actually gone afterward.
         #[test]
@@ -613,7 +634,7 @@ mod tests {
             let changes = Changes::new().remove(Key::name("a"));
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -639,7 +660,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("a.md"), "# A\n\nbody\n").unwrap();
             let changes = Changes::new().remove(Key::name("a"));
-            let seen: std::rc::Rc<std::cell::RefCell<Option<(String, Option<String>)>>> =
+            let seen: std::rc::Rc<std::cell::RefCell<Option<(String, Option<String>, WriteOperation)>>> =
                 std::rc::Rc::new(std::cell::RefCell::new(None));
 
             let result = apply_changes_with(
@@ -648,9 +669,12 @@ mod tests {
                 Format::Markdown,
                 {
                     let seen = seen.clone();
-                    move |_key, content, prior_content| {
-                        *seen.borrow_mut() =
-                            Some((content.to_string(), prior_content.map(str::to_string)));
+                    move |_key, content, prior_content, operation| {
+                        *seen.borrow_mut() = Some((
+                            content.to_string(),
+                            prior_content.map(str::to_string),
+                            operation,
+                        ));
                         Ok(())
                     }
                 },
@@ -658,8 +682,13 @@ mod tests {
             );
 
             assert!(result.is_ok(), "{:?}", result.err());
-            let (content, prior_content) = seen.borrow().clone().expect("check was called");
+            let (content, prior_content, operation) = seen.borrow().clone().expect("check was called");
             assert_eq!(content, "", "a removal's outgoing content must be empty");
+            // M4/R1: a removal must be explicitly signaled as
+            // `WriteOperation::Delete`, not left for `check` to infer from
+            // `content == ""` (`m2/design-deletion-carrier`'s "the predicate
+            // ... must therefore distinguish which operation it is judging").
+            assert_eq!(operation, WriteOperation::Delete);
             assert_eq!(
                 prior_content,
                 Some("# A\n\nbody\n".to_string()),
@@ -679,7 +708,7 @@ mod tests {
                 .create(Key::name("new"), "# Old\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -702,7 +731,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("extracted"), "# Extracted\n".into());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -725,7 +754,7 @@ mod tests {
             let changes = Changes::new().update(Key::name("host"), "# Host\n\ninlined\n".into());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -770,7 +799,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::refusing_commit(log.clone())
             });
@@ -798,7 +827,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
                 let log = log.clone();
                 move || RecordingTransaction::rejecting_next_write(log.clone())
             });

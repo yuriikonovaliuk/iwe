@@ -37,7 +37,7 @@ fn apply_changes_remove_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
     let changes = Changes::new().remove(Key::name("a"));
 
-    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -68,7 +68,7 @@ fn apply_changes_create_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("new-doc"), "# New\n".to_string());
 
-    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -99,7 +99,7 @@ fn apply_changes_update_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
     let changes = Changes::new().update(Key::name("a"), "# New\n".to_string());
 
-    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })
@@ -160,7 +160,7 @@ fn always_rejecting_check_hook_aborts_and_leaves_no_partial_state() {
     let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("blocked"), "# Blocked\n".to_string());
 
-    let always_rejecting = |key: &Key, _content: &str, _prior: Option<&str>| {
+    let always_rejecting = |key: &Key, _content: &str, _prior: Option<&str>, _operation: diwe::permissions::WriteOperation| {
         Err(diwe::permissions::WritePermissionError::Frozen { key: key.clone() })
     };
 
@@ -231,7 +231,7 @@ fn backend_commit_refusal_surfaces_as_an_error_and_the_write_does_not_land() {
     let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("doomed"), "# Doomed\n".to_string());
 
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::refusing_commit(log.clone())
     });
@@ -276,7 +276,7 @@ fn backend_commit_refusal_is_distinguishable_from_permission_denial() {
     let log = TransactionLog::new();
     let changes = Changes::new().create(Key::name("x"), "content".to_string());
 
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
         let log = log.clone();
         move || RecordingTransaction::refusing_commit(log.clone())
     });

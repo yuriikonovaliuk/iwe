@@ -363,6 +363,7 @@ pub fn write_document_with<TX: Transaction>(
         &prepared.key,
         &prepared.content,
         prior_content.as_deref(),
+        diwe::permissions::WriteOperation::Write,
     ) {
         let _ = tx.abort();
         return Err(rejected.to_string());

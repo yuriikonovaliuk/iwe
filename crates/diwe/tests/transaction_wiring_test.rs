@@ -27,13 +27,24 @@ fn allow(
     Ok(())
 }
 
+/// Same as [`allow`], but shaped for `apply_changes_with`'s `check` closure
+/// (M4/R1: it additionally takes a `diwe::permissions::WriteOperation`).
+fn allow4(
+    _key: &Key,
+    _content: &str,
+    _prior_content: Option<&str>,
+    _operation: diwe::permissions::WriteOperation,
+) -> Result<(), diwe::permissions::WritePermissionError> {
+    Ok(())
+}
+
 #[test]
 fn apply_changes_with_is_reachable_and_drivable_from_outside_the_crate() {
     let dir = tempfile::tempdir().unwrap();
     let changes = Changes::new().create(Key::name("note"), "# Note\n".to_string());
     let log = TransactionLog::new();
 
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow, {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });

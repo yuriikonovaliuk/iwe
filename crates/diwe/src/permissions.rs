@@ -29,12 +29,34 @@
 use std::path::Path;
 
 use crate::config::{schemas_dir, Configuration};
-use crate::schema::{schema_mutability_rules, MutabilityRule, SchemaBindings};
+use crate::schema::{schema_deletable_rule, schema_mutability_rules, MutabilityRule, SchemaBindings};
 use liwe::model::document::Document;
 use liwe::model::{parse_leading_frontmatter, split_raw_frontmatter, Frontmatter, Key};
 use liwe::query::filter::{resolve_path, Resolution};
 use liwe::query::PropertyRef;
 use serde_yaml::Value;
+
+/// Which kind of write [`check_write_permission_for_content`] (and its
+/// `_in`/`_with_mutability` siblings) is evaluating — explicit, never
+/// inferred from `content`'s shape (e.g. "`content` happens to be `\"\"`").
+///
+/// M4/R1 (`m2/design-deletion-carrier`) needs the write-permission predicate
+/// to "distinguish which operation it is judging" so a delete-specific
+/// prohibition (LAW-16, [`WritePermissionError::DeleteProhibited`]) can be
+/// evaluated only for an actual removal, and can never be triggered — or
+/// silently skipped — by an ordinary create/update whose outgoing content
+/// happens to be empty. Every call site that can tell whether it is
+/// removing a document (`diwe::fs::apply_changes[_with]`'s `changes.removes`
+/// loop) passes [`WriteOperation::Delete`] explicitly; every call site that
+/// can only ever create or update (whole-document rewrites, `iwe normalize`,
+/// every MCP tool other than `iwe_delete`) passes [`WriteOperation::Write`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOperation {
+    /// A create or update: the document continues to exist afterward.
+    Write,
+    /// A removal: the document ceases to exist afterward.
+    Delete,
+}
 
 /// The reserved frontmatter marker (EXT-FREEZE, T10) that makes a document
 /// immutable: `freeze: true` on a document's own frontmatter rejects every
@@ -196,6 +218,19 @@ pub enum WritePermissionError {
         /// `mutable:` mapping (`$content`, or a dotted frontmatter path).
         selector: String,
     },
+    /// M4/R1 (LAW-16, `m2/design-deletion-carrier`): a [`WriteOperation::
+    /// Delete`] was rejected because the schema bound to `key` declares
+    /// `deletable: false`. Independent of [`WritePermissionError::
+    /// PropertyImmutable`]/[`WritePermissionError::Frozen`] — evaluated by
+    /// its own construct (`crate::schema::schema_deletable_rule`), never as
+    /// a side effect of a `mutable:`/`freeze` rule rejecting the same
+    /// removal for an unrelated reason. See this module's "deletion
+    /// prohibition" section (near `check_write_permission_with_mutability`)
+    /// for why the two rejection paths must not be conflated.
+    DeleteProhibited {
+        /// The document whose deletion was rejected.
+        key: Key,
+    },
 }
 
 impl std::fmt::Display for WritePermissionError {
@@ -217,6 +252,10 @@ impl std::fmt::Display for WritePermissionError {
                 } else {
                     ""
                 }
+            ),
+            WritePermissionError::DeleteProhibited { key } => write!(
+                f,
+                "delete rejected: document '{key}', rule 'deletable: false' (this document cannot be deleted)"
             ),
         }
     }
@@ -391,6 +430,71 @@ pub fn resolve_mutability_rules_in(
     schema_mutability_rules(schemas_dir, name)
 }
 
+/// Resolves the `deletable:` rule `key`'s bound schema(s) declare (M4/R1,
+/// LAW-16's carrier), for callers that need to pass a real `deletable`
+/// argument into [`check_write_permission_with_mutability`]. Resolves the
+/// schemas directory via `diwe::config::schemas_dir` (the process's current
+/// directory) — see [`resolve_mutability_rules`]'s doc comment for the same
+/// convention; [`resolve_deletable_rule_in`] is the explicit-root
+/// equivalent.
+///
+/// If `key` matches no schema, `config.schemas` fails to compile, or the
+/// schemas directory can't be resolved, this returns `None` — deletable by
+/// default (mirrors AB9) — rather than blocking a removal on a problem
+/// unrelated to deletion.
+pub fn resolve_deletable_rule(config: &Configuration, key: &Key) -> Option<bool> {
+    match schemas_dir() {
+        Ok(dir) => resolve_deletable_rule_in(&dir, config, key),
+        Err(_) => None,
+    }
+}
+
+/// Same as [`resolve_deletable_rule`], but reading schema files from the
+/// caller-supplied `schemas_dir` rather than one derived from the process's
+/// current directory — see [`resolve_mutability_rules_in`]'s doc comment for
+/// when to prefer this.
+///
+/// Deliberately **not** [`resolve_mutability_rules_in`]'s "first bound
+/// schema wins" resolution: `mutable:` is safe to resolve that way only
+/// because `schema_gen::law_09`'s own doc comment requires its file to be
+/// "the sole/alphabetically-first schema bound to a mint key" for its map to
+/// take effect at all — a constraint the compositor's schema *naming*
+/// happens to satisfy today, but that a delete prohibition must not be
+/// allowed to depend on, since `deletable` is meant as an unconditional
+/// prohibition, not a per-property allowlist a single first-matching schema
+/// is expected to own. If `generated-law-16` (or any other schema declaring
+/// `deletable: false`) sorted *after* another schema bound to the same key —
+/// exactly the case here, since `"generated-law-16"` sorts after
+/// `"generated-law-09"` — a first-match resolution would silently never see
+/// it. Instead, every schema `key` is bound to is consulted, and the most
+/// restrictive answer wins: `Some(false)` from *any* of them makes the whole
+/// document non-deletable, regardless of what any other bound schema says or
+/// leaves unsaid; only when no bound schema says `false` does an explicit
+/// `Some(true)` apply; absent from every bound schema is `None` (deletable
+/// by default, AB9-shaped).
+pub fn resolve_deletable_rule_in(
+    schemas_dir: &Path,
+    config: &Configuration,
+    key: &Key,
+) -> Option<bool> {
+    let Ok(bindings) = SchemaBindings::compile(&config.schemas) else {
+        return None;
+    };
+    let mut saw_true = false;
+    for name in bindings.schemas_for(key.as_str()) {
+        match schema_deletable_rule(schemas_dir, name) {
+            Some(false) => return Some(false),
+            Some(true) => saw_true = true,
+            None => {}
+        }
+    }
+    if saw_true {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Resolves `key`'s `mutable:` rules via [`resolve_mutability_rules`]
 /// (cwd-rooted schemas directory — see that function's doc comment;
 /// [`check_write_permission_for_content_in`] is the explicit-root
@@ -446,9 +550,11 @@ pub fn check_write_permission_for_content(
     key: &Key,
     content: &str,
     prior_content: Option<&str>,
+    operation: WriteOperation,
 ) -> Result<(), WritePermissionError> {
     let mutability = resolve_mutability_rules(config, key);
-    check_write_permission_with_mutability(key, content, prior_content, mutability)
+    let deletable = resolve_deletable_rule(config, key);
+    check_write_permission_with_mutability(key, content, prior_content, mutability, operation, deletable)
 }
 
 /// Same as [`check_write_permission_for_content`], but resolving `mutable:`
@@ -460,16 +566,42 @@ pub fn check_write_permission_for_content_in(
     key: &Key,
     content: &str,
     prior_content: Option<&str>,
+    operation: WriteOperation,
 ) -> Result<(), WritePermissionError> {
     let mutability = resolve_mutability_rules_in(schemas_dir, config, key);
-    check_write_permission_with_mutability(key, content, prior_content, mutability)
+    let deletable = resolve_deletable_rule_in(schemas_dir, config, key);
+    check_write_permission_with_mutability(key, content, prior_content, mutability, operation, deletable)
 }
 
+/// The single site freeze (LAW-12/13), per-property mutability (LAW-09), and
+/// the delete prohibition (LAW-16, M4/R1) are evaluated together for a
+/// whole-document write/removal.
+///
+/// # The delete prohibition is a separate check (M4/R1, `m2/design-deletion-carrier`)
+///
+/// `deletable` is resolved and checked entirely independently of
+/// `mutability`: it is consulted only when `operation` is
+/// [`WriteOperation::Delete`], its own `Some(false)`/`Some(true)`/`None`
+/// tri-state is never derived from (or folded into) any `MutabilityRule`,
+/// and it produces its own [`WritePermissionError::DeleteProhibited`]
+/// rather than reusing [`WritePermissionError::PropertyImmutable`]. This is
+/// deliberate, not an oversight: `m2/design-deletion-carrier` requires the
+/// deletion prohibition to hold even where a document's `mutable:` map
+/// (LAW-09's own construct) would, as an unrelated side effect of diffing
+/// `content = ""` against `prior_content`, also happen to reject the same
+/// removal — the two must not depend on each other, since a future
+/// narrowing of the body-immutability rule must not silently stop
+/// protecting deletion (and, symmetrically, a future change to `deletable`
+/// resolution must not silently affect body-immutability). Both checks may
+/// legitimately fire together on the same rejected delete; neither is
+/// required for the other to be correct.
 fn check_write_permission_with_mutability(
     key: &Key,
     content: &str,
     prior_content: Option<&str>,
     mutability: Vec<MutabilityRule>,
+    operation: WriteOperation,
+    deletable: Option<bool>,
 ) -> Result<(), WritePermissionError> {
     let prior_frontmatter = prior_content.and_then(parse_leading_frontmatter);
     let prior_frozen = prior_frontmatter
@@ -489,6 +621,20 @@ fn check_write_permission_with_mutability(
         } else {
             Err(WritePermissionError::Frozen { key: key.clone() })
         };
+    }
+
+    // M4/R1 (LAW-16, `m2/design-deletion-carrier`): the delete prohibition,
+    // evaluated as its own, separate check -- see this function's own doc
+    // comment ("The delete prohibition is a separate check") for why it
+    // must not be folded into, or inferred from, the mutability loop below.
+    // Only consulted for an actual removal (`operation ==
+    // WriteOperation::Delete`); a create/update is never affected by
+    // `deletable`, regardless of what `content` happens to look like.
+    // Reached only once freeze has already had its say (freeze still
+    // dominates, per LAW-13, unchanged from before this fix): a frozen
+    // document is rejected as `Frozen` above, never reaching this branch.
+    if operation == WriteOperation::Delete && deletable == Some(false) {
+        return Err(WritePermissionError::DeleteProhibited { key: key.clone() });
     }
 
     // Not frozen prior to this write (including "no prior document at
@@ -639,7 +785,7 @@ mod tests {
         let prior = "---\nfreeze: true\n---\n\n# Frozen\n\noriginal body\n";
         let next = "---\nfreeze: true\n---\n\n# Frozen\n\nchanged body\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, next, Some(prior));
+            check_write_permission_for_content(&config, &doc_key, next, Some(prior), WriteOperation::Write);
         assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));
     }
 
@@ -648,7 +794,7 @@ mod tests {
         let config = Configuration::default();
         let key = key("plain-doc");
         let content = "# Plain\n\nbody\n";
-        let result = check_write_permission_for_content(&config, &key, content, None);
+        let result = check_write_permission_for_content(&config, &key, content, None, WriteOperation::Write);
         assert!(result.is_ok());
     }
 
@@ -663,7 +809,7 @@ mod tests {
         let prior = "---\nfreeze: true\nstatus: draft\n---\n\n# Frozen\n\nbody\n";
         let next = "---\nfreeze: false\nstatus: changed\n---\n\n# Frozen\n\nbody\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, next, Some(prior));
+            check_write_permission_for_content(&config, &doc_key, next, Some(prior), WriteOperation::Write);
         assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));
     }
 
@@ -676,7 +822,7 @@ mod tests {
         let prior = "---\nfreeze: true\nstatus: draft\n---\n\n# Frozen\n\nbody\n";
         let next = "---\nfreeze: false\nstatus: draft\n---\n\n# Frozen\n\nbody\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, next, Some(prior));
+            check_write_permission_for_content(&config, &doc_key, next, Some(prior), WriteOperation::Write);
         assert!(result.is_ok());
     }
 
@@ -689,7 +835,7 @@ mod tests {
         let prior = "---\nfreeze: true\nstatus: draft\n---\n\n# Frozen\n\nbody\n";
         let next = "---\nstatus: draft\n---\n\n# Frozen\n\nbody\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, next, Some(prior));
+            check_write_permission_for_content(&config, &doc_key, next, Some(prior), WriteOperation::Write);
         assert!(result.is_ok());
     }
 
@@ -704,7 +850,7 @@ mod tests {
         let prior = "---\nstatus: draft\n---\n\n# Plain\n\nbody\n";
         let next = "---\nfreeze: true\nstatus: changed\n---\n\n# Plain\n\nnew body\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, next, Some(prior));
+            check_write_permission_for_content(&config, &doc_key, next, Some(prior), WriteOperation::Write);
         assert!(result.is_ok());
     }
 
@@ -716,7 +862,7 @@ mod tests {
         let config = Configuration::default();
         let doc_key = key("brand-new");
         let content = "---\nfreeze: true\n---\n\n# Brand New\n\nbody\n";
-        let result = check_write_permission_for_content(&config, &doc_key, content, None);
+        let result = check_write_permission_for_content(&config, &doc_key, content, None, WriteOperation::Write);
         assert!(result.is_ok());
     }
 
@@ -729,7 +875,7 @@ mod tests {
         let doc_key = key("frozen-doc");
         let content = "---\nfreeze: true\n---\n\n# Frozen\n\nbody\n";
         let result =
-            check_write_permission_for_content(&config, &doc_key, content, Some(content));
+            check_write_permission_for_content(&config, &doc_key, content, Some(content), WriteOperation::Write);
         assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));
     }
 
@@ -949,6 +1095,8 @@ mod tests {
             next,
             Some(D1_PRIOR),
             d1_mutability(),
+            WriteOperation::Write,
+            None,
         );
         assert_eq!(
             result,
@@ -974,6 +1122,8 @@ mod tests {
             next,
             Some(D1_PRIOR),
             d1_mutability(),
+            WriteOperation::Write,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1006,6 +1156,8 @@ mod tests {
             next,
             Some(D1_PRIOR),
             d1_mutability(),
+            WriteOperation::Write,
+            None,
         );
         assert_eq!(
             result,
@@ -1029,6 +1181,8 @@ mod tests {
             next,
             Some(D1_PRIOR),
             d1_mutability(),
+            WriteOperation::Write,
+            None,
         );
         assert_eq!(
             result,
@@ -1051,6 +1205,8 @@ mod tests {
             next,
             Some(D1_PRIOR),
             d1_mutability(),
+            WriteOperation::Write,
+            None,
         );
         assert!(result.is_ok(), "{result:?}");
     }
@@ -1065,7 +1221,7 @@ mod tests {
         let prior = "---\nstatus: draft\nowner: alice\narchived: false\ntags: [a]\n---\n\n# Doc\n\nOriginal body.\n";
         let next = "---\nstatus: draft\nowner: alice\narchived: false\ntags: [a, b]\n---\n\n# Doc\n\nOriginal body.\n";
         let result =
-            check_write_permission_with_mutability(&doc_key, next, Some(prior), d1_mutability());
+            check_write_permission_with_mutability(&doc_key, next, Some(prior), d1_mutability(), WriteOperation::Write, None);
         assert!(result.is_ok(), "{result:?}");
     }
 
@@ -1109,8 +1265,14 @@ mod tests {
             mutable: false,
         }];
 
-        let result =
-            check_write_permission_with_mutability(&doc_key, "", Some(prior), mutability);
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            mutability,
+            WriteOperation::Delete,
+            None,
+        );
 
         assert_eq!(
             result,
@@ -1130,8 +1292,212 @@ mod tests {
         let doc_key = key("mind/ordinary");
         let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
 
-        let result = check_write_permission_with_mutability(&doc_key, "", Some(prior), vec![]);
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            vec![],
+            WriteOperation::Delete,
+            None,
+        );
 
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // =======================================================================
+    // M4/R1 (LAW-16, `m2/design-deletion-carrier`): the delete prohibition
+    // (`deletable: false`), proven as a genuinely separate construct from
+    // LAW-09's `mutable:`/body-immutability rule -- not incidental fallout
+    // from it. Each case below is chosen so the two mechanisms' rejections
+    // can be told apart (different error variant) and so their independence
+    // can be exercised directly: a case where `mutable:` alone would allow a
+    // delete but `deletable: false` still rejects it (case-in-the-absence-
+    // of-mutable), and a case where `deletable` is entirely absent but
+    // `mutable: false` still rejects the delete on its own (already proven
+    // above by the D4 tests) -- together showing neither depends on the
+    // other to produce the correct rejection.
+    // =======================================================================
+
+    /// The core case: a delete against a document whose schema declares
+    /// `deletable: false` is rejected as `DeleteProhibited` -- not
+    /// `PropertyImmutable` -- even though this document's `mutable:` map is
+    /// empty (no body-immutability rule at all, so LAW-09's construct would
+    /// have nothing to say about this same removal). Proves the rejection
+    /// does not depend on `mutable:` firing too.
+    #[test]
+    fn delete_of_a_non_deletable_document_is_rejected_even_with_no_mutable_rule_at_all() {
+        let doc_key = key("mind/mint-origin");
+        let prior = "---\nprovenance:\n  origin: mint:example@1.0.0\n---\n\n# Doc\n\nOriginal body.\n";
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            vec![],
+            WriteOperation::Delete,
+            Some(false),
+        );
+
+        assert_eq!(
+            result,
+            Err(WritePermissionError::DeleteProhibited {
+                key: doc_key.clone()
+            })
+        );
+        assert_ne!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// The mirror case: a document whose body *is* schema-marked immutable,
+    /// but whose schema does not declare `deletable` at all (`None`) --
+    /// deletion is rejected purely by the pre-existing `mutable:` mechanism
+    /// (D4's own fix, reproduced here with `deletable` explicitly absent),
+    /// proving that mechanism does not depend on `deletable` being declared
+    /// at all.
+    #[test]
+    fn delete_still_rejected_by_mutable_rule_alone_when_deletable_is_never_declared() {
+        let doc_key = key("mind/mint-origin-2");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+        let mutability = vec![MutabilityRule {
+            selector: "$content".to_string(),
+            property: PropertyRef::Body,
+            mutable: false,
+        }];
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            mutability,
+            WriteOperation::Delete,
+            None,
+        );
+
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// The patch path (`m2/design-deletion-carrier`'s "Update of a
+    /// schema-mutable property ... permitted"): `deletable: false` on a
+    /// document must not block an ordinary property *update* -- only an
+    /// actual delete. A write (`WriteOperation::Write`) to a mutable
+    /// property succeeds even though the same document's `deletable` rule
+    /// is `Some(false)`.
+    #[test]
+    fn deletable_false_does_not_block_an_update_to_a_mutable_property() {
+        let doc_key = key("mind/mint-origin");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+        let next = "---\nstatus: approved\n---\n\n# Doc\n\nOriginal body.\n";
+        let mutability = vec![
+            MutabilityRule {
+                selector: "$content".to_string(),
+                property: PropertyRef::Body,
+                mutable: false,
+            },
+            MutabilityRule {
+                selector: "status".to_string(),
+                property: PropertyRef::from_selector("status"),
+                mutable: true,
+            },
+        ];
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(prior),
+            mutability,
+            WriteOperation::Write,
+            Some(false),
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The body-immutability side of the same three-way distinction: a
+    /// body-only *update* (not a delete) on the same non-deletable document
+    /// is still rejected -- but via `PropertyImmutable`, never
+    /// `DeleteProhibited`, since `deletable` is never consulted for
+    /// `WriteOperation::Write`.
+    #[test]
+    fn deletable_false_document_still_rejects_a_body_update_via_mutable_rule_not_deletable() {
+        let doc_key = key("mind/mint-origin");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+        let next = "---\nstatus: draft\n---\n\n# Doc\n\nChanged body.\n";
+        let mutability = vec![MutabilityRule {
+            selector: "$content".to_string(),
+            property: PropertyRef::Body,
+            mutable: false,
+        }];
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(prior),
+            mutability,
+            WriteOperation::Write,
+            Some(false),
+        );
+
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// `deletable` absent (`None`) is deletable by default (AB9-shaped): a
+    /// delete of an ordinary document with no `deletable` rule at all
+    /// succeeds.
+    #[test]
+    fn deletable_absent_allows_delete_by_default() {
+        let doc_key = key("mind/ordinary");
+        let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            vec![],
+            WriteOperation::Delete,
+            None,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Freeze still dominates the delete prohibition exactly as it dominates
+    /// mutability (LAW-13): a frozen document's delete is rejected as
+    /// `Frozen`, not `DeleteProhibited`, even when `deletable` is explicitly
+    /// `Some(true)`.
+    #[test]
+    fn freeze_dominates_an_explicitly_deletable_document() {
+        let doc_key = key("mind/frozen");
+        let prior = "---\nfreeze: true\n---\n\n# Doc\n\nOriginal body.\n";
+
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            "",
+            Some(prior),
+            vec![],
+            WriteOperation::Delete,
+            Some(true),
+        );
+
+        assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));
     }
 }

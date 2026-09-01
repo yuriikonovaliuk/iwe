@@ -2799,6 +2799,7 @@ fn normalize_command(args: Normalize) {
                     key,
                     content,
                     prior_content,
+                    diwe::permissions::WriteOperation::Write,
                 )
             },
             NoopTransaction::new,
@@ -2838,6 +2839,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
                 key,
                 content,
                 prior_content,
+                diwe::permissions::WriteOperation::Write,
             )
         },
     )
@@ -2867,12 +2869,13 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
         changes,
         &get_library_path(configuration),
         configuration.format,
-        |key, content, prior_content| {
+        |key, content, prior_content, operation| {
             diwe::permissions::check_write_permission_for_content(
                 configuration,
                 key,
                 content,
                 prior_content,
+                operation,
             )
         },
     ) {
@@ -4120,6 +4123,7 @@ fn update_body(args: Update) {
                 key,
                 content,
                 prior_content,
+                diwe::permissions::WriteOperation::Write,
             )
         },
         NoopTransaction::new,
@@ -4360,6 +4364,7 @@ fn write_changed_documents(
                         key,
                         content,
                         prior_content,
+                        diwe::permissions::WriteOperation::Write,
                     )
                 },
                 NoopTransaction::new,
@@ -4533,6 +4538,7 @@ fn attach_command(args: Attach) {
                     key,
                     content,
                     prior_content,
+                    diwe::permissions::WriteOperation::Write,
                 )
             },
             NoopTransaction::new,
