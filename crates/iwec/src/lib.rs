@@ -8,10 +8,11 @@ use std::sync::Arc;
 use chrono::Local;
 use diwe::config::{
     library_path_in, schemas_dir_in, ActionDefinition, CompletionOptions, Configuration,
-    MarkdownOptions, NoteTemplate, DEFAULT_KEY_DATE_FORMAT,
+    MarkdownOptions, NoteTemplate, Patterns, SchemaBinding, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
 use diwe::fs::{new_for_path, new_from_hashmap};
+use diwe::permissions::check_write_permission;
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_pending_documents,
@@ -1989,7 +1990,36 @@ impl IweServer {
             .is_some_and(|file_path| file_path.exists())
     }
 
+    /// T3 proof-of-concept insertion point: mirrors `iwe::main::
+    /// enforce_write_permission`'s call to the shared write-permission site
+    /// (`diwe::permissions::check_write_permission`), reached here from
+    /// every iwec write instead of from a CLI command handler. Unconditional
+    /// — never gated behind a strict/non-strict branch — because
+    /// write-permission evaluation must fire identically regardless of
+    /// invocation mode. WP-02..WP-13 are not implemented yet: `schema` is a
+    /// placeholder match-all binding and `document` reflects only what is
+    /// cheaply available at this call site; T10/T11/T12 replace both with
+    /// the real resolved schema and target document state.
+    fn enforce_write_permission(&self, key: &Key, content: &str) {
+        let (front, _body) = liwe::model::split_raw_frontmatter(content);
+        let document = liwe::model::document::Document {
+            blocks: Vec::new(),
+            frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
+        };
+        let schema = SchemaBinding {
+            r#match: Patterns::Many(Vec::new()),
+        };
+        let _ = key;
+        if let Err(_rejected) =
+            check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema)
+        {
+            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+            // implemented. The placeholder check never returns Err today.
+        }
+    }
+
     fn write_file(&self, key: &Key, content: &str) {
+        self.enforce_write_permission(key, content);
         if let Some(file_path) = self.document_path(key) {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -2003,6 +2033,9 @@ impl IweServer {
     }
 
     fn write_changes(&self, changes: &Changes) {
+        for (key, content) in changes.creates.iter().chain(changes.updates.iter()) {
+            self.enforce_write_permission(key, content);
+        }
         if let Some(base_path) = &self.base_path {
             let _ = diwe::fs::apply_changes(changes, base_path, self.config.format);
         }

@@ -10,8 +10,11 @@ use clap_complete_nushell::Nushell;
 mod help;
 use itertools::Itertools;
 
-use diwe::config::{load_config, ActionDefinition, Configuration, InlineType, LinkType};
+use diwe::config::{
+    load_config, ActionDefinition, Configuration, InlineType, LinkType, Patterns, SchemaBinding,
+};
 use diwe::graph_from_path;
+use diwe::permissions::check_write_permission;
 use diwe::schema::{
     explain_documents, explain_documents_against_file, pending_from_changes, render_reports_text,
     validate_pending_documents,
@@ -2192,19 +2195,22 @@ fn new_command(args: New) {
     };
 
     match creator.prepare(options) {
-        Ok(Some(prepared)) => match write_document(&prepared) {
-            Ok(doc) => {
-                println!("{}", doc.path.display());
+        Ok(Some(prepared)) => {
+            enforce_write_permission(&prepared.key, &prepared.content);
+            match write_document(&prepared) {
+                Ok(doc) => {
+                    println!("{}", doc.path.display());
 
-                if args.edit {
-                    open_in_editor(&doc.path);
+                    if args.edit {
+                        open_in_editor(&doc.path);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
                 }
             }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        },
+        }
         Ok(None) => {}
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -2247,6 +2253,8 @@ fn create_command(args: Create) {
     if args.strict {
         gate_pending(&config, &[(prepared.key.clone(), prepared.content.clone())]);
     }
+
+    enforce_write_permission(&prepared.key, &prepared.content);
 
     match write_document(&prepared) {
         Ok(doc) => {
@@ -3099,6 +3107,33 @@ fn render_fill_in_text(request: &diwe::fill_in::FillInRequest) -> String {
         out.push_str(&format!("  referenced by: {}\n", referrer.key));
     }
     out
+}
+
+/// T3 proof-of-concept insertion point: calls the shared write-permission
+/// site (`diwe::permissions::check_write_permission`) immediately before a
+/// write reaches disk. Unconditional — unlike `gate_pending`, this is never
+/// wrapped in `if args.strict`, because write-permission evaluation must
+/// fire identically under ordinary and strict invocation. WP-02..WP-13 are
+/// not implemented yet, so `schema` here is a placeholder match-all binding
+/// and `document` reflects only what is cheaply available at this call
+/// site; T10/T11/T12 replace both with the real resolved schema and target
+/// document state when they implement the checks.
+fn enforce_write_permission(key: &Key, content: &str) {
+    let (front, _body) = split_raw_frontmatter(content);
+    let document = liwe::model::document::Document {
+        blocks: Vec::new(),
+        frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
+    };
+    let schema = SchemaBinding {
+        r#match: Patterns::Many(Vec::new()),
+    };
+    let _ = key;
+    if let Err(_rejected) =
+        check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema)
+    {
+        // T10/T11/T12: surface the rejection to the caller once WP-02..WP-13
+        // are implemented. The placeholder check never returns Err today.
+    }
 }
 
 fn gate_pending(config: &Configuration, docs: &[(Key, String)]) {
