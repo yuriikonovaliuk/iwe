@@ -12,6 +12,8 @@ use liwe::model::{Content, Key, State};
 use liwe::operations::Changes;
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
+use crate::permissions::WritePermissionError;
+
 pub fn write_file(
     key: &String,
     content: &Content,
@@ -176,13 +178,26 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
 // WP-11 (empty-key/normalize-all branch): each document rewritten by a
 // whole-graph normalize is routed through the no-op Transaction interface
 // as its own implicit single-write transaction, before the actual
-// filesystem write.
-pub fn write_store_at_path(store: &State, to: &Path, format: Format) -> std::io::Result<()> {
+// filesystem write. `check` is the same permission-check hook `apply_
+// changes` takes (see its doc comment) — run inside this transaction
+// bracket, after `begin()`, before the actual filesystem write, aborting
+// the transaction and halting on rejection.
+pub fn write_store_at_path(
+    store: &State,
+    to: &Path,
+    format: Format,
+    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+) -> std::io::Result<()> {
     for (key, content) in store.iter() {
+        let doc_key = Key::name(key);
         let mut tx = NoopTransaction::new();
         tx.begin().expect("no-op transaction backend never fails");
-        tx.write(TxWrite::Put(Key::name(key), content.clone()))
+        tx.write(TxWrite::Put(doc_key.clone(), content.clone()))
             .expect("no-op transaction backend never fails");
+        if let Err(rejected) = check(&doc_key, content) {
+            let _ = tx.abort();
+            return Err(permission_denied(&doc_key, rejected));
+        }
         if let Err(e) = write_file(key, content, to, format) {
             let _ = tx.abort();
             return Err(e);
@@ -192,12 +207,45 @@ pub fn write_store_at_path(store: &State, to: &Path, format: Format) -> std::io:
     Ok(())
 }
 
+/// Turns a write-permission rejection into the `std::io::Result` this
+/// function already returns for every other kind of write failure, so a
+/// rejection halts `apply_changes` (and is reported to the caller) exactly
+/// the way an I/O error already does.
+fn permission_denied(key: &Key, _rejected: WritePermissionError) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("write rejected by write-permission check for '{}'", key),
+    )
+}
+
 // WP-06..WP-09 (CLI delete/rename/extract/inline, via main.rs's
 // `apply_changes` wrapper) and WP-12 (MCP write tools that go through
 // `write_changes` -> this function): every remove/create/update below is
 // routed through the no-op Transaction interface as its own implicit
 // single-write transaction, before the actual filesystem operation.
-pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std::io::Result<()> {
+//
+// `check` lets a caller opt in to running `diwe::permissions::
+// check_write_permission`-shaped logic (e.g. via `diwe::permissions::
+// check_write_permission_for_content`) inside each per-write transaction
+// bracket, after `tx.begin()` and before the real write, aborting the
+// transaction and halting `apply_changes` on rejection — the same
+// composition already used at `iwe::new::write_document` / `iwec`'s
+// `write_file`. This is the one hook every caller of `apply_changes`
+// (CLI delete/rename/extract/inline, MCP `write_changes`) wires
+// identically, per `m2/design-enforcement-modes`'s "one mechanism, not
+// two": the check is implemented once, here, not re-implemented at each
+// caller.
+//
+// For `changes.removes`, `check` is given the document's on-disk content as
+// it exists immediately before removal (there is no "new" content for a
+// removal). If that content can't be read, the removal proceeds without a
+// check rather than blocking on an unrelated I/O failure.
+pub fn apply_changes(
+    changes: &Changes,
+    base_path: &Path,
+    format: Format,
+    check: impl Fn(&Key, &str) -> Result<(), WritePermissionError>,
+) -> std::io::Result<()> {
     let extension = format.extension();
 
     for key in &changes.removes {
@@ -207,6 +255,12 @@ pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std
         tx.write(TxWrite::Remove(key.clone()))
             .expect("no-op transaction backend never fails");
         if file_path.exists() {
+            if let Ok(existing) = fs::read_to_string(&file_path) {
+                if let Err(rejected) = check(key, &existing) {
+                    let _ = tx.abort();
+                    return Err(permission_denied(key, rejected));
+                }
+            }
             if let Err(e) = fs::remove_file(&file_path) {
                 let _ = tx.abort();
                 return Err(e);
@@ -225,6 +279,10 @@ pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(key.clone(), markdown.clone()))
             .expect("no-op transaction backend never fails");
+        if let Err(rejected) = check(key, markdown) {
+            let _ = tx.abort();
+            return Err(permission_denied(key, rejected));
+        }
         if let Err(e) = fs::write(&file_path, markdown) {
             let _ = tx.abort();
             return Err(e);
@@ -238,6 +296,10 @@ pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(key.clone(), markdown.clone()))
             .expect("no-op transaction backend never fails");
+        if let Err(rejected) = check(key, markdown) {
+            let _ = tx.abort();
+            return Err(permission_denied(key, rejected));
+        }
         if let Err(e) = fs::write(&file_path, markdown) {
             let _ = tx.abort();
             return Err(e);

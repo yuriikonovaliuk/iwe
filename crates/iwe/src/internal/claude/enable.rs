@@ -286,7 +286,7 @@ fn create_document(config: &diwe::config::Configuration, key: &str, content: &st
             return false;
         }
     };
-    match write_document(&prepared) {
+    match write_document(config, &prepared) {
         Ok(_) => true,
         Err(error) => {
             eprintln!("error: {}", error);

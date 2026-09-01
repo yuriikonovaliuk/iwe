@@ -46,7 +46,6 @@ use liwe::locale::get_locale;
 use liwe::model::node::NodePointer;
 use liwe::model::tree::TreeIter;
 use liwe::model::{split_raw_frontmatter, Frontmatter, Key};
-use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::operations::{
     attach_reference, delete as op_delete, extract as op_extract, inline as op_inline, references,
     rename as op_rename, sections, select_reference, select_section, AttachTarget, Changes,
@@ -59,6 +58,7 @@ use liwe::query::{
     check_path_segments, current_query_schema, FieldPath, Filter, Projection as QueryProjection,
     ProjectionField, ProjectionSource, Sort as QuerySort, SortDir,
 };
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
 use log::{debug, error, info};
 
@@ -2197,7 +2197,7 @@ fn new_command(args: New) {
             // Write-permission is checked inside `write_document`'s
             // transaction bracket (see `iwe::new::write_document`), not
             // here, so a rejection can drive the transaction's abort path.
-            match write_document(&prepared) {
+            match write_document(&config, &prepared) {
                 Ok(doc) => {
                     println!("{}", doc.path.display());
 
@@ -2257,7 +2257,7 @@ fn create_command(args: Create) {
     // Write-permission is checked inside `write_document`'s transaction
     // bracket (see `iwe::new::write_document`), not here, so a rejection
     // can drive the transaction's abort path.
-    match write_document(&prepared) {
+    match write_document(&config, &prepared) {
         Ok(doc) => {
             println!("{}", doc.path.display());
 
@@ -2787,10 +2787,26 @@ fn normalize_command(args: Normalize) {
 
         // WP-11 (per-key branch): normalize_command's durable write for a
         // single document, routed through the no-op Transaction interface.
+        // The write-permission check runs inside this transaction bracket
+        // (after `begin()`, before the actual filesystem write), same
+        // composition as `write_document`/`write_file`.
         let mut tx = NoopTransaction::new();
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(key.clone(), normalized.clone()))
             .expect("no-op transaction backend never fails");
+        if diwe::permissions::check_write_permission_for_content(&configuration, &key, &normalized)
+            .is_err()
+        {
+            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+            // implemented. The placeholder check never returns Err today,
+            // so this arm is unreachable in practice.
+            let _ = tx.abort();
+            eprintln!(
+                "Error: write rejected by write-permission check for '{}'",
+                key
+            );
+            std::process::exit(1);
+        }
         if std::fs::write(&path, &normalized).is_err() {
             let _ = tx.abort();
             eprintln!("Error: Failed to write '{}'", path.display());
@@ -2823,15 +2839,27 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
         &graph.export(),
         &get_library_path(configuration),
         configuration.format,
+        |key, content| {
+            diwe::permissions::check_write_permission_for_content(configuration, key, content)
+        },
     )
     .expect("Failed to write graph")
 }
 
+// WP-06..WP-09: delete_command/rename_command/extract_command/
+// inline_command all funnel their durable writes through this wrapper
+// around `diwe::fs::apply_changes`, so passing the write-permission check
+// as its hook here covers all four identically (see `apply_changes`'s own
+// doc comment for the transaction/abort composition this hook runs
+// inside).
 fn apply_changes(changes: &Changes, configuration: &Configuration) {
     diwe::fs::apply_changes(
         changes,
         &get_library_path(configuration),
         configuration.format,
+        |key, content| {
+            diwe::permissions::check_write_permission_for_content(configuration, key, content)
+        },
     )
     .expect("Failed to write document file");
 }
@@ -3990,11 +4018,24 @@ fn update_body(args: Update) {
     }
 
     // WP-04: update_body's durable write, routed through the no-op
-    // Transaction interface before the actual filesystem write.
+    // Transaction interface before the actual filesystem write. The
+    // write-permission check runs inside this transaction bracket — after
+    // `begin()`, before the actual filesystem write — so a rejection can
+    // drive the transaction into its aborted state, per
+    // `m2/design-transactions` (same composition as `write_document`/
+    // `write_file`).
     let mut tx = NoopTransaction::new();
     tx.begin().expect("no-op transaction backend never fails");
     tx.write(TxWrite::Put(key.clone(), output.clone()))
         .expect("no-op transaction backend never fails");
+    if diwe::permissions::check_write_permission_for_content(&config, &key, &output).is_err() {
+        // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+        // implemented. The placeholder check never returns Err today, so
+        // this arm is unreachable in practice.
+        let _ = tx.abort();
+        eprintln!("Error: write rejected by write-permission check");
+        std::process::exit(1);
+    }
     std::fs::write(&file_path, &output).expect("Failed to write document file");
     tx.commit().expect("no-op transaction backend never fails");
 
@@ -4142,7 +4183,8 @@ fn update_mutation(args: Update) {
         gate_pending(&config, &docs);
     }
 
-    let (matched, changed) = write_changed_documents(&library_path, ext, &docs, args.dry_run);
+    let (matched, changed) =
+        write_changed_documents(&config, &library_path, ext, &docs, args.dry_run);
 
     if args.strict && !args.dry_run {
         let targets: Vec<Key> = docs.iter().map(|(key, _)| key.clone()).collect();
@@ -4198,6 +4240,7 @@ fn enforce_strict_update(has_doc_expect: bool, update_doc: &liwe::query::Update)
 }
 
 fn write_changed_documents(
+    configuration: &Configuration,
     library_path: &std::path::Path,
     ext: &str,
     docs: &[(Key, String)],
@@ -4216,11 +4259,27 @@ fn write_changed_documents(
             }
             // WP-05: update_mutation's per-document durable write, routed
             // through the no-op Transaction interface — one implicit
-            // single-write transaction per changed document.
+            // single-write transaction per changed document. The
+            // write-permission check runs inside this transaction bracket
+            // (after `begin()`, before the actual filesystem write), same
+            // composition as `write_document`/`write_file`.
             let mut tx = NoopTransaction::new();
             tx.begin().expect("no-op transaction backend never fails");
             tx.write(TxWrite::Put(key.clone(), content.clone()))
                 .expect("no-op transaction backend never fails");
+            if diwe::permissions::check_write_permission_for_content(configuration, key, content)
+                .is_err()
+            {
+                // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+                // implemented. The placeholder check never returns Err
+                // today, so this arm is unreachable in practice.
+                let _ = tx.abort();
+                eprintln!(
+                    "Error: write rejected by write-permission check for '{}'",
+                    key
+                );
+                std::process::exit(1);
+            }
             std::fs::write(&file_path, content).expect("Failed to write document file");
             tx.commit().expect("no-op transaction backend never fails");
         }
@@ -4377,11 +4436,24 @@ fn attach_command(args: Attach) {
             std::fs::create_dir_all(parent).ok();
         }
         // WP-10: attach_command's durable write, routed through the no-op
-        // Transaction interface before the actual filesystem write.
+        // Transaction interface before the actual filesystem write. The
+        // write-permission check runs inside this transaction bracket
+        // (after `begin()`, before the actual filesystem write), same
+        // composition as `write_document`/`write_file`.
         let mut tx = NoopTransaction::new();
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(target_key.clone(), new_content.clone()))
             .expect("no-op transaction backend never fails");
+        if diwe::permissions::check_write_permission_for_content(&config, &target_key, &new_content)
+            .is_err()
+        {
+            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
+            // implemented. The placeholder check never returns Err today,
+            // so this arm is unreachable in practice.
+            let _ = tx.abort();
+            eprintln!("Error: write rejected by write-permission check");
+            std::process::exit(1);
+        }
         std::fs::write(&target_path, new_content).expect("Failed to write target file");
         tx.commit().expect("no-op transaction backend never fails");
 
