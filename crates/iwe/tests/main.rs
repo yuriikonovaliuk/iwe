@@ -26,6 +26,7 @@ mod schema_validate_test;
 mod squash_test;
 mod stats_test;
 mod stats_warnings_test;
+mod t13_enforcement_mode_matrix_test;
 mod tree_test;
 mod update_test;
 mod write_permission_test;
