@@ -8,11 +8,10 @@ use std::sync::Arc;
 use chrono::Local;
 use diwe::config::{
     library_path_in, schemas_dir_in, ActionDefinition, CompletionOptions, Configuration,
-    MarkdownOptions, NoteTemplate, Patterns, SchemaBinding, DEFAULT_KEY_DATE_FORMAT,
+    MarkdownOptions, NoteTemplate, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
 use diwe::fs::{new_for_path, new_from_hashmap};
-use diwe::permissions::check_write_permission;
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_pending_documents,
@@ -29,7 +28,6 @@ use liwe::graph::{Graph, GraphContext};
 use liwe::model::node::NodePointer;
 use liwe::model::tree::{Tree, TreeIter};
 use liwe::model::{strip_doc_extension, Key};
-use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::operations::{
     attach_reference, delete as op_delete, extract as op_extract, inline as op_inline, references,
     rename as op_rename, sections, select_reference, select_section, AttachTarget, Changes,
@@ -40,6 +38,7 @@ use liwe::query::{
     self, execute, parse_operation, strict_guard_violations, Filter, InclusionAnchor, Operation,
     OperationKind, Outcome, ProjectionBase,
 };
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use minijinja::{context, Environment};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -1991,16 +1990,17 @@ impl IweServer {
             .is_some_and(|file_path| file_path.exists())
     }
 
-    /// T3 proof-of-concept insertion point: mirrors `iwe::main::
-    /// enforce_write_permission`'s call to the shared write-permission site
-    /// (`diwe::permissions::check_write_permission`), reached here from
-    /// every iwec write instead of from a CLI command handler. Unconditional
-    /// — never gated behind a strict/non-strict branch — because
-    /// write-permission evaluation must fire identically regardless of
-    /// invocation mode. WP-02..WP-13 are not implemented yet: `schema` is a
-    /// placeholder match-all binding and `document` reflects only what is
-    /// cheaply available at this call site; T10/T11/T12 replace both with
-    /// the real resolved schema and target document state.
+    /// T3 proof-of-concept insertion point, extended to resolve a real
+    /// schema binding: mirrors `iwe::main::enforce_write_permission`'s call
+    /// to the shared write-permission site
+    /// (`diwe::permissions::check_write_permission_for_content`), reached
+    /// here from every iwec write instead of from a CLI command handler.
+    /// Unconditional — never gated behind a strict/non-strict branch —
+    /// because write-permission evaluation must fire identically regardless
+    /// of invocation mode. WP-02..WP-13 are not implemented yet, so this
+    /// never actually rejects a write today; `document` reflects only what
+    /// is cheaply available at this call site (T10/T11/T12 replace that
+    /// with the real target document state where it differs from `content`).
     ///
     /// Called from inside `write_file`'s transaction bracket (after
     /// `begin()`, before the actual filesystem write) rather than before it
@@ -2008,16 +2008,7 @@ impl IweServer {
     /// must be able to drive the transaction into its failed/aborted state
     /// rather than the transaction never having begun.
     fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), ()> {
-        let (front, _body) = liwe::model::split_raw_frontmatter(content);
-        let document = liwe::model::document::Document {
-            blocks: Vec::new(),
-            frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
-        };
-        let schema = SchemaBinding {
-            r#match: Patterns::Many(Vec::new()),
-        };
-        let _ = key;
-        match check_write_permission(&document, &liwe::query::PropertyRef::Body, &schema) {
+        match diwe::permissions::check_write_permission_for_content(&self.config, key, content) {
             Ok(()) => Ok(()),
             Err(_rejected) => {
                 // T10/T11/T12: surface the rejection once WP-02..WP-13 are
@@ -2064,20 +2055,24 @@ impl IweServer {
         std::fs::read_to_string(self.document_path(key)?).ok()
     }
 
-    // NOTE (merge of T3 + T5): unlike `write_file`, this check runs before
-    // `diwe::fs::apply_changes` is entered rather than inside its per-key
-    // transaction brackets. `apply_changes` is also the shared write path
-    // for the CLI's delete/rename/extract/inline commands, which T3 did
-    // not wire for write-permission checking; moving this check into
-    // `apply_changes` itself would silently extend enforcement to those
-    // un-wired CLI sites too. Left outside the transaction here rather
-    // than guessing at that scope expansion — see merge report.
+    // WP-12: `apply_changes` now takes the write-permission check as a hook
+    // run inside its own per-key transaction bracket (after `begin()`,
+    // before the actual filesystem write/remove), so this no longer needs
+    // to run the check separately before entering `apply_changes` — the
+    // CLI's delete/rename/extract/inline commands (which call
+    // `diwe::fs::apply_changes` through their own wrapper in `main.rs`)
+    // wire the identical hook, so enforcement is consistent across both
+    // binaries without re-implementing it here.
     fn write_changes(&self, changes: &Changes) {
-        for (key, content) in changes.creates.iter().chain(changes.updates.iter()) {
-            let _ = self.enforce_write_permission(key, content);
-        }
         if let Some(base_path) = &self.base_path {
-            let _ = diwe::fs::apply_changes(changes, base_path, self.config.format);
+            let _ =
+                diwe::fs::apply_changes(changes, base_path, self.config.format, |key, content| {
+                    diwe::permissions::check_write_permission_for_content(
+                        &self.config,
+                        key,
+                        content,
+                    )
+                });
         }
     }
 

@@ -21,8 +21,10 @@
 //! the target document's own state, the target property, and schema-static
 //! configuration. It must never be given any other document's state.
 
-use crate::config::SchemaBinding;
+use crate::config::{Configuration, Patterns, SchemaBinding};
+use crate::schema::SchemaBindings;
 use liwe::model::document::Document;
+use liwe::model::{split_raw_frontmatter, Key};
 use liwe::query::PropertyRef;
 
 /// Why a write was rejected by write-permission evaluation.
@@ -87,6 +89,67 @@ pub fn check_write_permission(
     // call path without changing behavior yet.
     let _ = (document, property, schema);
     Ok(())
+}
+
+/// Resolves the [`SchemaBinding`] bound to `key` under `config`'s `schemas`
+/// table, for callers that need to pass a real (not placeholder) `schema`
+/// argument into [`check_write_permission`]. Uses the same schema-matching
+/// precedent already established by `explain_documents` /
+/// `pending_from_changes` / `ensure_schema_clean` in `diwe::schema`
+/// (`SchemaBindings::compile` + `schemas_for`) rather than re-implementing
+/// pattern matching here.
+///
+/// If `key` matches more than one schema, the first match (in
+/// `SchemaBindings::compile`'s deterministic, alphabetically-sorted rule
+/// order) is used; resolving multiple simultaneously-bound schemas is not
+/// this function's job. If `key` matches no schema, or `config.schemas`
+/// fails to compile, a schema-less binding (empty `match` list) is
+/// returned — the same shape WP-02/WP-03/WP-12 used as a placeholder before
+/// this function existed, now reached only when there truly is no bound
+/// schema rather than unconditionally.
+pub fn resolve_schema_binding(config: &Configuration, key: &Key) -> SchemaBinding {
+    let schema_less = || SchemaBinding {
+        r#match: Patterns::Many(Vec::new()),
+    };
+    let Ok(bindings) = SchemaBindings::compile(&config.schemas) else {
+        return schema_less();
+    };
+    match bindings.schemas_for(key.as_str()).first() {
+        Some(name) => config
+            .schemas
+            .get(*name)
+            .cloned()
+            .unwrap_or_else(schema_less),
+        None => schema_less(),
+    }
+}
+
+/// Parses `content`'s frontmatter into a [`Document`], resolves `key`'s
+/// schema binding via [`resolve_schema_binding`], and calls
+/// [`check_write_permission`] against [`PropertyRef::Body`] — the one
+/// helper every whole-document-rewrite call site (WP-02..WP-13) uses so
+/// document/schema/property resolution is implemented once, not
+/// re-implemented per caller (the "one mechanism, not two" principle of
+/// `m2/design-enforcement-modes`).
+///
+/// `content` is whatever markdown is about to reach durable storage for
+/// `key` — the new content for a create/update, or (for a removal) the
+/// document's content as it exists on disk immediately before the removal.
+/// Finer per-property (`PropertyRef::Frontmatter`) enforcement for these
+/// whole-document operations is a T10/T11/T12 scoping decision, not this
+/// function's.
+pub fn check_write_permission_for_content(
+    config: &Configuration,
+    key: &Key,
+    content: &str,
+) -> Result<(), WritePermissionError> {
+    let (front, _body) = split_raw_frontmatter(content);
+    let document = Document {
+        blocks: Vec::new(),
+        frontmatter: front.and_then(|front| serde_yaml::from_str(front).ok()),
+    };
+    let schema = resolve_schema_binding(config, key);
+    check_write_permission(&document, &PropertyRef::Body, &schema)
 }
 
 #[cfg(test)]
