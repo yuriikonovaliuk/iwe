@@ -5,7 +5,7 @@ use std::path::Path;
 use globset::{GlobBuilder, GlobMatcher};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 
-use liwe::graph::Graph;
+use liwe::graph::{Graph, GraphContext};
 use liwe::markdown::MarkdownReader;
 use liwe::model::Key;
 use liwe::operations::Changes;
@@ -13,6 +13,7 @@ use liwe::query::block::{parse_block_predicate, BlockPredicate};
 use liwe::query::block_eval::BlockIndex;
 use liwe::query::{
     build_filter_value, evaluate, evaluate_within, parse_filter_expression, Filter, PropertyRef,
+    ViaWalk,
 };
 use liwe::schema::{build_document, compile_schema, CompiledSchema, Crumb, Violation};
 use serde_yaml::Value;
@@ -1759,6 +1760,231 @@ fn compile_schemas(
     } else {
         Err(errors)
     }
+}
+
+// ---------------------------------------------------------------------
+// T7: commit-time validation over an index-backed affected set.
+// ---------------------------------------------------------------------
+
+/// Commit-time schema validation over an index-backed affected set.
+///
+/// Schema validation is evaluated at commit rather than per write, because
+/// a multi-write transaction may legitimately pass through invalid
+/// intermediate states (`m2/design-transactions`). Re-validating the whole
+/// store on every commit would be a performance regression under the
+/// latency budget commit-time validation has to live inside, so the set of
+/// documents actually re-checked here — the "affected set" — is not the
+/// whole store: it is `touched` (the documents this transaction's writes
+/// named) closed under the cross-document rule forms whose reach is
+/// index-backed, per M1's write-path inventory:
+///
+/// - **Direct-link rules** (a document's link-count rules, and the
+///   existence of what it links to): one-hop, computed via
+///   [`Graph::get_reference_edges_to`] / [`Graph::get_inclusion_edges_to`]
+///   (`crates/liwe/src/graph.rs:629` and `:608`), themselves backed by
+///   [`liwe::graph::index::RefIndex`] (`crates/liwe/src/graph/index.rs:8`).
+///   A document that directly links to a touched key is pulled into the
+///   affected set, because removing (or creating) that key changes whether
+///   the referrer's links resolve to a real document at all — the "no such
+///   document" check [`check_links_bounded`] runs independent of any
+///   `target`/`some` filter.
+/// - **`reach` rules**: transitive-to-fixpoint, computed via
+///   [`ViaWalk::inbound`] (`crates/liwe/src/query/via.rs:53`), scoped to
+///   each `reach` rule's `within` predicate. Every document that can reach
+///   a touched key through that rule's scoped links is pulled in, because a
+///   change at the touched key can make or break chains that pass through
+///   it on their way to the rule's `reach` target.
+///
+/// ## What this deliberately does NOT check at commit (the routing finding)
+///
+/// M1 found these rule forms' closure cannot be bounded by an index — the
+/// check itself, not just "which documents to re-check", requires a
+/// whole-store scan no matter how small the affected set is. This function
+/// does not run them, and they are not silently dropped: they continue to
+/// run exactly where they already did, whole-store, at install time —
+/// `iwe schema validate`, the CLI's opt-in `--strict` `gate_pending`, and
+/// MCP's always-on `ensure_schema_clean` (unchanged by this function):
+///
+/// - `links[].target` / `links[].some` (the general filter form): resolved
+///   by `filter_set` via [`evaluate`] over the *entire* graph with no
+///   anchor at all — the allowed-target set itself requires a whole-store
+///   scan to compute.
+/// - `asserts`: `check_asserts` resolves its filter via
+///   `evaluate_within`, but the filter can still name graph-wide
+///   conditions beyond the document's own scoped targets, so per M1's
+///   finding it is grouped with the unrestricted-filter rules rather than
+///   split out.
+/// - `[invariants]` (`check_invariants_on`): explicitly graph-wide,
+///   `evaluate(&filter, graph)` with no anchor document at all.
+///
+/// One deliberate simplification beyond M1's four named forms: `links[].
+/// target_this` / `links[].some_this` / `links[].covers` are technically
+/// bounded too (`this_filter_set` evaluates them via `evaluate_within`
+/// against a document's own already-known scoped link targets, not the
+/// whole graph) — a finer split that checked them here is a plausible
+/// future refinement. This implementation defers them alongside the four
+/// named unbounded forms anyway, to keep [`check_links_bounded`]'s surface
+/// simple; T7's acceptance criteria names only `asserts`/`links.target`/
+/// `links.some`/`invariants`, not this narrower sub-case.
+pub fn validate_affected_set(
+    dir: &Path,
+    config: &Configuration,
+    graph: &Graph,
+    touched: &[Key],
+) -> Result<(ValidationRun, Vec<Key>), Vec<String>> {
+    let bindings = SchemaBindings::compile(&config.schemas)?;
+    let compiled = compile_schemas(dir, &config.schemas)?;
+
+    let mut affected: HashSet<Key> = touched.iter().cloned().collect();
+
+    // Direct-link rules: one-hop via RefIndex (Graph::get_reference_edges_to
+    // / Graph::get_inclusion_edges_to, crates/liwe/src/graph.rs:629, :608;
+    // backed by liwe::graph::index::RefIndex, crates/liwe/src/graph/
+    // index.rs:8).
+    for key in touched {
+        for id in graph
+            .get_reference_edges_to(key)
+            .into_iter()
+            .chain(graph.get_inclusion_edges_to(key))
+        {
+            affected.insert(graph.key_of(id));
+        }
+    }
+
+    // reach rules: transitive-to-fixpoint via ViaWalk::inbound
+    // (crates/liwe/src/query/via.rs:53), scoped to each reach rule's
+    // `within` predicate.
+    for set in compiled.values() {
+        for rule in &set.links {
+            if rule.reach.is_none() {
+                continue;
+            }
+            let scope = rule.within.clone().unwrap_or_default();
+            let walker = ViaWalk::new(graph, &scope);
+            for key in touched {
+                for (reached, _distance) in walker.inbound(key, u32::MAX) {
+                    affected.insert(reached);
+                }
+            }
+        }
+    }
+
+    let mut affected_keys: Vec<Key> = affected.into_iter().collect();
+    affected_keys.sort();
+
+    let mut reports = Vec::new();
+    let mut documents = 0;
+    let mut schemas_used = HashSet::new();
+    let mut cache = RunCache::new();
+    for key in &affected_keys {
+        let names = bindings.schemas_for(&key.to_string());
+        if names.is_empty() {
+            continue;
+        }
+        documents += 1;
+        let index = BlockIndex::build(graph, key);
+        for name in names {
+            schemas_used.insert(name);
+            let set = &compiled[name];
+            let violations = check_links_bounded(graph, key, name, &set.links, &mut cache, &index);
+            if !violations.is_empty() {
+                reports.push(KeyReport {
+                    key: key.clone(),
+                    schema: name.to_string(),
+                    violations,
+                });
+            }
+        }
+    }
+
+    Ok((
+        ValidationRun {
+            reports,
+            documents,
+            schemas: schemas_used.len(),
+        },
+        affected_keys,
+    ))
+}
+
+/// The index-bounded subset of [`check_links`]'s checks: link counts
+/// (`min`/`max`), whether each link resolves to a real document at all
+/// (independent of any `target`/`some` filter — that filter's evaluation
+/// is what's unbounded, not the existence check itself), and `reach`
+/// chains. See [`validate_affected_set`]'s doc comment for exactly which
+/// rule forms this intentionally excludes, and why.
+fn check_links_bounded(
+    graph: &Graph,
+    key: &Key,
+    schema: &str,
+    rules: &[LinkRule],
+    cache: &mut RunCache,
+    index: &BlockIndex,
+) -> Vec<Violation> {
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let mut violations = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        if let Some((when, _)) = &rule.when {
+            if !filter_set(cache, schema, i, "when", when, graph).contains(key) {
+                continue;
+            }
+        }
+        let scope = rule.within.clone().unwrap_or_default();
+        let targets = index.targets_within(&scope);
+        let where_ = match (&rule.within_label, &rule.when) {
+            (Some(label), Some((_, when))) => format!(" within '{label}' (when {when})"),
+            (Some(label), None) => format!(" within '{label}'"),
+            (None, Some((_, when))) => format!(" (when {when})"),
+            (None, None) => String::new(),
+        };
+        let mut report = |message: String| {
+            violations.push(Violation {
+                breadcrumb: rule
+                    .within_label
+                    .as_ref()
+                    .map(|label| vec![Crumb::Header(label.clone())])
+                    .unwrap_or_default(),
+                message,
+                hint: rule.description.clone(),
+                schema_pointer: format!("/links/{i}"),
+                keyword: "links".to_string(),
+            })
+        };
+        let count = targets.len() as u64;
+        if count < rule.min {
+            report(format!(
+                "{count} link{}{where_}, fewer than the minimum of {}",
+                if count == 1 { "" } else { "s" },
+                rule.min
+            ));
+        }
+        if let Some(max) = rule.max {
+            if count > max {
+                report(format!(
+                    "{count} links{where_}, greater than the maximum of {max}"
+                ));
+            }
+        }
+        for t in &targets {
+            if graph.maybe_key(t).is_none() {
+                report(format!("link to '{t}'{where_}: no such document"));
+            }
+        }
+        if let Some(reach) = &rule.reach {
+            if key != reach {
+                let targets = cache
+                    .via_targets
+                    .entry((schema.to_string(), i))
+                    .or_default();
+                if !reaches(graph, key, reach, &scope, targets) {
+                    report(format!("no chain of links{where_} reaches '{reach}'"));
+                }
+            }
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
