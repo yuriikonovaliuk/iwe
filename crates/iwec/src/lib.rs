@@ -1066,8 +1066,12 @@ impl IweServer {
 
         self.ensure_schema_clean(&[(key.clone(), markdown.clone())])?;
 
+        // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
+        // run it before mutating the in-memory graph so a rejection leaves
+        // both graph and disk untouched rather than just disk.
+        self.write_file(&key, &markdown)
+            .map_err(|message| McpError::invalid_params(message, None))?;
         graph.insert_document(key.clone(), markdown.clone());
-        self.write_file(&key, &markdown);
 
         let warnings = self
             .stats_warnings(
@@ -1110,8 +1114,12 @@ impl IweServer {
 
         self.ensure_schema_clean(&[(key.clone(), params.content.clone())])?;
 
+        // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
+        // run it before mutating the in-memory graph so a rejection leaves
+        // both graph and disk untouched rather than just disk.
+        self.write_file(&key, &params.content)
+            .map_err(|message| McpError::invalid_params(message, None))?;
         graph.update_document(key.clone(), params.content.clone());
-        self.write_file(&key, &params.content);
 
         let new_title = (&*graph)
             .get_key_title(&key)
@@ -1242,8 +1250,13 @@ impl IweServer {
                 if !dry_run {
                     self.ensure_schema_clean(&changes)?;
                     for (key, content) in &changes {
+                        // Write-permission (e.g. EXT-FREEZE) is checked
+                        // inside `write_file`; run it before mutating the
+                        // in-memory graph so a rejection leaves both graph
+                        // and disk untouched rather than just disk.
+                        self.write_file(key, content)
+                            .map_err(|message| McpError::invalid_params(message, None))?;
                         graph.update_document(key.clone(), content.clone());
-                        self.write_file(key, content);
                     }
                     let touched: Vec<Key> = changes.iter().map(|(key, _)| key.clone()).collect();
                     warnings = self.stats_warnings(&graph, &touched, &[], &touched).await;
@@ -1485,7 +1498,8 @@ impl IweServer {
             for (key_str, normalized_content) in &state {
                 let key = Key::name(key_str);
                 if self.read_file(&key).as_deref() != Some(normalized_content.as_str()) {
-                    self.write_file(&key, normalized_content);
+                    self.write_file(&key, normalized_content)
+                        .map_err(|message| McpError::invalid_params(message, None))?;
                     changed += 1;
                 }
             }
@@ -1990,33 +2004,25 @@ impl IweServer {
             .is_some_and(|file_path| file_path.exists())
     }
 
-    /// T3 proof-of-concept insertion point, extended to resolve a real
-    /// schema binding: mirrors `iwe::main::enforce_write_permission`'s call
-    /// to the shared write-permission site
-    /// (`diwe::permissions::check_write_permission_for_content`), reached
-    /// here from every iwec write instead of from a CLI command handler.
-    /// Unconditional — never gated behind a strict/non-strict branch —
-    /// because write-permission evaluation must fire identically regardless
-    /// of invocation mode. WP-02..WP-13 are not implemented yet, so this
-    /// never actually rejects a write today; `document` reflects only what
-    /// is cheaply available at this call site (T10/T11/T12 replace that
-    /// with the real target document state where it differs from `content`).
+    /// Mirrors `iwe::main::enforce_write_permission`'s call to the shared
+    /// write-permission site (`diwe::permissions::
+    /// check_write_permission_for_content`), reached here from every iwec
+    /// write instead of from a CLI command handler. Unconditional — never
+    /// gated behind a strict/non-strict branch — because write-permission
+    /// evaluation must fire identically regardless of invocation mode.
     ///
     /// Called from inside `write_file`'s transaction bracket (after
     /// `begin()`, before the actual filesystem write) rather than before it
     /// starts: per `m2/design-transactions`, a write-permission rejection
     /// must be able to drive the transaction into its failed/aborted state
     /// rather than the transaction never having begun.
-    fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), ()> {
-        match diwe::permissions::check_write_permission_for_content(&self.config, key, content) {
-            Ok(()) => Ok(()),
-            Err(_rejected) => {
-                // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-                // implemented. The placeholder check never returns Err
-                // today, so this arm is unreachable in practice.
-                Err(())
-            }
-        }
+    ///
+    /// Returns the rejection's full message (document key + rule, via
+    /// `WritePermissionError::message`) rather than the error value itself,
+    /// since every caller only needs to surface it as an `McpError`.
+    fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), String> {
+        diwe::permissions::check_write_permission_for_content(&self.config, key, content)
+            .map_err(|rejected| rejected.message(key))
     }
 
     // WP-12 (iwe_create/iwe_update/iwe_delete/iwe_query/iwe_rename/
@@ -2027,26 +2033,38 @@ impl IweServer {
     // bracket (after `begin()`, before the actual filesystem write) so a
     // rejection aborts the transaction instead of the write never having
     // been attempted.
-    fn write_file(&self, key: &Key, content: &str) {
-        if let Some(file_path) = self.document_path(key) {
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).ok();
+    //
+    // T10 (EXT-FREEZE): a rejection is now surfaced to the caller (as
+    // `Err(message)`) rather than silently discarded, so a frozen
+    // document's write is both refused on disk and reported as a tool
+    // error rather than a false success.
+    fn write_file(&self, key: &Key, content: &str) -> Result<(), String> {
+        let Some(file_path) = self.document_path(key) else {
+            return Ok(());
+        };
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(key.clone(), content.to_string()))
+            .expect("no-op transaction backend never fails");
+        if let Err(message) = self.enforce_write_permission(key, content) {
+            let _ = tx.abort();
+            return Err(message);
+        }
+        match std::fs::write(&file_path, content) {
+            Ok(()) => {
+                tx.commit().expect("no-op transaction backend never fails");
+                Ok(())
             }
-            let mut tx = NoopTransaction::new();
-            tx.begin().expect("no-op transaction backend never fails");
-            tx.write(TxWrite::Put(key.clone(), content.to_string()))
-                .expect("no-op transaction backend never fails");
-            if self.enforce_write_permission(key, content).is_err() {
+            Err(error) => {
                 let _ = tx.abort();
-                return;
-            }
-            match std::fs::write(&file_path, content) {
-                Ok(()) => {
-                    tx.commit().expect("no-op transaction backend never fails");
-                }
-                Err(_) => {
-                    let _ = tx.abort();
-                }
+                Err(format!(
+                    "Failed to write '{}': {}",
+                    file_path.display(),
+                    error
+                ))
             }
         }
     }

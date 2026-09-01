@@ -2794,17 +2794,11 @@ fn normalize_command(args: Normalize) {
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(key.clone(), normalized.clone()))
             .expect("no-op transaction backend never fails");
-        if diwe::permissions::check_write_permission_for_content(&configuration, &key, &normalized)
-            .is_err()
+        if let Err(rejected) =
+            diwe::permissions::check_write_permission_for_content(&configuration, &key, &normalized)
         {
-            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-            // implemented. The placeholder check never returns Err today,
-            // so this arm is unreachable in practice.
             let _ = tx.abort();
-            eprintln!(
-                "Error: write rejected by write-permission check for '{}'",
-                key
-            );
+            eprintln!("Error: {}", rejected.message(&key));
             std::process::exit(1);
         }
         if std::fs::write(&path, &normalized).is_err() {
@@ -4028,12 +4022,11 @@ fn update_body(args: Update) {
     tx.begin().expect("no-op transaction backend never fails");
     tx.write(TxWrite::Put(key.clone(), output.clone()))
         .expect("no-op transaction backend never fails");
-    if diwe::permissions::check_write_permission_for_content(&config, &key, &output).is_err() {
-        // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-        // implemented. The placeholder check never returns Err today, so
-        // this arm is unreachable in practice.
+    if let Err(rejected) =
+        diwe::permissions::check_write_permission_for_content(&config, &key, &output)
+    {
         let _ = tx.abort();
-        eprintln!("Error: write rejected by write-permission check");
+        eprintln!("Error: {}", rejected.message(&key));
         std::process::exit(1);
     }
     std::fs::write(&file_path, &output).expect("Failed to write document file");
@@ -4267,17 +4260,11 @@ fn write_changed_documents(
             tx.begin().expect("no-op transaction backend never fails");
             tx.write(TxWrite::Put(key.clone(), content.clone()))
                 .expect("no-op transaction backend never fails");
-            if diwe::permissions::check_write_permission_for_content(configuration, key, content)
-                .is_err()
+            if let Err(rejected) =
+                diwe::permissions::check_write_permission_for_content(configuration, key, content)
             {
-                // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-                // implemented. The placeholder check never returns Err
-                // today, so this arm is unreachable in practice.
                 let _ = tx.abort();
-                eprintln!(
-                    "Error: write rejected by write-permission check for '{}'",
-                    key
-                );
+                eprintln!("Error: {}", rejected.message(key));
                 std::process::exit(1);
             }
             std::fs::write(&file_path, content).expect("Failed to write document file");
@@ -4444,14 +4431,13 @@ fn attach_command(args: Attach) {
         tx.begin().expect("no-op transaction backend never fails");
         tx.write(TxWrite::Put(target_key.clone(), new_content.clone()))
             .expect("no-op transaction backend never fails");
-        if diwe::permissions::check_write_permission_for_content(&config, &target_key, &new_content)
-            .is_err()
-        {
-            // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-            // implemented. The placeholder check never returns Err today,
-            // so this arm is unreachable in practice.
+        if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
+            &config,
+            &target_key,
+            &new_content,
+        ) {
             let _ = tx.abort();
-            eprintln!("Error: write rejected by write-permission check");
+            eprintln!("Error: {}", rejected.message(&target_key));
             std::process::exit(1);
         }
         std::fs::write(&target_path, new_content).expect("Failed to write target file");

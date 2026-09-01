@@ -10,6 +10,50 @@ pub fn split_raw_frontmatter(content: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Parses `content`'s leading frontmatter block (if any) into a YAML
+/// mapping, reusing [`split_raw_frontmatter`]'s pulldown_cmark-based
+/// boundary detection rather than naive `---` delimiter stripping — so the
+/// same edge cases `split_raw_frontmatter` already handles (CRLF,
+/// `...`-closed blocks, a lone `---` that is actually a thematic break, no
+/// trailing newline) are handled identically here. The slice
+/// `split_raw_frontmatter` returns includes the delimiter lines themselves
+/// (e.g. `"---\ntype: note\n---\n"`), which is not by itself valid
+/// standalone YAML — feeding it straight to a YAML parser fails, because
+/// the second `---` line reads as the start of another document — so this
+/// re-parses just that isolated slice with the same metadata-block-aware
+/// parser used when reading markdown normally (`liwe::markdown::reader`),
+/// rather than string-slicing the delimiters off by hand.
+///
+/// Returns `None` when `content` has no leading frontmatter block, and
+/// `Some` (possibly an empty mapping, if the block is empty or is not a
+/// YAML mapping) when it does — the same "absent vs. present-but-empty"
+/// shape `split_raw_frontmatter` itself distinguishes.
+pub fn parse_leading_frontmatter(content: &str) -> Option<Frontmatter> {
+    let (front, _) = split_raw_frontmatter(content);
+    let front = front?;
+    let normalized = if front.ends_with('\n') {
+        front.to_string()
+    } else {
+        format!("{front}\n")
+    };
+    let mut events = Parser::new_ext(&normalized, PARSER_OPTIONS).into_offset_iter();
+    let starts_metadata_block = matches!(
+        events.next(),
+        Some((Event::Start(Tag::MetadataBlock(_)), range)) if range.start == 0
+    );
+    if !starts_metadata_block {
+        return Some(Frontmatter::new());
+    }
+    let text = match events.next() {
+        Some((Event::Text(text), _)) => text,
+        _ => return Some(Frontmatter::new()),
+    };
+    match serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        Ok(serde_yaml::Value::Mapping(mapping)) => Some(mapping),
+        _ => Some(Frontmatter::new()),
+    }
+}
+
 pub fn prepend_frontmatter(
     frontmatter: Option<Frontmatter>,
     rendered: &str,
@@ -152,6 +196,52 @@ mod tests {
     #[test]
     fn keeps_empty_input() {
         assert_eq!(split_raw_frontmatter(""), (None, ""));
+    }
+
+    #[test]
+    fn parses_dash_closed_block() {
+        assert_eq!(
+            parse_leading_frontmatter("---\ntype: note\n---\n\nBody\n"),
+            Some(mapping("type: note\n"))
+        );
+    }
+
+    #[test]
+    fn parses_dot_closed_block() {
+        assert_eq!(
+            parse_leading_frontmatter("---\ntype: note\n...\n\nBody\n"),
+            Some(mapping("type: note\n"))
+        );
+    }
+
+    #[test]
+    fn parses_crlf_block() {
+        assert_eq!(
+            parse_leading_frontmatter("---\r\ntype: note\r\n---\r\n\r\nBody\r\n"),
+            Some(mapping("type: note\n"))
+        );
+    }
+
+    #[test]
+    fn parses_block_without_trailing_newline() {
+        assert_eq!(
+            parse_leading_frontmatter("---\ntype: note\n---"),
+            Some(mapping("type: note\n"))
+        );
+    }
+
+    #[test]
+    fn parses_absent_block_as_none() {
+        assert_eq!(parse_leading_frontmatter("# Title\n\nBody\n"), None);
+        assert_eq!(parse_leading_frontmatter("---\n\nBody\n"), None);
+    }
+
+    #[test]
+    fn parses_lone_thematic_break_as_no_frontmatter() {
+        // Mirrors `keeps_two_thematic_breaks`: `split_raw_frontmatter`
+        // does not treat this as a metadata block either, so there is no
+        // frontmatter to parse.
+        assert_eq!(parse_leading_frontmatter("---\n\n---\n\nBody\n"), None);
     }
 
     #[test]
