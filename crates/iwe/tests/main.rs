@@ -26,3 +26,4 @@ mod stats_test;
 mod stats_warnings_test;
 mod tree_test;
 mod update_test;
+mod write_permission_test;

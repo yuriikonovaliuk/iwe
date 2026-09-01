@@ -309,18 +309,13 @@ pub fn write_document(
     tx.write(TxWrite::Put(prepared.key.clone(), prepared.content.clone()))
         .expect("no-op transaction backend never fails");
 
-    if diwe::permissions::check_write_permission_for_content(
+    if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
         configuration,
         &prepared.key,
         &prepared.content,
-    )
-    .is_err()
-    {
-        // T10/T11/T12: surface the rejection once WP-02..WP-13 are
-        // implemented. The placeholder check never returns Err today, so
-        // this arm is unreachable in practice.
+    ) {
         let _ = tx.abort();
-        return Err("write rejected by write-permission check".to_string());
+        return Err(rejected.message(&prepared.key));
     }
 
     if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {
