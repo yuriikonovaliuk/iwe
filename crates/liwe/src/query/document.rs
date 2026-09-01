@@ -563,6 +563,51 @@ impl PseudoField {
     }
 }
 
+/// A schema-addressable document property: a (possibly nested) frontmatter
+/// field, or the document body — the same property namespace, with the body
+/// as one reserved member of it.
+///
+/// This reuses the selector convention already governing query projections
+/// (`PseudoField::from_selector`): a bare name addresses a frontmatter field
+/// (the same way `UpdateOperator::Set`/`Unset` and `Filter::Field` address
+/// one via `FieldPath`, and the same way IWE's own rule DSL addresses one via
+/// `$this.frontmatter.<path>`), while `$content` is the pre-existing reserved
+/// selector for the document body. No new reserved name is introduced here —
+/// `$content` already means "the body" everywhere selectors are parsed, and a
+/// frontmatter key literally spelled `$content` was already unreachable at
+/// this selector layer before `PropertyRef` existed (`PseudoField::from_selector`
+/// resolves every `$`-prefixed string to a fixed pseudo-field or rejects it;
+/// it never falls through to a literal frontmatter lookup). `PropertyRef`
+/// inherits that same collision-free boundary rather than adding a new one.
+///
+/// This type only answers "which property does this name address" — it does
+/// not decide whether that property is writable. That predicate is built on
+/// top of `PropertyRef`, not here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropertyRef {
+    /// A frontmatter field, at the given (possibly dotted) path.
+    Frontmatter(FieldPath),
+    /// The document body.
+    Body,
+}
+
+impl PropertyRef {
+    /// Parses `s` the same way a projection selector is parsed: `$content`
+    /// addresses the body; every other string addresses a frontmatter field
+    /// at that (possibly dotted) path, exactly as `FieldPath::from_dotted`
+    /// already does for `Filter::Field` and `UpdateOperator::Set`/`Unset`.
+    pub fn from_selector(s: &str) -> Self {
+        match PseudoField::from_selector(s) {
+            Some(PseudoField::Content) => PropertyRef::Body,
+            _ => PropertyRef::Frontmatter(FieldPath::from_dotted(s)),
+        }
+    }
+
+    pub fn is_body(&self) -> bool {
+        matches!(self, PropertyRef::Body)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionSource {
     Frontmatter(FieldPath),
@@ -824,5 +869,46 @@ mod tests {
         assert!(!is_operator_segment("-foo"));
         assert!(!is_operator_segment("/foo"));
         assert!(!is_operator_segment(""));
+    }
+}
+
+#[cfg(test)]
+mod property_ref_tests {
+    use super::{FieldPath, PropertyRef};
+
+    #[test]
+    fn dollar_content_addresses_the_body() {
+        assert_eq!(PropertyRef::from_selector("$content"), PropertyRef::Body);
+        assert!(PropertyRef::from_selector("$content").is_body());
+    }
+
+    #[test]
+    fn a_bare_name_addresses_a_frontmatter_field_at_that_path() {
+        assert_eq!(
+            PropertyRef::from_selector("status"),
+            PropertyRef::Frontmatter(FieldPath::from_dotted("status"))
+        );
+        assert_eq!(
+            PropertyRef::from_selector("query.filter"),
+            PropertyRef::Frontmatter(FieldPath::from_dotted("query.filter"))
+        );
+        assert!(!PropertyRef::from_selector("status").is_body());
+    }
+
+    #[test]
+    fn other_dollar_selectors_are_not_the_body_and_fall_back_to_a_frontmatter_path() {
+        // Every other `$`-prefixed selector (a different pseudo-field, or an
+        // unrecognized one) is left as a literal frontmatter path segment —
+        // the same behavior `Filter::Field`/`UpdateOperator::Set` already
+        // have for `FieldPath`, which never special-cases `$`. `PropertyRef`
+        // only ever intercepts `$content`.
+        assert_eq!(
+            PropertyRef::from_selector("$key"),
+            PropertyRef::Frontmatter(FieldPath::from_dotted("$key"))
+        );
+        assert_eq!(
+            PropertyRef::from_selector("$foo"),
+            PropertyRef::Frontmatter(FieldPath::from_dotted("$foo"))
+        );
     }
 }
