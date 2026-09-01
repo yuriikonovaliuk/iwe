@@ -2028,26 +2028,55 @@ impl IweServer {
     // rejection aborts the transaction instead of the write never having
     // been attempted.
     fn write_file(&self, key: &Key, content: &str) {
+        self.write_file_with(key, content, NoopTransaction::new)
+    }
+
+    /// Generic core of [`Self::write_file`], parameterized over the
+    /// transaction backend via a factory (`new_tx`) called once to build
+    /// the transaction used for this write. `write_file` always calls
+    /// this with `NoopTransaction::new`; T6's tests call it with a
+    /// factory that builds a call-recording stub instead
+    /// (`liwe::transaction::RecordingTransaction`), to prove this MCP
+    /// call site actually drives `begin`/`write`/`commit`/`abort`, rather
+    /// than merely compiling against the trait.
+    ///
+    /// NOTE (pre-existing, not introduced by T6): unlike every other
+    /// write path, this function swallows both a write-permission
+    /// rejection and a commit refusal by silently returning rather than
+    /// surfacing either as an error to its caller. Flagging this here
+    /// rather than fixing it, since fixing it means changing this
+    /// method's signature and every one of its (several) call sites'
+    /// error handling — out of scope for T6's minimal wiring-proof work.
+    fn write_file_with<TX: Transaction>(
+        &self,
+        key: &Key,
+        content: &str,
+        mut new_tx: impl FnMut() -> TX,
+    ) {
         if let Some(file_path) = self.document_path(key) {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            let mut tx = NoopTransaction::new();
-            tx.begin().expect("no-op transaction backend never fails");
-            tx.write(TxWrite::Put(key.clone(), content.to_string()))
-                .expect("no-op transaction backend never fails");
+            let mut tx = new_tx();
+            let Ok(()) = tx.begin() else { return };
+
+            if tx
+                .write(TxWrite::Put(key.clone(), content.to_string()))
+                .is_err()
+            {
+                let _ = tx.commit();
+                let _ = tx.abort();
+                return;
+            }
             if self.enforce_write_permission(key, content).is_err() {
                 let _ = tx.abort();
                 return;
             }
-            match std::fs::write(&file_path, content) {
-                Ok(()) => {
-                    tx.commit().expect("no-op transaction backend never fails");
-                }
-                Err(_) => {
-                    let _ = tx.abort();
-                }
+            if tx.commit().is_err() {
+                let _ = tx.abort();
+                return;
             }
+            let _ = std::fs::write(&file_path, content);
         }
     }
 
@@ -2064,15 +2093,27 @@ impl IweServer {
     // wire the identical hook, so enforcement is consistent across both
     // binaries without re-implementing it here.
     fn write_changes(&self, changes: &Changes) {
+        self.write_changes_with(changes, NoopTransaction::new)
+    }
+
+    /// Generic core of [`Self::write_changes`], parameterized over the
+    /// transaction backend the same way [`Self::write_file_with`] is;
+    /// see that method's doc comment.
+    fn write_changes_with<TX: Transaction>(&self, changes: &Changes, new_tx: impl FnMut() -> TX) {
         if let Some(base_path) = &self.base_path {
-            let _ =
-                diwe::fs::apply_changes(changes, base_path, self.config.format, |key, content| {
+            let _ = diwe::fs::apply_changes_with(
+                changes,
+                base_path,
+                self.config.format,
+                |key, content| {
                     diwe::permissions::check_write_permission_for_content(
                         &self.config,
                         key,
                         content,
                     )
-                });
+                },
+                new_tx,
+            );
         }
     }
 
@@ -2119,5 +2160,71 @@ impl IweServer {
                 content => content,
             })
             .map_err(|e| format!("document template rendering failed: {}", e))
+    }
+}
+
+// T6: `write_file_with` and `write_changes_with` are the generic cores
+// behind every MCP write tool — WP-12 (iwe_create/iwe_update/iwe_delete/
+// iwe_query/iwe_rename/iwe_extract/iwe_inline/iwe_attach) via `write_file`
+// and WP-13 (iwe_normalize) also via `write_file`, plus WP-12's
+// delete/rename/extract/inline surface via `write_changes` (which
+// delegates directly to `diwe::fs::apply_changes_with`, already covered
+// from the CLI side in `diwe::fs`'s own tests — see its doc comment).
+// These tests construct a real `IweServer` over a temp directory and
+// drive both generic cores directly with a
+// `liwe::transaction::RecordingTransaction` in place of `NoopTransaction`
+// to prove the wiring at these MCP call sites is real.
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use liwe::transaction::{RecordingTransaction, TransactionLog};
+
+    fn server_over(dir: &std::path::Path) -> IweServer {
+        IweServer::new(dir.to_str().unwrap(), &Configuration::default())
+    }
+
+    /// WP-12/WP-13 (MCP create/update/attach/normalize, all funneled
+    /// through `write_file`): an ordinary write drives exactly one
+    /// `begin` and one `commit`, and the content lands on disk.
+    #[test]
+    fn write_file_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_over(dir.path());
+        let log = TransactionLog::new();
+
+        server.write_file_with(&Key::name("note"), "# Note\n", {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        });
+
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            "# Note\n"
+        );
+    }
+
+    /// WP-12 (MCP delete/rename/extract/inline, via `write_changes` ->
+    /// `apply_changes_with`): an ordinary write drives exactly one
+    /// `begin` and one `commit`.
+    #[test]
+    fn write_changes_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_over(dir.path());
+        let changes = Changes::new().create(Key::name("note"), "# Note\n".to_string());
+        let log = TransactionLog::new();
+
+        server.write_changes_with(&changes, {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        });
+
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            "# Note\n"
+        );
     }
 }
