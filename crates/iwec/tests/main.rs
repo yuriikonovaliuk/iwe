@@ -16,6 +16,7 @@ mod schema_test;
 mod squash_test;
 mod stats_test;
 mod stats_warnings_test;
+mod transaction_wiring_test;
 mod tree_test;
 mod watcher_test;
 mod write_permission_test;

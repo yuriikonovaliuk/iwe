@@ -2793,8 +2793,13 @@ fn normalize_command(args: Normalize) {
             &key,
             &normalized,
             &path,
-            |key, content| {
-                diwe::permissions::check_write_permission_for_content(&configuration, key, content)
+            |key, content, prior_content| {
+                diwe::permissions::check_write_permission_for_content(
+                    &configuration,
+                    key,
+                    content,
+                    prior_content,
+                )
             },
             NoopTransaction::new,
         ) {
@@ -2827,8 +2832,13 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
         &graph.export(),
         &get_library_path(configuration),
         configuration.format,
-        |key, content| {
-            diwe::permissions::check_write_permission_for_content(configuration, key, content)
+        |key, content, prior_content| {
+            diwe::permissions::check_write_permission_for_content(
+                configuration,
+                key,
+                content,
+                prior_content,
+            )
         },
     )
     .expect("Failed to write graph")
@@ -2845,8 +2855,13 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
         changes,
         &get_library_path(configuration),
         configuration.format,
-        |key, content| {
-            diwe::permissions::check_write_permission_for_content(configuration, key, content)
+        |key, content, prior_content| {
+            diwe::permissions::check_write_permission_for_content(
+                configuration,
+                key,
+                content,
+                prior_content,
+            )
         },
     )
     .expect("Failed to write document file");
@@ -3964,9 +3979,16 @@ fn write_single_document_with<TX: Transaction>(
     key: &Key,
     content: &str,
     path: &std::path::Path,
-    check: impl Fn(&Key, &str) -> Result<(), diwe::permissions::WritePermissionError>,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), diwe::permissions::WritePermissionError>,
     mut new_tx: impl FnMut() -> TX,
 ) -> Result<(), String> {
+    // Read the target's on-disk content, if any, *before* this write lands
+    // — the freeze-bypass fix (`m2/design-freeze-semantics`) needs the
+    // prior state to enforce a rule about a transition (e.g. "frozen,
+    // unless this write's sole effect is lifting freeze"), not just the
+    // outgoing `content`.
+    let prior_content = std::fs::read_to_string(path).ok();
+
     let mut tx = new_tx();
     tx.begin()
         .map_err(|_| format!("transaction backend failed to begin for '{key}'"))?;
@@ -3988,7 +4010,7 @@ fn write_single_document_with<TX: Transaction>(
     // `WritePermissionError::Frozen` and `WritePermissionError::
     // PropertyImmutable` carry their own key), so it is returned as-is —
     // callers must not append a further "for '<key>'" suffix to it.
-    if let Err(rejected) = check(key, content) {
+    if let Err(rejected) = check(key, content, prior_content.as_deref()) {
         let _ = tx.abort();
         return Err(rejected.to_string());
     }
@@ -4078,7 +4100,14 @@ fn update_body(args: Update) {
         &key,
         &output,
         &file_path,
-        |key, content| diwe::permissions::check_write_permission_for_content(&config, key, content),
+        |key, content, prior_content| {
+            diwe::permissions::check_write_permission_for_content(
+                &config,
+                key,
+                content,
+                prior_content,
+            )
+        },
         NoopTransaction::new,
     ) {
         eprintln!("Error: {}", e);
@@ -4311,11 +4340,12 @@ fn write_changed_documents(
                 key,
                 content,
                 &file_path,
-                |key, content| {
+                |key, content, prior_content| {
                     diwe::permissions::check_write_permission_for_content(
                         configuration,
                         key,
                         content,
+                        prior_content,
                     )
                 },
                 NoopTransaction::new,
@@ -4483,8 +4513,13 @@ fn attach_command(args: Attach) {
             &target_key,
             &new_content,
             &target_path,
-            |key, content| {
-                diwe::permissions::check_write_permission_for_content(&config, key, content)
+            |key, content, prior_content| {
+                diwe::permissions::check_write_permission_for_content(
+                    &config,
+                    key,
+                    content,
+                    prior_content,
+                )
             },
             NoopTransaction::new,
         ) {
@@ -4611,7 +4646,11 @@ mod transaction_tests {
     use super::*;
     use liwe::transaction::{RecordingTransaction, TransactionLog, TxEvent};
 
-    fn allow(_key: &Key, _content: &str) -> Result<(), diwe::permissions::WritePermissionError> {
+    fn allow(
+        _key: &Key,
+        _content: &str,
+        _prior_content: Option<&str>,
+    ) -> Result<(), diwe::permissions::WritePermissionError> {
         Ok(())
     }
 

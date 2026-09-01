@@ -352,10 +352,17 @@ pub fn write_document_with<TX: Transaction>(
         return Err("write rejected by transaction backend".to_string());
     }
 
+    // Read the target's on-disk content, if any, *before* this write lands —
+    // the freeze-bypass fix (`m2/design-freeze-semantics`) needs the prior
+    // state to enforce a rule about a transition, not just the outgoing
+    // content. A genuine create has no prior content (`None`); if a file
+    // already exists at this path, its prior state still governs.
+    let prior_content = std::fs::read_to_string(&prepared.path).ok();
     if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
         configuration,
         &prepared.key,
         &prepared.content,
+        prior_content.as_deref(),
     ) {
         let _ = tx.abort();
         return Err(rejected.to_string());
