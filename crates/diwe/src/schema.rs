@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::read_to_string;
 use std::path::Path;
 
@@ -11,7 +11,7 @@ use liwe::model::Key;
 use liwe::operations::Changes;
 use liwe::query::block::{parse_block_predicate, BlockPredicate};
 use liwe::query::block_eval::BlockIndex;
-use liwe::query::{build_filter_value, evaluate, parse_filter_expression, Filter, KeyOp, ViaWalk};
+use liwe::query::{build_filter_value, evaluate, evaluate_within, parse_filter_expression, Filter};
 use liwe::schema::{build_document, compile_schema, CompiledSchema, Crumb, Violation};
 use serde_yaml::Value;
 
@@ -545,12 +545,28 @@ fn non_negative(value: &serde_yaml::Value, keyword: &str) -> Result<u64, String>
         .ok_or_else(|| format!("{keyword}: expected a non-negative integer"))
 }
 
-/// Cache of evaluated `target`/`some` filters, keyed by schema name, rule
-/// index and which of the two filters — each is evaluated once per run.
-type FilterCache = HashMap<(String, usize, &'static str), HashSet<Key>>;
+/// Memo shared across every document one validate run checks. A rule's
+/// `target`/`some`/`when` filters and a `reach` rule's scoped link targets
+/// depend only on the graph and the rule, never on the document under
+/// check, so each is computed once per run instead of once per document.
+#[derive(Default)]
+struct RunCache {
+    /// Evaluated key sets, keyed by schema name, rule index and which
+    /// filter of the rule ("target", "some", "when", "requires-when").
+    filters: HashMap<(String, usize, &'static str), HashSet<Key>>,
+    /// For each `reach` rule, every document's link targets inside the
+    /// rule's scope — the edges of the reach walk, shared by all chains.
+    via_targets: HashMap<(String, usize), HashMap<Key, Vec<Key>>>,
+}
+
+impl RunCache {
+    fn new() -> Self {
+        Self::default()
+    }
+}
 
 fn filter_set<'c>(
-    cache: &'c mut FilterCache,
+    cache: &'c mut RunCache,
     schema: &str,
     index: usize,
     which: &'static str,
@@ -558,8 +574,43 @@ fn filter_set<'c>(
     graph: &Graph,
 ) -> &'c HashSet<Key> {
     cache
+        .filters
         .entry((schema.to_string(), index, which))
         .or_insert_with(|| evaluate(filter, graph).into_iter().collect())
+}
+
+/// Whether `start` reaches `goal` through links inside `scope` — a
+/// breadth-first walk over the cached per-document scoped targets, stopping
+/// as soon as the goal appears.
+fn reaches(
+    graph: &Graph,
+    start: &Key,
+    goal: &Key,
+    scope: &BlockPredicate,
+    targets: &mut HashMap<Key, Vec<Key>>,
+) -> bool {
+    let mut visited: HashSet<Key> = HashSet::new();
+    let mut queue: VecDeque<Key> = VecDeque::new();
+    visited.insert(start.clone());
+    queue.push_back(start.clone());
+    while let Some(current) = queue.pop_front() {
+        let next = targets.entry(current).or_insert_with_key(|key| {
+            if graph.maybe_key(key).is_some() {
+                BlockIndex::build(graph, key).targets_within(scope)
+            } else {
+                Vec::new()
+            }
+        });
+        for neighbor in next.clone() {
+            if neighbor == *goal {
+                return true;
+            }
+            if visited.insert(neighbor.clone()) {
+                queue.push_back(neighbor);
+            }
+        }
+    }
+    false
 }
 
 const THIS: &str = "$this";
@@ -764,8 +815,8 @@ fn this_filter_set(
     if targets.is_empty() {
         return Ok(HashSet::new());
     }
-    let scoped = Filter::And(vec![Filter::Key(KeyOp::In(targets.to_vec())), filter]);
-    Ok(evaluate(&scoped, graph).into_iter().collect())
+    let candidates: HashSet<Key> = targets.iter().cloned().collect();
+    Ok(evaluate_within(&filter, graph, &candidates))
 }
 
 /// Check one document against a schema's `links` rules. With `full` false
@@ -777,7 +828,7 @@ fn check_links(
     schema: &str,
     rules: &[LinkRule],
     full: bool,
-    cache: &mut FilterCache,
+    cache: &mut RunCache,
     index: &BlockIndex,
 ) -> Vec<Violation> {
     if rules.is_empty() {
@@ -786,8 +837,7 @@ fn check_links(
     let mut violations = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
         if let Some((when, _)) = &rule.when {
-            let applies = Filter::And(vec![Filter::Key(KeyOp::Eq(key.clone())), when.clone()]);
-            if !evaluate(&applies, graph).contains(key) {
+            if !filter_set(cache, schema, i, "when", when, graph).contains(key) {
                 continue;
             }
         }
@@ -900,8 +950,11 @@ fn check_links(
         }
         if let Some(reach) = &rule.reach {
             if key != reach {
-                let walk = ViaWalk::new(graph, &scope).outbound(key, u32::MAX);
-                if !walk.contains_key(reach) {
+                let targets = cache
+                    .via_targets
+                    .entry((schema.to_string(), i))
+                    .or_default();
+                if !reaches(graph, key, reach, &scope, targets) {
                     report(format!("no chain of links{where_} reaches '{reach}'"));
                 }
             }
@@ -917,13 +970,14 @@ fn check_links(
 fn check_requires(
     graph: &Graph,
     key: &Key,
+    schema: &str,
     rules: &[RequireRule],
+    cache: &mut RunCache,
     index: &BlockIndex,
 ) -> Vec<Violation> {
     let mut violations = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
-        let applies = Filter::And(vec![Filter::Key(KeyOp::Eq(key.clone())), rule.when.clone()]);
-        if !evaluate(&applies, graph).contains(key) {
+        if !filter_set(cache, schema, i, "requires-when", &rule.when, graph).contains(key) {
             continue;
         }
         let count = index
@@ -1194,12 +1248,19 @@ pub fn validate_documents_against_file(
     })?;
 
     let mut reports = Vec::new();
-    let mut cache = FilterCache::new();
+    let mut cache = RunCache::new();
     for key in keys {
         let document = build_document(graph, key, count_tokens);
         let mut violations = compiled.validate(&document);
         let index = BlockIndex::build(graph, key);
-        violations.extend(check_requires(graph, key, &extensions.requires, &index));
+        violations.extend(check_requires(
+            graph,
+            key,
+            &label,
+            &extensions.requires,
+            &mut cache,
+            &index,
+        ));
         violations.extend(check_asserts(graph, key, &extensions.asserts, &index));
         violations.extend(check_links(
             graph,
@@ -1494,7 +1555,7 @@ fn validate_documents_in(
     let mut reports = Vec::new();
     let mut documents = 0;
     let mut schemas_used = HashSet::new();
-    let mut cache = FilterCache::new();
+    let mut cache = RunCache::new();
     for key in keys {
         let names = bindings.schemas_for(&key.to_string());
         if names.is_empty() {
@@ -1507,7 +1568,7 @@ fn validate_documents_in(
             schemas_used.insert(name);
             let set = &compiled[name];
             let mut violations = set.schema.validate(&document);
-            violations.extend(check_requires(graph, key, &set.requires, &index));
+            violations.extend(check_requires(graph, key, name, &set.requires, &mut cache, &index));
             violations.extend(check_asserts(graph, key, &set.asserts, &index));
             violations.extend(check_links(
                 graph, key, name, &set.links, full, &mut cache, &index,

@@ -29,7 +29,7 @@ pub use builder::{
 pub use document::{
     BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp, Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation, OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField, ReferenceAnchor, Sort, SortDir, StandingOp, Update, UpdateOp, UpdateOperator, YamlType, is_operator_segment,
 };
-pub use eval::evaluate;
+pub use eval::{evaluate, evaluate_within};
 pub use execute::{execute, execute_with_scores, strict_guard_violations, FindMatch, Outcome};
 pub use schemas::{
     current_query_schema, query_schema, query_schema_uri, CURRENT_QUERY_SCHEMA_DRAFT,

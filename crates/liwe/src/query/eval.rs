@@ -25,6 +25,14 @@ pub fn evaluate(filter: &Filter, graph: &Graph) -> Vec<Key> {
     keys
 }
 
+/// Evaluate a filter restricted to the given candidates: the result is
+/// exactly `evaluate(filter) ∩ scope`, but predicates are only ever run
+/// against the candidates, so a filter checked over a handful of link
+/// targets does not pay for the whole store.
+pub fn evaluate_within(filter: &Filter, graph: &Graph, scope: &HashSet<Key>) -> HashSet<Key> {
+    eval(filter, graph, Some(scope))
+}
+
 fn all_keys(graph: &Graph) -> HashSet<Key> {
     graph.keys().into_iter().collect()
 }
