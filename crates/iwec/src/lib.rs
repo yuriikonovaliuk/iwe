@@ -28,6 +28,7 @@ use liwe::graph::{Graph, GraphContext};
 use liwe::model::node::NodePointer;
 use liwe::model::tree::{Tree, TreeIter};
 use liwe::model::{strip_doc_extension, Key};
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::operations::{
     attach_reference, delete as op_delete, extract as op_extract, inline as op_inline, references,
     rename as op_rename, sections, select_reference, select_section, AttachTarget, Changes,
@@ -1989,12 +1990,28 @@ impl IweServer {
             .is_some_and(|file_path| file_path.exists())
     }
 
+    // WP-12 (iwe_create/iwe_update/iwe_delete/iwe_query/iwe_rename/
+    // iwe_extract/iwe_inline/iwe_attach that write content, not just remove
+    // it) and WP-13 (iwe_normalize) share this single call site; wrapping
+    // it here covers both. Routed through the no-op Transaction interface
+    // before the actual filesystem write.
     fn write_file(&self, key: &Key, content: &str) {
         if let Some(file_path) = self.document_path(key) {
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&file_path, content).ok();
+            let mut tx = NoopTransaction::new();
+            tx.begin().expect("no-op transaction backend never fails");
+            tx.write(TxWrite::Put(key.clone(), content.to_string()))
+                .expect("no-op transaction backend never fails");
+            match std::fs::write(&file_path, content) {
+                Ok(()) => {
+                    tx.commit().expect("no-op transaction backend never fails");
+                }
+                Err(_) => {
+                    let _ = tx.abort();
+                }
+            }
         }
     }
 

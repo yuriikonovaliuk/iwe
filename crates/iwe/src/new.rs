@@ -15,6 +15,7 @@ use liwe::markdown::MarkdownReader;
 use liwe::model::{
     prepend_frontmatter, split_raw_frontmatter, strip_doc_extension, Frontmatter, Key,
 };
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
 pub const BODY_VARIABLE: &str = "body";
 pub const LEGACY_BODY_VARIABLE: &str = "content";
@@ -276,6 +277,12 @@ pub fn normalize_content(config: &Configuration, key: &Key, content: &str) -> St
     }
 }
 
+// WP-02 (create_command) / WP-03 (new_command): both CLI commands funnel their
+// durable write through this single call site, so wrapping it here covers
+// both. The write is routed through the storage-agnostic `Transaction`
+// interface (begin -> write(Put) -> commit) using the no-op default backend;
+// the actual persistence still happens via `std::fs::write` below, since
+// `NoopTransaction` performs no storage of its own (see transaction.rs).
 pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, String> {
     if let Some(parent) = prepared.path.parent() {
         if !parent.exists() {
@@ -284,8 +291,17 @@ pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, St
         }
     }
 
-    std::fs::write(&prepared.path, &prepared.content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    let mut tx = NoopTransaction::new();
+    tx.begin().expect("no-op transaction backend never fails");
+    tx.write(TxWrite::Put(prepared.key.clone(), prepared.content.clone()))
+        .expect("no-op transaction backend never fails");
+
+    if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {
+        let _ = tx.abort();
+        return Err(format!("Failed to write file: {}", e));
+    }
+
+    tx.commit().expect("no-op transaction backend never fails");
 
     Ok(CreatedDocument {
         path: prepared

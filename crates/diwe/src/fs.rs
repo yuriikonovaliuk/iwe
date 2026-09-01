@@ -8,8 +8,9 @@ use log::error;
 use rayon::prelude::*;
 
 use liwe::model::config::Format;
-use liwe::model::{Content, State};
+use liwe::model::{Content, Key, State};
 use liwe::operations::Changes;
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
 pub fn write_file(
     key: &String,
@@ -172,22 +173,47 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
     map.into_iter().collect()
 }
 
+// WP-11 (empty-key/normalize-all branch): each document rewritten by a
+// whole-graph normalize is routed through the no-op Transaction interface
+// as its own implicit single-write transaction, before the actual
+// filesystem write.
 pub fn write_store_at_path(store: &State, to: &Path, format: Format) -> std::io::Result<()> {
     for (key, content) in store.iter() {
-        write_file(key, content, to, format)?;
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(Key::name(key), content.clone()))
+            .expect("no-op transaction backend never fails");
+        if let Err(e) = write_file(key, content, to, format) {
+            let _ = tx.abort();
+            return Err(e);
+        }
+        tx.commit().expect("no-op transaction backend never fails");
     }
     Ok(())
 }
 
+// WP-06..WP-09 (CLI delete/rename/extract/inline, via main.rs's
+// `apply_changes` wrapper) and WP-12 (MCP write tools that go through
+// `write_changes` -> this function): every remove/create/update below is
+// routed through the no-op Transaction interface as its own implicit
+// single-write transaction, before the actual filesystem operation.
 pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std::io::Result<()> {
     let extension = format.extension();
 
     for key in &changes.removes {
         let file_path = base_path.join(format!("{}.{}", key, extension));
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Remove(key.clone()))
+            .expect("no-op transaction backend never fails");
         if file_path.exists() {
-            fs::remove_file(&file_path)?;
+            if let Err(e) = fs::remove_file(&file_path) {
+                let _ = tx.abort();
+                return Err(e);
+            }
         }
         prune_empty_dirs(file_path.parent(), base_path);
+        tx.commit().expect("no-op transaction backend never fails");
     }
 
     for (key, markdown) in &changes.creates {
@@ -195,12 +221,28 @@ pub fn apply_changes(changes: &Changes, base_path: &Path, format: Format) -> std
         if let Some(parent) = file_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&file_path, markdown)?;
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(key.clone(), markdown.clone()))
+            .expect("no-op transaction backend never fails");
+        if let Err(e) = fs::write(&file_path, markdown) {
+            let _ = tx.abort();
+            return Err(e);
+        }
+        tx.commit().expect("no-op transaction backend never fails");
     }
 
     for (key, markdown) in &changes.updates {
         let file_path = base_path.join(format!("{}.{}", key, extension));
-        fs::write(&file_path, markdown)?;
+        let mut tx = NoopTransaction::new();
+        tx.begin().expect("no-op transaction backend never fails");
+        tx.write(TxWrite::Put(key.clone(), markdown.clone()))
+            .expect("no-op transaction backend never fails");
+        if let Err(e) = fs::write(&file_path, markdown) {
+            let _ = tx.abort();
+            return Err(e);
+        }
+        tx.commit().expect("no-op transaction backend never fails");
     }
 
     Ok(())
