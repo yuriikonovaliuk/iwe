@@ -4,6 +4,7 @@ mod attach_test;
 mod cli_filter_test;
 mod completions_test;
 mod create_test;
+mod d4_delete_mutability_test;
 mod delete_test;
 mod docs_test;
 mod enforcement_mode_matrix_test;

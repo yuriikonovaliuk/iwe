@@ -288,10 +288,26 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 // caller.
 //
 // For `changes.removes`, `check` is given the document's on-disk content as
-// it exists immediately before removal (there is no "new" content for a
-// removal) as both `content` and the prior-content argument. If that
-// content can't be read, the removal proceeds without a check rather than
-// blocking on an unrelated I/O failure. For `changes.creates` and
+// it exists immediately before removal as the prior-content argument, and
+// an empty string as `content` — the outgoing/"resulting" state of a
+// removal is that the document (every frontmatter property and the body)
+// no longer exists, not that it is unchanged. (D4 fix, M4-extension
+// defect: this used to pass the same existing content as both arguments,
+// on the reasoning that "a removal's resulting content is, in effect, its
+// own unchanged prior content" — true under the write-permission predicate
+// as it existed through D1's own fix, which checked every write
+// unconditionally against `PropertyRef::Body` regardless of what the write
+// actually touched, so passing identical content still triggered rejection
+// via that unconditional check. Once D1 replaced that with a touched/
+// untouched diff between prior and outgoing content
+// [`crate::permissions::property_touched`], identical-content input made
+// every property look untouched — silently permitting deletion of a
+// document with an immutable body or any other `mutable: false` property,
+// which is exactly the rule a deletion should trip: removing a document
+// changes every property in it, including the immutable ones, from
+// present to gone.) If the on-disk content can't be read, the removal
+// proceeds without a check rather than blocking on an unrelated I/O
+// failure. For `changes.creates` and
 // `changes.updates`, `check` additionally receives the document's prior
 // on-disk content (`None` if it doesn't exist yet), read from `base_path`
 // immediately before that document's write — the fix for M2's freeze-
@@ -352,7 +368,12 @@ pub fn apply_changes_with<TX: Transaction>(
         }
         if file_path.exists() {
             if let Ok(existing) = fs::read_to_string(&file_path) {
-                if let Err(rejected) = check(key, &existing, Some(&existing)) {
+                // D4 fix: pass "" as `content` (see this loop's own doc
+                // comment above `apply_changes_with` for why) rather than
+                // `&existing` — a removal's outgoing state is "nothing",
+                // not "unchanged", so a mutability/freeze rule can actually
+                // see the removal as the change it is.
+                if let Err(rejected) = check(key, "", Some(&existing)) {
                     let _ = tx.abort();
                     return Err(permission_denied(key, rejected));
                 }
@@ -601,6 +622,49 @@ mod tests {
             assert_eq!(log.begin_count(), 1);
             assert_eq!(log.commit_count(), 1);
             assert!(!dir.path().join("a.md").exists());
+        }
+
+        /// D4 fix (M4-extension defect): the write-permission `check` for a
+        /// removal must see the document's on-disk content as
+        /// `prior_content`, and an *empty* string as `content` — not the
+        /// same existing content passed for both, which (once D1's
+        /// touched/untouched diff landed) made every removal look like a
+        /// no-op write and silently bypassed every mutability/freeze rule.
+        /// This proves the exact values `apply_changes_with`'s removal
+        /// branch now passes to `check`, independent of what any real
+        /// `check_write_permission_for_content`-shaped predicate does with
+        /// them.
+        #[test]
+        fn delete_checks_permission_with_empty_content_and_existing_prior_content() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("a.md"), "# A\n\nbody\n").unwrap();
+            let changes = Changes::new().remove(Key::name("a"));
+            let seen: std::rc::Rc<std::cell::RefCell<Option<(String, Option<String>)>>> =
+                std::rc::Rc::new(std::cell::RefCell::new(None));
+
+            let result = apply_changes_with(
+                &changes,
+                dir.path(),
+                Format::Markdown,
+                {
+                    let seen = seen.clone();
+                    move |_key, content, prior_content| {
+                        *seen.borrow_mut() =
+                            Some((content.to_string(), prior_content.map(str::to_string)));
+                        Ok(())
+                    }
+                },
+                NoopTransaction::new,
+            );
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            let (content, prior_content) = seen.borrow().clone().expect("check was called");
+            assert_eq!(content, "", "a removal's outgoing content must be empty");
+            assert_eq!(
+                prior_content,
+                Some("# A\n\nbody\n".to_string()),
+                "a removal's prior content must be the document's on-disk content"
+            );
         }
 
         /// WP-07 (rename): a remove + create pair each drive their own
