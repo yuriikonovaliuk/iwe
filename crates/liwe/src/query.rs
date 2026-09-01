@@ -27,7 +27,7 @@ pub use builder::{
     ParseError, build_filter_value, build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression, parse_filter_mapping, parse_operation,
 };
 pub use document::{
-    BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp, Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation, OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PseudoField, ReferenceAnchor, Sort, SortDir, StandingOp, Update, UpdateOp, UpdateOperator, YamlType, is_operator_segment,
+    BlockUpdate, BlockUpdateOp, CountCmp, CountOp, CountPred, DeleteOp, Expect, FieldOp, FieldPath, Filter, FindOp, InclusionAnchor, KeyOp, Limit, Operation, OperationKind, Projection, ProjectionBase, ProjectionField, ProjectionSource, PropertyRef, PseudoField, ReferenceAnchor, Sort, SortDir, StandingOp, Update, UpdateOp, UpdateOperator, YamlType, is_operator_segment,
 };
 pub use eval::{evaluate, evaluate_within};
 pub use execute::{execute, execute_with_scores, strict_guard_violations, FindMatch, Outcome};
