@@ -32,6 +32,7 @@ use crate::config::{schemas_dir, Configuration};
 use crate::schema::{schema_mutability_rules, MutabilityRule, SchemaBindings};
 use liwe::model::document::Document;
 use liwe::model::{parse_leading_frontmatter, split_raw_frontmatter, Frontmatter, Key};
+use liwe::query::filter::{resolve_path, Resolution};
 use liwe::query::PropertyRef;
 use serde_yaml::Value;
 
@@ -107,6 +108,58 @@ fn is_solitary_unfreeze(prior_content: &str, next_content: &str) -> bool {
     }
 
     without_freeze(&prior_frontmatter) == without_freeze(&next_frontmatter)
+}
+
+/// D1 fix (M4-extension defect): whether `property` is actually one of the
+/// properties this write changes, comparing `property`'s value immediately
+/// before the write (`prior_frontmatter`/`prior_body`) against its value in
+/// the write's outgoing content (`next_frontmatter`/`next_body`).
+///
+/// This is the mirror of M2's freeze-bypass insight
+/// ([`check_write_permission_for_content`]'s own doc comment: "a predicate
+/// that cannot see the prior state cannot enforce a rule about a
+/// transition"): a predicate that cannot see *which* property a write
+/// targets cannot enforce a rule that is supposed to be per-property.
+/// [`check_write_permission_with_mutability`] used to check every write
+/// against [`PropertyRef::Body`] unconditionally, regardless of whether the
+/// write touched the body at all — so a `mutable: false` rule on `$content`
+/// rejected every write to the document, including ones that only ever
+/// touched a separately-mutable frontmatter field. This function is what
+/// lets that caller ask, for each property a schema actually declares a
+/// rule about, "did *this* write change it" instead of assuming the body
+/// always did.
+///
+/// - [`PropertyRef::Body`]: touched iff the body text differs.
+/// - [`PropertyRef::Frontmatter`]: touched iff the value at that (possibly
+///   dotted) path differs — including "absent in one, present in the
+///   other", which is a change too. Resolved via
+///   [`liwe::query::filter::resolve_path`], the same path-resolution this
+///   codebase already uses for filter/projection evaluation, so nested
+///   selectors (e.g. `owner.name`) are handled identically here, not
+///   reimplemented as a shallow top-level-key comparison.
+fn property_touched(
+    prior_frontmatter: &Frontmatter,
+    next_frontmatter: &Frontmatter,
+    prior_body: &str,
+    next_body: &str,
+    property: &PropertyRef,
+) -> bool {
+    match property {
+        PropertyRef::Body => prior_body != next_body,
+        PropertyRef::Frontmatter(path) => {
+            match (
+                resolve_path(prior_frontmatter, path),
+                resolve_path(next_frontmatter, path),
+            ) {
+                (Resolution::Missing, Resolution::Missing) => false,
+                (Resolution::Present(prior), Resolution::Present(next)) => prior != next,
+                // Present on exactly one side: the property went from
+                // absent to set, or from set to absent — a change either
+                // way.
+                _ => true,
+            }
+        }
+    }
 }
 
 /// Why a write was rejected by write-permission evaluation.
@@ -448,9 +501,43 @@ fn check_write_permission_with_mutability(
     // against `content`, which may itself now carry `freeze: true`.
     let document = Document {
         blocks: Vec::new(),
-        frontmatter: prior_frontmatter,
+        frontmatter: prior_frontmatter.clone(),
     };
-    check_write_permission(&document, key, &PropertyRef::Body, &mutability)
+
+    // D1 fix: this whole-document-content entry point used to check every
+    // write unconditionally against `PropertyRef::Body`, regardless of
+    // which property the write actually targeted — so a `mutable: false`
+    // rule on `$content` rejected a write that never touched the body at
+    // all. Per `property_touched`'s doc comment, resolve which property (or
+    // properties) this write actually changed, and check the mutability
+    // rule for each one that is both touched and schema-declared — not a
+    // hardcoded `$content` check. A property this write never touches is
+    // never evaluated, regardless of its rule; a property with no rule at
+    // all stays mutable by default (AB9), exactly as `check_write_
+    // permission` already enforces.
+    let prior_frontmatter_map = prior_frontmatter.unwrap_or_default();
+    let next_frontmatter_map = parse_leading_frontmatter(content).unwrap_or_default();
+    let (_, prior_body) = prior_content.map(split_raw_frontmatter).unwrap_or((None, ""));
+    let (_, next_body) = split_raw_frontmatter(content);
+
+    for rule in &mutability {
+        if !property_touched(
+            &prior_frontmatter_map,
+            &next_frontmatter_map,
+            prior_body,
+            next_body,
+            &rule.property,
+        ) {
+            continue;
+        }
+        // Reuse the single shared predicate (this module's own doc
+        // comment: "the one function every write path ... must call") for
+        // the actual mutable/immutable decision on this touched property,
+        // rather than re-implementing the `!rule.mutable` check here.
+        check_write_permission(&document, key, &rule.property, &mutability)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -802,5 +889,196 @@ mod tests {
         );
 
         assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));
+    }
+
+    // =======================================================================
+    // D1 (M4-extension defect) fix: `check_write_permission_with_mutability`
+    // (reached via `check_write_permission_for_content[_in]`, WP-02..WP-13's
+    // whole-document-content entry point) used to check every write
+    // unconditionally against `PropertyRef::Body`, so a `mutable: false`
+    // rule on `$content` rejected every write to the document — including
+    // ones that never touched the body at all. These five cases are the
+    // matrix this fix was scoped against: one mint-origin-shaped fixture,
+    // body immutable, one property explicitly schema-marked mutable, one
+    // property explicitly schema-marked *immutable* (see the judgment-call
+    // note on case 3 below), and (in a sixth, supplementary case) a property
+    // carrying no rule at all, to prove AB9's confirmed default-mutable
+    // convention still holds through this same content-based path.
+    // =======================================================================
+
+    /// The D1 fixture's `mutable:` rules, shared by every case below:
+    /// `$content` immutable, `status` and `owner` explicitly mutable,
+    /// `archived` explicitly immutable. `tags` (used by the supplementary
+    /// AB9 case) is deliberately left off this list — a property with no
+    /// rule at all.
+    fn d1_mutability() -> Vec<MutabilityRule> {
+        vec![
+            MutabilityRule {
+                selector: "$content".to_string(),
+                property: PropertyRef::Body,
+                mutable: false,
+            },
+            MutabilityRule {
+                selector: "status".to_string(),
+                property: PropertyRef::from_selector("status"),
+                mutable: true,
+            },
+            MutabilityRule {
+                selector: "owner".to_string(),
+                property: PropertyRef::from_selector("owner"),
+                mutable: true,
+            },
+            MutabilityRule {
+                selector: "archived".to_string(),
+                property: PropertyRef::from_selector("archived"),
+                mutable: false,
+            },
+        ]
+    }
+
+    const D1_PRIOR: &str = "---\nstatus: draft\nowner: alice\narchived: false\n---\n\n# Doc\n\nOriginal body.\n";
+
+    /// Case 1/5: body-only write. Already correct before this fix — proven
+    /// here as a non-regression, not the fix target itself.
+    #[test]
+    fn d1_case1_body_only_write_is_rejected() {
+        let doc_key = key("mind/case1");
+        let next = "---\nstatus: draft\nowner: alice\narchived: false\n---\n\n# Doc\n\nChanged body.\n";
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(D1_PRIOR),
+            d1_mutability(),
+        );
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// Case 2/5: the fix target. A write to `status` only (explicitly
+    /// schema-marked mutable, no body touch) must now succeed, where it was
+    /// previously rejected identically to a body write (D1's own signature:
+    /// rejection referencing `$content` regardless of the property actually
+    /// targeted).
+    #[test]
+    fn d1_case2_schema_mutable_property_only_write_now_succeeds() {
+        let doc_key = key("mind/case2");
+        let next = "---\nstatus: approved\nowner: alice\narchived: false\n---\n\n# Doc\n\nOriginal body.\n";
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(D1_PRIOR),
+            d1_mutability(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Case 3/5: a write to a property the schema explicitly marks
+    /// `mutable: false` (`archived`) is rejected, naming that property —
+    /// not `$content`.
+    ///
+    /// Judgment call: the task's own matrix describes this case's target
+    /// property as merely "not marked mutable" and glosses it as "not
+    /// mutable by default per AB9's convention". That gloss contradicts
+    /// this codebase's own confirmed default: a property absent from a
+    /// schema's `mutable:` mapping entirely is mutable
+    /// (`default_mutable_corpus_sees_zero_rejections` /
+    /// `property_absent_from_mutable_mapping_is_mutable`, both already
+    /// above in this file, plus `m2/design-extensions`'s "AB9" itself). A
+    /// merely-unmarked property write would succeed, not reject, so it
+    /// cannot exercise "REJECTED" here. This case therefore uses a property
+    /// explicitly marked `mutable: false` (`archived`) instead, which is
+    /// what actually demonstrates a genuine non-mutable-property rejection
+    /// under this codebase's real semantics. The unmarked-property case is
+    /// covered separately, and correctly, by
+    /// `d1_unmarked_property_write_succeeds_ab9_default` below.
+    #[test]
+    fn d1_case3_explicitly_immutable_property_write_is_rejected() {
+        let doc_key = key("mind/case3");
+        let next = "---\nstatus: draft\nowner: alice\narchived: true\n---\n\n# Doc\n\nOriginal body.\n";
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(D1_PRIOR),
+            d1_mutability(),
+        );
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::from_selector("archived"),
+                selector: "archived".to_string(),
+            })
+        );
+    }
+
+    /// Case 4/5: bundling a legitimate mutable-property change (`status`)
+    /// with a body change in one write does not rescue the write — body is
+    /// touched, so the whole write is still rejected.
+    #[test]
+    fn d1_case4_body_plus_legit_mutable_property_bundle_is_rejected() {
+        let doc_key = key("mind/case4");
+        let next = "---\nstatus: approved\nowner: alice\narchived: false\n---\n\n# Doc\n\nChanged body.\n";
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(D1_PRIOR),
+            d1_mutability(),
+        );
+        assert_eq!(
+            result,
+            Err(WritePermissionError::PropertyImmutable {
+                key: doc_key,
+                property: PropertyRef::Body,
+                selector: "$content".to_string(),
+            })
+        );
+    }
+
+    /// Case 5/5: two legitimate mutable-property changes together (`status`
+    /// and `owner`), neither touching the body, succeed.
+    #[test]
+    fn d1_case5_two_legit_mutable_property_changes_together_succeed() {
+        let doc_key = key("mind/case5");
+        let next = "---\nstatus: approved\nowner: bob\narchived: false\n---\n\n# Doc\n\nOriginal body.\n";
+        let result = check_write_permission_with_mutability(
+            &doc_key,
+            next,
+            Some(D1_PRIOR),
+            d1_mutability(),
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Supplementary: AB9's default-mutable guarantee, proven through this
+    /// same content-based path — a property carrying no `mutable:` rule at
+    /// all (`tags`, absent from `d1_mutability()`) may be freely changed
+    /// even though the same document's body is immutable.
+    #[test]
+    fn d1_unmarked_property_write_succeeds_ab9_default() {
+        let doc_key = key("mind/case6");
+        let prior = "---\nstatus: draft\nowner: alice\narchived: false\ntags: [a]\n---\n\n# Doc\n\nOriginal body.\n";
+        let next = "---\nstatus: draft\nowner: alice\narchived: false\ntags: [a, b]\n---\n\n# Doc\n\nOriginal body.\n";
+        let result =
+            check_write_permission_with_mutability(&doc_key, next, Some(prior), d1_mutability());
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Sanity check on `property_touched` itself: a field present in the
+    /// prior frontmatter and absent from the next (an unset) counts as
+    /// touched, and vice versa — not just "both present but different".
+    #[test]
+    fn d1_property_touched_treats_presence_change_as_touched() {
+        let prior_fm: Frontmatter = serde_yaml::from_str("status: draft\n").unwrap();
+        let next_fm: Frontmatter = serde_yaml::from_str("owner: alice\n").unwrap();
+        let status = PropertyRef::from_selector("status");
+        assert!(property_touched(&prior_fm, &next_fm, "", "", &status));
+        let owner = PropertyRef::from_selector("owner");
+        assert!(property_touched(&prior_fm, &next_fm, "", "", &owner));
     }
 }
