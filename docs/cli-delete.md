@@ -211,6 +211,7 @@ The command fails (exit code 1) when:
 - The `--expect` guard is violated, or `--strict` is given without `--expect`.
 - A target document does not exist.
 - Filesystem permissions prevent writing.
+- A target document is frozen, or its schema marks `$content` immutable — see [Document Schema](document-schema.md#11-freeze).
 
 ## Technical notes
 

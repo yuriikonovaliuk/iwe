@@ -2,6 +2,57 @@ use crate::fixture::Fixture;
 use diwe::config::Configuration;
 use serde_json::json;
 
+/// T5 (independent, test-only wiring): black-box confirmation that the
+/// `iwe_create` MCP tool — which now records its write on a
+/// NoopTransaction via crates/iwec/src/lib.rs's `write_file` before
+/// writing to disk — still produces exactly the on-disk result content
+/// mode is documented to produce. See `write_file_is_unchanged_by_transaction_wiring`
+/// in crates/iwec/src/lib.rs for the unit-level before/after comparison
+/// against the pre-wiring filesystem logic directly.
+#[tokio::test]
+async fn create_writes_through_the_wired_transaction_path_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let f = Fixture::with_path(base.to_str().unwrap(), Configuration::default()).await;
+
+    let document = "# Wired\n\nBody.\n";
+    f.call_tool("iwe_create", json!({"key": "wired", "content": document}))
+        .await;
+
+    assert_eq!(
+        std::fs::read_to_string(base.join("wired.md")).unwrap(),
+        document
+    );
+}
+
+/// T5 (independent, test-only wiring): black-box confirmation that the
+/// `iwe_delete` MCP tool — which funnels through `write_changes` ->
+/// `diwe::fs::apply_changes`, wired in crates/diwe/src/fs.rs — still
+/// removes exactly the file it is documented to remove and nothing else.
+/// See `apply_changes_is_unchanged_by_transaction_wiring` in
+/// crates/diwe/src/fs.rs for the unit-level before/after comparison
+/// against the pre-wiring filesystem logic directly.
+#[tokio::test]
+async fn delete_removes_through_the_wired_transaction_path_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let f = Fixture::with_path(base.to_str().unwrap(), Configuration::default()).await;
+
+    f.call_tool("iwe_create", json!({"key": "keep", "content": "# Keep\n"}))
+        .await;
+    f.call_tool("iwe_create", json!({"key": "gone", "content": "# Gone\n"}))
+        .await;
+    assert!(base.join("gone.md").exists());
+
+    f.call_tool("iwe_delete", json!({"key": "gone"})).await;
+
+    assert!(!base.join("gone.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(base.join("keep.md")).unwrap(),
+        "# Keep\n"
+    );
+}
+
 #[tokio::test]
 async fn create_writes_the_document_verbatim() {
     let dir = tempfile::tempdir().unwrap();

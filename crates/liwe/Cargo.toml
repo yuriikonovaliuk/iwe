@@ -45,6 +45,14 @@ name = "integration"
 path = "tests/main.rs"
 required-features = ["djot"]
 
+# T9 (M2, knowledge-compositor): independent, contract-only tests for the
+# body-as-property retrofit, written by Test-builder. Kept as its own test
+# target (rather than folded into tests/main.rs) so it runs under plain
+# `cargo test` without requiring the `djot` feature.
+[[test]]
+name = "body_property_addressing"
+path = "tests/body_property_addressing_test.rs"
+
 [dev-dependencies]
 env_logger.workspace = true
 pretty_assertions.workspace = true

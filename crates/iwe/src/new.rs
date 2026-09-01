@@ -15,6 +15,7 @@ use liwe::markdown::MarkdownReader;
 use liwe::model::{
     prepend_frontmatter, split_raw_frontmatter, strip_doc_extension, Frontmatter, Key,
 };
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
 pub const BODY_VARIABLE: &str = "body";
 pub const LEGACY_BODY_VARIABLE: &str = "content";
@@ -276,7 +277,49 @@ pub fn normalize_content(config: &Configuration, key: &Key, content: &str) -> St
     }
 }
 
-pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, String> {
+// WP-02 (create_command) / WP-03 (new_command): both CLI commands funnel their
+// durable write through this single call site, so wrapping it here covers
+// both. The write is routed through the storage-agnostic `Transaction`
+// interface (begin -> write(Put) -> commit) using the no-op default backend;
+// the actual persistence still happens via `std::fs::write` below, since
+// `NoopTransaction` performs no storage of its own (see transaction.rs).
+//
+// The write-permission check (`diwe::permissions::
+// check_write_permission_for_content`, which resolves `prepared.key`'s
+// real schema binding via `configuration.schemas` rather than a placeholder)
+// runs inside this transaction bracket — after `begin()`, before the actual
+// filesystem write — rather than at the `new_command`/`create_command` call
+// sites before `write_document` is even invoked. Per `m2/design-transactions`,
+// a write-permission rejection must be able to drive the transaction into
+// its failed/aborted state, which requires the transaction to already be
+// open when the check runs.
+pub fn write_document(
+    configuration: &Configuration,
+    prepared: &PreparedDocument,
+) -> Result<CreatedDocument, String> {
+    write_document_with(configuration, prepared, NoopTransaction::new)
+}
+
+/// Generic core of [`write_document`], parameterized over the transaction
+/// backend via a factory (`new_tx`) called once to build the transaction
+/// used for this write. `write_document` always calls this with
+/// `NoopTransaction::new`; T6's tests call it with a factory that builds a
+/// call-recording stub instead (`liwe::transaction::RecordingTransaction`),
+/// to prove this call site actually drives `begin`/`write`/`commit`/
+/// `abort` on whatever `Transaction` it is given, rather than merely
+/// compiling against the trait.
+///
+/// `commit` is attempted before the real filesystem write, not after: a
+/// real backend makes writes durable in `commit`, so a commit refusal
+/// must prevent the write from landing rather than merely being noticed
+/// once it already has. This is a no-op change in observable behavior
+/// under `NoopTransaction` (whose `commit` never fails), and matters only
+/// once a real backend is wired in.
+pub fn write_document_with<TX: Transaction>(
+    configuration: &Configuration,
+    prepared: &PreparedDocument,
+    mut new_tx: impl FnMut() -> TX,
+) -> Result<CreatedDocument, String> {
     if let Some(parent) = prepared.path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)
@@ -284,8 +327,55 @@ pub fn write_document(prepared: &PreparedDocument) -> Result<CreatedDocument, St
         }
     }
 
-    std::fs::write(&prepared.path, &prepared.content)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    let mut tx = new_tx();
+    tx.begin()
+        .map_err(|_| "transaction backend failed to begin".to_string())?;
+
+    if tx
+        .write(TxWrite::Put(prepared.key.clone(), prepared.content.clone()))
+        .is_err()
+    {
+        // The transaction backend itself rejected this write (T10/T11's
+        // eventual real freeze/mutability logic, driven through
+        // `Transaction::write` — not the placeholder
+        // `check_write_permission_for_content` call below). Per the
+        // failed-state contract on `Transaction::write`, `commit` must
+        // now refuse: attempt it anyway (rather than skipping straight to
+        // `abort`) so that refusal is what this call site actually
+        // observes, not merely assumes.
+        let commit_result = tx.commit();
+        debug_assert!(
+            commit_result.is_err(),
+            "a transaction with a rejected write must refuse commit"
+        );
+        let _ = tx.abort();
+        return Err("write rejected by transaction backend".to_string());
+    }
+
+    // Read the target's on-disk content, if any, *before* this write lands —
+    // the freeze-bypass fix (`m2/design-freeze-semantics`) needs the prior
+    // state to enforce a rule about a transition, not just the outgoing
+    // content. A genuine create has no prior content (`None`); if a file
+    // already exists at this path, its prior state still governs.
+    let prior_content = std::fs::read_to_string(&prepared.path).ok();
+    if let Err(rejected) = diwe::permissions::check_write_permission_for_content(
+        configuration,
+        &prepared.key,
+        &prepared.content,
+        prior_content.as_deref(),
+    ) {
+        let _ = tx.abort();
+        return Err(rejected.to_string());
+    }
+
+    if tx.commit().is_err() {
+        let _ = tx.abort();
+        return Err("write rejected: transaction backend refused to commit".to_string());
+    }
+
+    if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {
+        return Err(format!("Failed to write file: {}", e));
+    }
 
     Ok(CreatedDocument {
         path: prepared
@@ -372,4 +462,101 @@ fn string_to_slug(s: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+// T6: `write_document_with` is the generic core behind WP-02 (CLI
+// `create`) and WP-03 (CLI `new`) — both `create_command` and
+// `new_command` funnel their durable write through `write_document`,
+// which is a thin wrapper over `write_document_with(.., NoopTransaction::
+// new)`. These tests drive `write_document_with` directly with a
+// `liwe::transaction::RecordingTransaction` in place of `NoopTransaction`
+// to prove the wiring is real.
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use liwe::transaction::{RecordingTransaction, TransactionLog, TxEvent};
+
+    fn prepared_document(dir: &std::path::Path, name: &str, content: &str) -> PreparedDocument {
+        PreparedDocument {
+            key: Key::name(name),
+            path: dir.join(format!("{}.md", name)),
+            content: content.to_string(),
+        }
+    }
+
+    /// WP-02/WP-03 (CLI create/new): an ordinary write drives exactly one
+    /// `begin` and one `commit` on the transaction it's given, and the
+    /// content actually lands on disk.
+    #[test]
+    fn ordinary_write_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Configuration::default();
+        let prepared = prepared_document(dir.path(), "note", "# Note\n");
+        let log = TransactionLog::new();
+
+        let result =
+            write_document_with(&config, &prepared, || RecordingTransaction::new(log.clone()));
+
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(log.abort_count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(&prepared.path).unwrap(),
+            "# Note\n"
+        );
+    }
+
+    /// A commit refusal from the backend surfaces as an `Err` (not
+    /// silently swallowed) and the write never lands on disk.
+    #[test]
+    fn commit_refusal_prevents_the_write_and_surfaces_as_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Configuration::default();
+        let prepared = prepared_document(dir.path(), "note", "# Note\n");
+        let log = TransactionLog::new();
+
+        let result = write_document_with(&config, &prepared, || {
+            RecordingTransaction::refusing_commit(log.clone())
+        });
+
+        assert!(result.is_err());
+        assert_eq!(log.commit_count(), 1, "commit must actually be attempted");
+        assert_eq!(log.abort_count(), 1, "a refused commit must be aborted");
+        assert!(
+            !prepared.path.exists(),
+            "the write must not land on disk when commit is refused"
+        );
+    }
+
+    /// A write-permission rejection mid-transaction (standing in for
+    /// T10/T11's real freeze/mutability logic, not yet landed as of T6):
+    /// `commit` is attempted and refuses per the failed-state contract on
+    /// `Transaction::write`, `abort` succeeds, and no partial state
+    /// persists. NOTE for whoever integrates T10/T11: re-run this test's
+    /// intent against the real freeze/mutability construct once it lands,
+    /// in place of `RecordingTransaction::rejecting_next_write`.
+    #[test]
+    fn write_rejection_mid_transaction_refuses_commit_and_aborts_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Configuration::default();
+        let prepared = prepared_document(dir.path(), "note", "# Note\n");
+        let log = TransactionLog::new();
+
+        let result = write_document_with(&config, &prepared, || {
+            RecordingTransaction::rejecting_next_write(log.clone())
+        });
+
+        assert!(result.is_err());
+        let events = log.events();
+        assert_eq!(events[0], TxEvent::Begin);
+        assert!(matches!(events[1], TxEvent::Write(_)));
+        assert_eq!(events[2], TxEvent::Commit);
+        assert_eq!(events[3], TxEvent::Abort);
+        assert_eq!(log.commit_count(), 1, "commit must actually be attempted");
+        assert!(
+            !prepared.path.exists(),
+            "no partial state must persist after a mid-transaction rejection"
+        );
+    }
 }

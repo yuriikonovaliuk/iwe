@@ -31,3 +31,4 @@ mod roundtrip_test;
 mod squash_test;
 mod task_items_test;
 mod toc_test;
+mod transaction_interface_test;

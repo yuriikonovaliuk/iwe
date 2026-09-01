@@ -38,6 +38,7 @@ use liwe::query::{
     self, execute, parse_operation, strict_guard_violations, Filter, InclusionAnchor, Operation,
     OperationKind, Outcome, ProjectionBase,
 };
+use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use minijinja::{context, Environment};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -1065,8 +1066,12 @@ impl IweServer {
 
         self.ensure_schema_clean(&[(key.clone(), markdown.clone())])?;
 
+        // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
+        // run it before mutating the in-memory graph so a rejection leaves
+        // both graph and disk untouched rather than just disk.
+        self.write_file(&key, &markdown)
+            .map_err(|message| McpError::invalid_params(message, None))?;
         graph.insert_document(key.clone(), markdown.clone());
-        self.write_file(&key, &markdown);
 
         let warnings = self
             .stats_warnings(
@@ -1109,8 +1114,12 @@ impl IweServer {
 
         self.ensure_schema_clean(&[(key.clone(), params.content.clone())])?;
 
+        // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
+        // run it before mutating the in-memory graph so a rejection leaves
+        // both graph and disk untouched rather than just disk.
+        self.write_file(&key, &params.content)
+            .map_err(|message| McpError::invalid_params(message, None))?;
         graph.update_document(key.clone(), params.content.clone());
-        self.write_file(&key, &params.content);
 
         let new_title = (&*graph)
             .get_key_title(&key)
@@ -1241,8 +1250,13 @@ impl IweServer {
                 if !dry_run {
                     self.ensure_schema_clean(&changes)?;
                     for (key, content) in &changes {
+                        // Write-permission (e.g. EXT-FREEZE) is checked
+                        // inside `write_file`; run it before mutating the
+                        // in-memory graph so a rejection leaves both graph
+                        // and disk untouched rather than just disk.
+                        self.write_file(key, content)
+                            .map_err(|message| McpError::invalid_params(message, None))?;
                         graph.update_document(key.clone(), content.clone());
-                        self.write_file(key, content);
                     }
                     let touched: Vec<Key> = changes.iter().map(|(key, _)| key.clone()).collect();
                     warnings = self.stats_warnings(&graph, &touched, &[], &touched).await;
@@ -1484,7 +1498,8 @@ impl IweServer {
             for (key_str, normalized_content) in &state {
                 let key = Key::name(key_str);
                 if self.read_file(&key).as_deref() != Some(normalized_content.as_str()) {
-                    self.write_file(&key, normalized_content);
+                    self.write_file(&key, normalized_content)
+                        .map_err(|message| McpError::invalid_params(message, None))?;
                     changed += 1;
                 }
             }
@@ -1989,12 +2004,147 @@ impl IweServer {
             .is_some_and(|file_path| file_path.exists())
     }
 
-    fn write_file(&self, key: &Key, content: &str) {
-        if let Some(file_path) = self.document_path(key) {
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            std::fs::write(&file_path, content).ok();
+    /// Mirrors `iwe::main::enforce_write_permission`'s call to the shared
+    /// write-permission site (`diwe::permissions::
+    /// check_write_permission_for_content`), reached here from every iwec
+    /// write instead of from a CLI command handler. Unconditional — never
+    /// gated behind a strict/non-strict branch — because write-permission
+    /// evaluation must fire identically regardless of invocation mode.
+    ///
+    /// Called from inside `write_file`'s transaction bracket (after
+    /// `begin()`, before the actual filesystem write) rather than before it
+    /// starts: per `m2/design-transactions`, a write-permission rejection
+    /// must be able to drive the transaction into its failed/aborted state
+    /// rather than the transaction never having begun.
+    ///
+    /// Resolved from `self.project_path`, not `self.base_path`/cwd: same
+    /// `schemas_dir_in(root)` precedent `ensure_schema_clean` already uses,
+    /// so the schemas directory used to read `mutable:` rules matches the
+    /// one used to validate `--strict`/MCP schema compliance, and so tests
+    /// can run in-process against a temp directory without the server's
+    /// actual cwd having to match it.
+    ///
+    /// Returns the rejection's own `Display` message (document key + rule;
+    /// both `WritePermissionError::Frozen` and
+    /// `WritePermissionError::PropertyImmutable` carry their own key)
+    /// rather than the error value itself, since every caller only needs to
+    /// surface it — as an `McpError` (`write_file`'s callers) or as a log
+    /// line (`write_changes`, whose `diwe::fs::apply_changes` hook has no
+    /// room to propagate a message through to an MCP tool response).
+    ///
+    /// Reads `key`'s prior on-disk content itself (via `self.document_path`,
+    /// `None` if it doesn't exist yet) before evaluating — the fix for M2's
+    /// freeze-bypass defect (`m2/design-freeze-semantics`): a predicate fed
+    /// only the outgoing `content` can't enforce a rule about a transition
+    /// (e.g. "frozen, unless this write's sole effect is lifting freeze").
+    fn enforce_write_permission(&self, key: &Key, content: &str) -> Result<(), String> {
+        let prior_content = self
+            .document_path(key)
+            .and_then(|path| std::fs::read_to_string(path).ok());
+        let result = match &self.project_path {
+            Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                &self.config,
+                &schemas_dir_in(root),
+                key,
+                content,
+                prior_content.as_deref(),
+            ),
+            None => diwe::permissions::check_write_permission_for_content(
+                &self.config,
+                key,
+                content,
+                prior_content.as_deref(),
+            ),
+        };
+        result.map_err(|rejected| rejected.to_string())
+    }
+
+    // WP-12 (iwe_create/iwe_update/iwe_delete/iwe_query/iwe_rename/
+    // iwe_extract/iwe_inline/iwe_attach that write content, not just remove
+    // it) and WP-13 (iwe_normalize) share this single call site; wrapping
+    // it here covers both. Routed through the no-op Transaction interface,
+    // with the write-permission check running inside the transaction
+    // bracket (after `begin()`, before the actual filesystem write) so a
+    // rejection aborts the transaction instead of the write never having
+    // been attempted.
+    //
+    // T10 (EXT-FREEZE): a rejection is surfaced to the caller (as
+    // `Err(message)`) rather than silently discarded, so a frozen
+    // document's write is both refused on disk and reported as a tool
+    // error rather than a false success — combined here with T6's generic
+    // transaction-backend wiring (`write_file_with`, parameterized over
+    // `TX` so tests can drive it with a `RecordingTransaction`) and T6's
+    // commit-gates-persist ordering (`commit` is attempted before the real
+    // filesystem write, not after, so a commit refusal actually prevents
+    // the write rather than merely being noticed once it already landed).
+    fn write_file(&self, key: &Key, content: &str) -> Result<(), String> {
+        self.write_file_with(key, content, NoopTransaction::new)
+    }
+
+    /// Generic core of [`Self::write_file`], parameterized over the
+    /// transaction backend via a factory (`new_tx`) called once to build
+    /// the transaction used for this write. `write_file` (every MCP tool
+    /// call's actual write path) always calls this with
+    /// `NoopTransaction::new`, per AB9's "transactions default to no-op
+    /// passthrough" — that default is unchanged.
+    ///
+    /// `pub`, not merely `pub(crate)`/private: this is the interface
+    /// boundary itself, and M2's fix-wave found it *not* genuinely routed
+    /// through by any production path outside this module — every real
+    /// call site hardcoded `NoopTransaction::new` with no override
+    /// reachable from outside `iwec`, which is a defect distinct from
+    /// [`AffectedSetTransaction`](diwe::validating_transaction::AffectedSetTransaction)
+    /// itself correctly staying dormant as the default. Making this `pub`
+    /// (mirroring `diwe::fs::apply_changes_with` /
+    /// `diwe::fs::write_store_at_path_with` / `iwe::new::write_document_with`,
+    /// which were already `pub`) is what lets a future caller — the
+    /// compositor, in a later milestone — install a different backend
+    /// without rewriting this call site. T6's tests already call this with
+    /// a factory that builds a call-recording stub
+    /// (`liwe::transaction::RecordingTransaction`), to prove this MCP call
+    /// site actually drives `begin`/`write`/`commit`/`abort`, rather than
+    /// merely compiling against the trait.
+    pub fn write_file_with<TX: Transaction>(
+        &self,
+        key: &Key,
+        content: &str,
+        mut new_tx: impl FnMut() -> TX,
+    ) -> Result<(), String> {
+        let Some(file_path) = self.document_path(key) else {
+            return Ok(());
+        };
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let mut tx = new_tx();
+        tx.begin()
+            .map_err(|_| format!("transaction backend failed to begin for '{key}'"))?;
+
+        if tx
+            .write(TxWrite::Put(key.clone(), content.to_string()))
+            .is_err()
+        {
+            let _ = tx.commit();
+            let _ = tx.abort();
+            return Err(format!("write rejected by transaction backend for '{key}'"));
+        }
+        if let Err(message) = self.enforce_write_permission(key, content) {
+            let _ = tx.abort();
+            return Err(message);
+        }
+        if tx.commit().is_err() {
+            let _ = tx.abort();
+            return Err(format!(
+                "write rejected: transaction backend refused to commit for '{key}'"
+            ));
+        }
+        match std::fs::write(&file_path, content) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(format!(
+                "Failed to write '{}': {}",
+                file_path.display(),
+                error
+            )),
         }
     }
 
@@ -2002,9 +2152,54 @@ impl IweServer {
         std::fs::read_to_string(self.document_path(key)?).ok()
     }
 
+    // WP-12: `apply_changes` now takes the write-permission check as a hook
+    // run inside its own per-key transaction bracket (after `begin()`,
+    // before the actual filesystem write/remove), so this no longer needs
+    // to run the check separately before entering `apply_changes` — the
+    // CLI's delete/rename/extract/inline commands (which call
+    // `diwe::fs::apply_changes` through their own wrapper in `main.rs`)
+    // wire the identical hook, so enforcement is consistent across both
+    // binaries without re-implementing it here.
     fn write_changes(&self, changes: &Changes) {
+        self.write_changes_with(changes, NoopTransaction::new)
+    }
+
+    /// Generic core of [`Self::write_changes`], parameterized over the
+    /// transaction backend the same way [`Self::write_file_with`] is —
+    /// `pub` for the same reason; see that method's doc comment.
+    pub fn write_changes_with<TX: Transaction>(
+        &self,
+        changes: &Changes,
+        new_tx: impl FnMut() -> TX,
+    ) {
         if let Some(base_path) = &self.base_path {
-            let _ = diwe::fs::apply_changes(changes, base_path, self.config.format);
+            let _ = diwe::fs::apply_changes_with(
+                changes,
+                base_path,
+                self.config.format,
+                |key, content, prior_content| {
+                    // Same `project_path`-rooted resolution as
+                    // `enforce_write_permission` above. `prior_content` is
+                    // supplied by `apply_changes_with` itself, read from
+                    // disk immediately before this document's write.
+                    match &self.project_path {
+                        Some(root) => diwe::permissions::check_write_permission_for_content_in(
+                            &self.config,
+                            &schemas_dir_in(root),
+                            key,
+                            content,
+                            prior_content,
+                        ),
+                        None => diwe::permissions::check_write_permission_for_content(
+                            &self.config,
+                            key,
+                            content,
+                            prior_content,
+                        ),
+                    }
+                },
+                new_tx,
+            );
         }
     }
 
@@ -2051,5 +2246,72 @@ impl IweServer {
                 content => content,
             })
             .map_err(|e| format!("document template rendering failed: {}", e))
+    }
+}
+
+// T6: `write_file_with` and `write_changes_with` are the generic cores
+// behind every MCP write tool — WP-12 (iwe_create/iwe_update/iwe_delete/
+// iwe_query/iwe_rename/iwe_extract/iwe_inline/iwe_attach) via `write_file`
+// and WP-13 (iwe_normalize) also via `write_file`, plus WP-12's
+// delete/rename/extract/inline surface via `write_changes` (which
+// delegates directly to `diwe::fs::apply_changes_with`, already covered
+// from the CLI side in `diwe::fs`'s own tests — see its doc comment).
+// These tests construct a real `IweServer` over a temp directory and
+// drive both generic cores directly with a
+// `liwe::transaction::RecordingTransaction` in place of `NoopTransaction`
+// to prove the wiring at these MCP call sites is real.
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use liwe::transaction::{RecordingTransaction, TransactionLog};
+
+    fn server_over(dir: &std::path::Path) -> IweServer {
+        IweServer::new(dir.to_str().unwrap(), &Configuration::default())
+    }
+
+    /// WP-12/WP-13 (MCP create/update/attach/normalize, all funneled
+    /// through `write_file`): an ordinary write drives exactly one
+    /// `begin` and one `commit`, and the content lands on disk.
+    #[test]
+    fn write_file_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_over(dir.path());
+        let log = TransactionLog::new();
+
+        let result = server.write_file_with(&Key::name("note"), "# Note\n", {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        });
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            "# Note\n"
+        );
+    }
+
+    /// WP-12 (MCP delete/rename/extract/inline, via `write_changes` ->
+    /// `apply_changes_with`): an ordinary write drives exactly one
+    /// `begin` and one `commit`.
+    #[test]
+    fn write_changes_drives_begin_and_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_over(dir.path());
+        let changes = Changes::new().create(Key::name("note"), "# Note\n".to_string());
+        let log = TransactionLog::new();
+
+        server.write_changes_with(&changes, {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        });
+
+        assert_eq!(log.begin_count(), 1);
+        assert_eq!(log.commit_count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.md")).unwrap(),
+            "# Note\n"
+        );
     }
 }

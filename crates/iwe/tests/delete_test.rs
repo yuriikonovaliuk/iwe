@@ -4,6 +4,26 @@ use std::fs::{create_dir_all, read_to_string, write};
 use std::process::Command;
 use tempfile::TempDir;
 
+/// T5 (independent, test-only wiring): black-box confirmation that the
+/// `iwe delete` CLI entry point — which funnels through main.rs's local
+/// `apply_changes` helper into `diwe::fs::apply_changes`, wired in
+/// crates/diwe/src/fs.rs — still removes exactly the file(s) delete is
+/// documented to remove and nothing else. See
+/// `apply_changes_is_unchanged_by_transaction_wiring` in
+/// crates/diwe/src/fs.rs for the unit-level before/after comparison
+/// against the pre-wiring filesystem logic directly.
+#[test]
+fn delete_removes_through_the_wired_transaction_path_unchanged() {
+    let temp_dir = setup_workspace_with_docs(vec![("a", "# Doc A\n"), ("b", "# Doc B\n")]);
+    let temp_path = temp_dir.path();
+
+    let output = run_delete_command(temp_path, &["b"]);
+    assert!(output.status.success());
+
+    assert!(!temp_path.join("b.md").exists());
+    assert_eq!(read_to_string(temp_path.join("a.md")).unwrap(), "# Doc A\n");
+}
+
 #[test]
 fn test_delete_basic() {
     let temp_dir = setup_workspace_with_docs(vec![

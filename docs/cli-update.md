@@ -192,3 +192,5 @@ The `iwe_update` MCP tool exposes body-overwrite. The full mutation surface — 
 - [`iwe find`](cli-find.md) — preview which documents a filter selects; locate blocks with `--blocks`.
 - [`iwe count`](cli-count.md) — count the matched set before mutating.
 - [`iwe delete`](cli-delete.md) — remove the matched set instead of mutating it.
+- [Document Schema](document-schema.md#11-freeze) — a write to a frozen document, or a property a schema marks `mutable: false`, is rejected regardless of `--strict`.
+- [Transactions](transactions.md) — how a write (or a batch of writes) reaches durable storage.
