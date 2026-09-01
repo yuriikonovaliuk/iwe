@@ -483,6 +483,14 @@ A rejected write reports `write to '<key>' rejected: document is frozen
 `freeze: false`, an absent field, or a non-boolean value leaves the
 document writable.
 
+Lifting freeze is itself write-checked: a write to a frozen document is
+rejected unless its sole effect is lifting the freeze — the result must
+be identical to the prior document in every frontmatter property and the
+body, except no longer frozen. Removing the `freeze` field entirely
+counts as lifting it, under the same sole-effect rule. Other changes ride
+in the next write, which faces the now-unfrozen document normally.
+Freezing an unfrozen document is unrestricted.
+
 ## 12. Per-property mutability
 
 The schema keyword `mutable` maps a property selector — `$content` for

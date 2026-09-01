@@ -616,6 +616,9 @@ was.
 
 Rejection: `write to '<key>' rejected: document is frozen (unset 'freeze'
 to allow writes)`.
+Unfreezing is write-checked too: it must be the write's sole effect
+(freeze lifted, nothing else changed — removing the field counts);
+see docs/document-schema.md, the normative reference.
 
 The full reference, with examples, lives in `docs/document-schema.md`
 (§11, "Freeze") in the repository.
