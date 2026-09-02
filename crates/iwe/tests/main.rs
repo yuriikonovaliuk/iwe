@@ -1,6 +1,7 @@
 mod common;
 
 mod attach_test;
+mod c1_compliance_test;
 mod cli_filter_test;
 mod completions_test;
 mod create_test;
@@ -16,6 +17,8 @@ mod freeze_multi_property_write_test;
 mod init_test;
 mod inline_test;
 mod internal_test;
+mod journal_baseline_diff_test;
+mod journal_test;
 mod mutability_test;
 mod new_test;
 mod normalize_test;
