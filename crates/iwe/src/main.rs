@@ -2789,7 +2789,7 @@ fn normalize_command(args: Normalize) {
         // single document, routed through the shared
         // `write_single_document_with` transaction composition (see its
         // doc comment; T6 made this generic/testable).
-        if let Err(e) = write_single_document_with(
+        if let Err(e) = write_single_document(
             &key,
             &normalized,
             &path,
@@ -2802,7 +2802,7 @@ fn normalize_command(args: Normalize) {
                     diwe::permissions::WriteOperation::Write,
                 )
             },
-            NoopTransaction::new,
+            &configuration,
         ) {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -2842,6 +2842,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
                 diwe::permissions::WriteOperation::Write,
             )
         },
+        get_journal_path(configuration).as_deref(),
     )
     .expect("Failed to write graph")
 }
@@ -2878,6 +2879,7 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
                 operation,
             )
         },
+        get_journal_path(configuration).as_deref(),
     ) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -2909,6 +2911,11 @@ fn get_library_path(configuration: &Configuration) -> PathBuf {
     }
 
     library_path
+}
+
+fn get_journal_path(configuration: &Configuration) -> Option<PathBuf> {
+    let current_dir = env::current_dir().expect("to get current dir");
+    diwe::config::journal_path_in(&current_dir, configuration)
 }
 
 fn parse_sort_arg(s: &str) -> Result<QuerySort, String> {
@@ -4043,6 +4050,36 @@ fn write_single_document_with<TX: Transaction>(
         .map_err(|e| format!("Failed to write document file for '{key}': {e}"))
 }
 
+/// [`write_single_document_with`] plus a single-key journal record on
+/// success (see [`diwe::journal`]): every production call site
+/// (`update_body`, `write_changed_documents`, `attach_command`,
+/// `normalize_command`'s per-key branch) uses this instead of calling
+/// `write_single_document_with` directly, so each of those already-
+/// independent single-document commits (per this file's own "one
+/// transaction per write" composition, see the doc comment above
+/// `write_single_document_with`) is reported to the journal exactly once,
+/// with no journal entry at all if the write is rejected.
+fn write_single_document(
+    key: &Key,
+    content: &str,
+    path: &std::path::Path,
+    check: impl Fn(&Key, &str, Option<&str>) -> Result<(), diwe::permissions::WritePermissionError>,
+    configuration: &Configuration,
+) -> Result<(), String> {
+    let existed = path.exists();
+    write_single_document_with(key, content, path, check, NoopTransaction::new)?;
+    let effect = if existed {
+        diwe::journal::Effect::Update
+    } else {
+        diwe::journal::Effect::Create
+    };
+    diwe::journal::record_commit(
+        get_journal_path(configuration).as_deref(),
+        vec![diwe::journal::KeyEffect::new(key, effect)],
+    );
+    Ok(())
+}
+
 fn update_body(args: Update) {
     let config = get_configuration();
     let mut graph = load_graph(&config);
@@ -4113,7 +4150,7 @@ fn update_body(args: Update) {
     // WP-04: update_body's durable write, routed through the shared
     // `write_single_document_with` transaction composition (see its doc
     // comment; T6 made this generic/testable).
-    if let Err(e) = write_single_document_with(
+    if let Err(e) = write_single_document(
         &key,
         &output,
         &file_path,
@@ -4126,7 +4163,7 @@ fn update_body(args: Update) {
                 diwe::permissions::WriteOperation::Write,
             )
         },
-        NoopTransaction::new,
+        &config,
     ) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
@@ -4354,7 +4391,7 @@ fn write_changed_documents(
             // through the shared `write_single_document_with` transaction
             // composition (see its doc comment; T6 made this
             // generic/testable) — one transaction per changed document.
-            if let Err(e) = write_single_document_with(
+            if let Err(e) = write_single_document(
                 key,
                 content,
                 &file_path,
@@ -4367,7 +4404,7 @@ fn write_changed_documents(
                         diwe::permissions::WriteOperation::Write,
                     )
                 },
-                NoopTransaction::new,
+                configuration,
             ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
@@ -4528,7 +4565,7 @@ fn attach_command(args: Attach) {
         // WP-10: attach_command's durable write, routed through the
         // shared `write_single_document_with` transaction composition
         // (see its doc comment; T6 made this generic/testable).
-        if let Err(e) = write_single_document_with(
+        if let Err(e) = write_single_document(
             &target_key,
             &new_content,
             &target_path,
@@ -4541,7 +4578,7 @@ fn attach_command(args: Attach) {
                     diwe::permissions::WriteOperation::Write,
                 )
             },
-            NoopTransaction::new,
+            &config,
         ) {
             eprintln!("Error: {}", e);
             std::process::exit(1);

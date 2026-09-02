@@ -732,6 +732,7 @@ dependencies = [
  "tiktoken-rs",
  "toml",
  "toml_edit",
+ "uuid",
 ]
 
 [[package]]
