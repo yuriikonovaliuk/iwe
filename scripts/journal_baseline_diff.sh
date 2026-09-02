@@ -74,7 +74,11 @@ git -C "$ROOT" worktree add -q --detach "$WORK/head" "$HEAD_REF"
 
 run_suite() {
   # $1: worktree dir, $2: output file
-  (cd "$1" && cargo test --workspace -- --test-threads=1) >"$2" 2>&1 || true
+  # --no-fail-fast: a single failing test must not truncate the rest of
+  # the workspace's output -- this comparison needs the FULL suite's
+  # output from both refs to be meaningful, not just whatever ran before
+  # the first failure.
+  (cd "$1" && cargo test --workspace --no-fail-fast -- --test-threads=1) >"$2" 2>&1 || true
 }
 
 run_suite "$WORK/base" "$WORK/base.out"

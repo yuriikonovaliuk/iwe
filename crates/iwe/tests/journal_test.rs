@@ -53,6 +53,12 @@ fn write_config(root: &Path, journal_path: Option<&str>) {
     config.markdown.refs_extension = "".to_string();
     let mut text = toml::to_string(&config).expect("config serializes");
     if let Some(journal_path) = journal_path {
+        // `Configuration::default()` already serializes an empty `[journal]`
+        // table (the journal implementation's own `JournalOptions` field
+        // round-trips even with `path` unset) -- strip that empty table
+        // before appending the pinned `journal.path` key below, or TOML
+        // parsing rejects the file for a duplicate `[journal]` table.
+        text = text.replace("[journal]\n\n", "");
         text.push_str(&format!("\n[journal]\npath = {:?}\n", journal_path));
     }
     write(root.join(".iwe").join("config.toml"), text).expect("write config");
