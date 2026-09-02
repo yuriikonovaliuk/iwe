@@ -338,9 +338,11 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 // [`crate::permissions::property_touched`], identical-content input made
 // every property look untouched — silently permitting deletion of a
 // document with an immutable body or any other `mutable: false` property,
-// which is exactly the rule a deletion should trip: removing a document
-// changes every property in it, including the immutable ones, from
-// present to gone.) If the on-disk content can't be read, the removal
+// which at the time was the rule a deletion was meant to trip. M5
+// superseded that: the per-property `mutable:` diff is gated to
+// `WriteOperation::Write` inside the predicate, so a removal is governed by
+// `deletable:` and `freeze` alone — see `check_write_permission_with_
+// mutability`'s doc comment.) If the on-disk content can't be read, the removal
 // proceeds without a check rather than blocking on an unrelated I/O
 // failure. `check` is also given [`WriteOperation::Delete`] here — M4/R1's
 // explicit operation signal (`m2/design-deletion-carrier`; see

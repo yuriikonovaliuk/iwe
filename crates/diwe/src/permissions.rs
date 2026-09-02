@@ -1289,9 +1289,12 @@ mod tests {
     // =======================================================================
 
     /// A deletion-shaped call (`content = ""`) against a document whose
-    /// schema marks the body immutable is rejected — the fix target.
+    /// schema marks the body immutable is *permitted* (M5 supersession of
+    /// D4: the mutability diff is gated to `WriteOperation::Write`, so
+    /// deletion is governed by `deletable:` alone). The call shape D4
+    /// pinned down is still exercised; only the expected outcome changed.
     #[test]
-    fn d4_deletion_shaped_call_rejects_a_document_with_an_immutable_body() {
+    fn d4_deletion_shaped_call_permits_a_document_with_an_immutable_body() {
         let doc_key = key("mind/mint-origin");
         let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
         let mutability = vec![MutabilityRule {
@@ -1309,14 +1312,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            result,
-            Err(WritePermissionError::PropertyImmutable {
-                key: doc_key,
-                property: PropertyRef::Body,
-                selector: "$content".to_string(),
-            })
-        );
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// A deletion-shaped call against an ordinary document (no `mutable:`
@@ -1348,9 +1344,9 @@ mod tests {
     // can be exercised directly: a case where `mutable:` alone would allow a
     // delete but `deletable: false` still rejects it (case-in-the-absence-
     // of-mutable), and a case where `deletable` is entirely absent but
-    // `mutable: false` still rejects the delete on its own (already proven
-    // above by the D4 tests) -- together showing neither depends on the
-    // other to produce the correct rejection.
+    // `mutable: false` no longer rejects the delete on its own (M5: the
+    // mutability diff is gated to Write) -- together showing the delete
+    // prohibition is `deletable:`'s alone.
     // =======================================================================
 
     /// The core case: a delete against a document whose schema declares
@@ -1391,12 +1387,11 @@ mod tests {
 
     /// The mirror case: a document whose body *is* schema-marked immutable,
     /// but whose schema does not declare `deletable` at all (`None`) --
-    /// deletion is rejected purely by the pre-existing `mutable:` mechanism
-    /// (D4's own fix, reproduced here with `deletable` explicitly absent),
-    /// proving that mechanism does not depend on `deletable` being declared
-    /// at all.
+    /// deletion is permitted: `mutable:` never governs a delete (M5
+    /// supersession of D4), so with `deletable` undeclared nothing rejects
+    /// it. Proves the delete prohibition is carried by `deletable:` only.
     #[test]
-    fn delete_still_rejected_by_mutable_rule_alone_when_deletable_is_never_declared() {
+    fn delete_permitted_by_mutable_rule_alone_when_deletable_is_never_declared() {
         let doc_key = key("mind/mint-origin-2");
         let prior = "---\nstatus: draft\n---\n\n# Doc\n\nOriginal body.\n";
         let mutability = vec![MutabilityRule {
@@ -1414,14 +1409,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(
-            result,
-            Err(WritePermissionError::PropertyImmutable {
-                key: doc_key,
-                property: PropertyRef::Body,
-                selector: "$content".to_string(),
-            })
-        );
+        assert!(result.is_ok(), "{result:?}");
     }
 
     /// The patch path (`m2/design-deletion-carrier`'s "Update of a
