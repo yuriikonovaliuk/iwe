@@ -43,7 +43,11 @@ if [ "${1:-}" = "--normalize" ]; then
   exit 0
 fi
 
-BASE_REF="${1:-origin/master}"
+# Defaults to the local `master` branch rather than a remote-qualified
+# ref, so this doesn't depend on a configured remote existing at all
+# (see scripts/c1_compliance_check.sh, which this repository's own diff
+# must also pass cleanly).
+BASE_REF="${1:-master}"
 HEAD_REF="${2:-HEAD}"
 
 repo_root() {

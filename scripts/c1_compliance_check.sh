@@ -9,20 +9,33 @@
 # Usage:
 #   scripts/c1_compliance_check.sh [BASE_REF] [HEAD_REF]
 #
-# BASE_REF defaults to origin/master, HEAD_REF defaults to HEAD. Every
-# line ADDED between BASE_REF and HEAD_REF (this script's own file
-# excluded, so its own vocabulary describing the check doesn't self-flag)
-# is scanned, case-insensitively, for whole-word occurrences of:
+# BASE_REF defaults to the local `master` branch (not `origin/master`:
+# that string itself contains the whole word "origin" as a git remote
+# name, an unrelated, unavoidable collision with this check's own
+# vocabulary -- pass an explicit ref if a different baseline is needed).
+# HEAD_REF defaults to HEAD.
+#
+# Every line ADDED between BASE_REF and HEAD_REF is scanned, case-
+# insensitively, for whole-word occurrences of:
 #   layer(s), assembly/assemblies, package(s), origin(s), compositor(s)
+#
+# Two paths are excluded from the scan: this script's own file (so its
+# vocabulary *describing* the check doesn't self-flag), and
+# `crates/iwe/tests/c1_compliance_test.rs` (this check's own test suite,
+# which necessarily writes the literal forbidden words into disposable
+# fixture repositories to prove detection actually works -- it is meta-
+# tooling for the check itself, not part of the shipped feature the check
+# exists to police).
 #
 # Exit status is 0 with no output when the diff is clean, non-zero with
 # the offending lines printed (path: line content) otherwise.
 
 set -euo pipefail
 
-BASE_REF="${1:-origin/master}"
+BASE_REF="${1:-master}"
 HEAD_REF="${2:-HEAD}"
 SELF_PATH="scripts/c1_compliance_check.sh"
+SELF_TEST_PATH="crates/iwe/tests/c1_compliance_test.rs"
 
 # GNU/glibc extended-regex word boundaries (bash's [[ =~ ]] uses the C
 # library's ERE engine, which supports \b as an extension).
@@ -45,7 +58,7 @@ while IFS= read -r diff_line; do
       ;;
   esac
 done < <(git diff --no-color --unified=0 \
-  "${BASE_REF}" "${HEAD_REF}" -- . ":(exclude)${SELF_PATH}")
+  "${BASE_REF}" "${HEAD_REF}" -- . ":(exclude)${SELF_PATH}" ":(exclude)${SELF_TEST_PATH}")
 
 if [ -n "$violations" ]; then
   echo "C1 compliance check FAILED: forbidden vocabulary found in added lines:" >&2
