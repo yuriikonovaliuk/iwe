@@ -9,16 +9,30 @@
 //! IWE only ever *reports* into the journal after a write has already
 //! landed; nothing reads the journal back, and nothing outside this module
 //! is consulted before a commit is allowed to proceed. A journal write
-//! failure — an unwritable path, a missing parent directory — is surfaced
-//! as an ordinary warning and otherwise ignored: recording history is not
-//! a condition of making the history, so a broken or absent journal must
-//! never cost the caller its own write.
+//! failure — an unwritable path, a missing parent directory — never costs
+//! the caller its own write: the transaction has already committed by the
+//! time this module runs, and nothing here can or does undo that.
+//!
+//! A journal write failure is instead printed straight to stderr,
+//! unconditionally — not gated behind `--verbose`, since a report that
+//! only appears on request is not a report. Repetition is bounded by
+//! state, not by time or count and never silenced for good after the
+//! first occurrence: [`record_commit`] prints on the first commit whose
+//! journal write fails, stays quiet on every immediately-following
+//! failure at that same path, and prints again the next time a failure
+//! follows an intervening successful journal write to that path. Because
+//! IWE ordinarily runs as a fresh process per command, that state is kept
+//! as a marker file (see [`failure_marker_path`]) rather than in memory,
+//! so the bound holds across separate invocations, not just within one
+//! long-lived process.
 //!
 //! With no journal path configured (the default), [`record_commit`] does
 //! nothing at all, and IWE behaves exactly as it does without this module.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -72,14 +86,20 @@ pub struct Record {
 /// unconditionally after a successful commit without checking
 /// configuration itself.
 ///
-/// A write failure is logged as a warning through IWE's ordinary logging
-/// and otherwise swallowed: this function never returns an error, because
-/// nothing about a caller's already-successful commit should be undone or
-/// blocked by the journal failing to keep up. This is also why a record is
-/// only ever appended here, from a call site that already knows its
-/// commit succeeded — an aborted or rejected write must never reach this
-/// function, which is what keeps the journal a log of what happened
-/// rather than what was attempted.
+/// This function never returns an error, because nothing about a caller's
+/// already-successful commit should be undone or blocked by the journal
+/// failing to keep up. This is also why a record is only ever appended
+/// here, from a call site that already knows its commit succeeded — an
+/// aborted or rejected write must never reach this function, which is
+/// what keeps the journal a log of what happened rather than what was
+/// attempted.
+///
+/// A write failure prints straight to stderr, unconditionally — never
+/// gated behind `--verbose`. Repetition is bounded by state rather than
+/// time or count: the first failure at a given `path` prints; every
+/// immediately-following failure at that same `path` stays quiet, until a
+/// successful write to that `path` clears the state, at which point the
+/// next failure prints again. See [`failure_marker_path`].
 pub fn record_commit(path: Option<&Path>, effects: Vec<KeyEffect>) {
     let Some(path) = path else {
         return;
@@ -87,13 +107,49 @@ pub fn record_commit(path: Option<&Path>, effects: Vec<KeyEffect>) {
     if effects.is_empty() {
         return;
     }
-    if let Err(error) = append(path, effects) {
-        log::warn!(
-            "failed to write transaction journal record to '{}': {}",
-            path.display(),
-            error
-        );
+    let marker = failure_marker_path(path);
+    match append(path, effects) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&marker);
+        }
+        Err(error) => {
+            // The marker not existing means this is the first failure
+            // since either the marker was last cleared by a success, or
+            // there has been no failure at `path` yet — in either case,
+            // and only then, this prints.
+            let first_failure_since_last_success = !marker.exists();
+            if first_failure_since_last_success {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "iwe: failed to write transaction journal record to '{}': {}",
+                    path.display(),
+                    error
+                );
+            }
+            let _ = std::fs::write(&marker, b"");
+        }
     }
+}
+
+/// The marker file that tracks whether `path`'s most recent journal write
+/// attempt failed. Kept in the OS temp directory rather than beside
+/// `path` itself, since `path`'s own directory is exactly what may be
+/// unwritable; named from a hash of `path`'s absolute form, so distinct
+/// journal paths (including across distinct workspaces sharing a temp
+/// directory) never collide.
+///
+/// Filesystem-backed rather than in-memory because IWE ordinarily runs
+/// as a fresh process per command — an in-memory flag would reset before
+/// the next commit ever saw it, and would never bound anything beyond a
+/// single invocation. A long-lived process (`iwes`) sees the same marker
+/// file, so one mechanism covers both.
+fn failure_marker_path(path: &Path) -> PathBuf {
+    let absolute = std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = DefaultHasher::new();
+    absolute.hash(&mut hasher);
+    std::env::temp_dir().join(format!("iwe-journal-failing-{:x}", hasher.finish()))
 }
 
 fn append(path: &Path, effects: Vec<KeyEffect>) -> std::io::Result<()> {
