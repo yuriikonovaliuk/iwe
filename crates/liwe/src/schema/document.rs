@@ -10,10 +10,23 @@ use crate::model::{Key, NodeId};
 /// Token budgets bound prose, not link targets: `[label](path)` counts as `label`.
 /// Links are the graph's edges and their paths vary with folder depth; charging
 /// them to `maxTokens` would make a document's budget depend on where it lives.
+/// A term sigil (`={{key|surface}}`, `~{{…}}`, `@{{…}}`) is a typed reference
+/// with the same shape: it counts as its surface, or as the key's last segment
+/// when no surface is written — what the reader sees once it is rendered.
 pub fn prose_for_counting(text: &str) -> String {
     static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    LINK.get_or_init(|| regex::Regex::new(r"\[([^\]]*)\]\([^)]*\)").expect("link regex"))
-        .replace_all(text, "$1")
+    static SIGIL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let linked = LINK
+        .get_or_init(|| regex::Regex::new(r"\[([^\]]*)\]\([^)]*\)").expect("link regex"))
+        .replace_all(text, "$1");
+    SIGIL
+        .get_or_init(|| {
+            regex::Regex::new(r"[=~@]\{\{\s*([^{}|]*?)\s*(?:\|([^{}]*))?\}\}").expect("sigil regex")
+        })
+        .replace_all(&linked, |caps: &regex::Captures| match caps.get(2) {
+            Some(surface) => surface.as_str().to_string(),
+            None => caps[1].rsplit('/').next().unwrap_or("").replace('-', " "),
+        })
         .into_owned()
 }
 
@@ -566,5 +579,12 @@ mod prose_tests {
     #[test]
     fn plain_text_is_unchanged() {
         assert_eq!(prose_for_counting("no links [here] (or here)"), "no links [here] (or here)");
+    }
+
+    #[test]
+    fn sigils_count_as_their_rendered_surface() {
+        let text = "A ={{claim|claims}} ~{{../relations/rests-on|rests on}} a ={{../../epistemology/concepts/ground}}, said @{{aristotle}}.";
+        assert_eq!(prose_for_counting(text), "A claims rests on a ground, said aristotle.");
+        assert_eq!(prose_for_counting("={{document-state}} and {{template}}"), "document state and {{template}}");
     }
 }
