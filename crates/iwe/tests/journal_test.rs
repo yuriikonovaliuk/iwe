@@ -365,6 +365,205 @@ fn unwritable_journal_path_still_commits_the_transaction() {
 }
 
 // ---------------------------------------------------------------------
+// D1 / AC5(i): journal-write failure reporting on stderr is
+// unconditional (never gated behind --verbose) and its repetition is
+// bounded by state -- printed on the first failing commit, silent on
+// an immediately repeated failure with no intervening success, and
+// printed again once a successful journal write has happened in
+// between. These three tests isolate that specific fix; the AC4 test
+// above only pins "stderr is non-empty on a single failure" as part of
+// a broader commit-still-succeeds assertion.
+// ---------------------------------------------------------------------
+
+/// A permissive, wording-agnostic check for "this stderr output is IWE
+/// reporting a journal-write failure". Both a journal word and a
+/// failure word are required so a coincidental single-word match (an
+/// unrelated message that happens to contain "journal", or one that
+/// happens to contain "fail") doesn't decide this test for the wrong
+/// reason. Deliberately does not pin exact wording -- that is not part
+/// of the acceptance criteria.
+fn mentions_journal_failure(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    let failure_word = ["fail", "error", "unable", "could not", "cannot", "unwritable"]
+        .iter()
+        .any(|w| lower.contains(w));
+    lower.contains("journal") && failure_word
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_write_failure_is_reported_without_the_verbose_flag() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = setup(vec![], Some("readonly-dir/journal.ndjson"));
+    create_dir_all(temp.path().join("readonly-dir")).unwrap();
+    std::fs::set_permissions(
+        temp.path().join("readonly-dir"),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        // Deliberately no `--verbose`/`-v` anywhere in these args: the
+        // default verbosity (0, IWE's ordinary quiet-by-default mode)
+        // is exactly the case this test pins as sufficient.
+        let output = run(
+            temp.path(),
+            &["create", "note", "--content", "# Note\n\nBody.\n"],
+        );
+
+        assert!(
+            output.status.success(),
+            "the transaction must still commit even though the journal \
+             write fails; stderr: {}",
+            stderr_of(&output)
+        );
+        let stderr = stderr_of(&output);
+        assert!(
+            mentions_journal_failure(&stderr),
+            "a journal-write failure must be reported on stderr even with \
+             no --verbose flag passed at all -- reporting must not be \
+             gated behind verbosity; stderr: {stderr:?}"
+        );
+    });
+
+    // Always restore permissions so TempDir can clean itself up, even if
+    // an assertion above panicked.
+    let _ = std::fs::set_permissions(
+        temp.path().join("readonly-dir"),
+        std::fs::Permissions::from_mode(0o755),
+    );
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn journal_write_failure_report_is_bounded_by_state_and_repeats_only_after_an_intervening_success()
+{
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = setup(vec![], Some("readonly-dir/journal.ndjson"));
+    let journal_dir = temp.path().join("readonly-dir");
+    let journal_file = journal_dir.join("journal.ndjson");
+    create_dir_all(&journal_dir).unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        // --- 1. First failing commit: the journal directory is
+        // read-only and the journal file doesn't exist yet, so the
+        // journal write fails. This first failure must be reported.
+        std::fs::set_permissions(&journal_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let first = run(
+            temp.path(),
+            &["create", "one", "--content", "# One\n\nBody.\n"],
+        );
+        assert!(first.status.success(), "stderr: {}", stderr_of(&first));
+        assert!(
+            mentions_journal_failure(&stderr_of(&first)),
+            "the first failing commit must report the journal-write \
+             failure; stderr: {:?}",
+            stderr_of(&first)
+        );
+
+        // --- 2. Second, immediately repeated failure -- same broken
+        // state, no intervening success -- must be silent.
+        let second = run(
+            temp.path(),
+            &["create", "two", "--content", "# Two\n\nBody.\n"],
+        );
+        assert!(second.status.success(), "stderr: {}", stderr_of(&second));
+        assert!(
+            !mentions_journal_failure(&stderr_of(&second)),
+            "an immediately repeated journal-write failure with no \
+             intervening successful write must not print again; \
+             stderr: {:?}",
+            stderr_of(&second)
+        );
+
+        // --- 3. Make the journal directory writable and commit again:
+        // the journal write now succeeds, resetting the bounded state.
+        std::fs::set_permissions(&journal_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let third = run(
+            temp.path(),
+            &["create", "three", "--content", "# Three\n\nBody.\n"],
+        );
+        assert!(third.status.success(), "stderr: {}", stderr_of(&third));
+        let records = journal_records(temp.path(), "readonly-dir/journal.ndjson");
+        assert_eq!(
+            records.len(),
+            1,
+            "the two earlier failures must not have appended anything; \
+             only this successful write should have: {records:?}"
+        );
+
+        // --- 4. Make the journal unwritable again and commit: this is a
+        // fresh failure after an intervening success, so it must print
+        // again. The file already exists from step 3 and directory
+        // permissions alone don't block appending to an existing file,
+        // so the file itself is locked down directly to guarantee this
+        // write actually fails.
+        std::fs::set_permissions(&journal_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&journal_file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let fourth = run(
+            temp.path(),
+            &["create", "four", "--content", "# Four\n\nBody.\n"],
+        );
+        assert!(fourth.status.success(), "stderr: {}", stderr_of(&fourth));
+        assert!(
+            mentions_journal_failure(&stderr_of(&fourth)),
+            "a failure occurring after an intervening successful journal \
+             write must be reported again, not stay suppressed forever; \
+             stderr: {:?}",
+            stderr_of(&fourth)
+        );
+    });
+
+    // Always restore permissions so TempDir can clean itself up, even if
+    // an assertion above panicked.
+    let _ = std::fs::set_permissions(&journal_dir, std::fs::Permissions::from_mode(0o755));
+    let _ = std::fs::set_permissions(&journal_file, std::fs::Permissions::from_mode(0o644));
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+// ---------------------------------------------------------------------
+// D1 / AC5(i), idle/baseline half: with no journal configured at all,
+// IWE must not print anything about a journal on stderr. The existing
+// "no journal.path -> no journal file" test above only checks the
+// filesystem outcome, not the stderr reporting channel, so this checks
+// that explicitly rather than assuming it holds too.
+// ---------------------------------------------------------------------
+
+#[test]
+fn no_journal_configured_prints_nothing_about_a_journal_on_stderr() {
+    let temp = setup(vec![("note", "# Note\n\nOld body.\n")], None);
+
+    let outputs = [
+        run(
+            temp.path(),
+            &["create", "second", "--content", "# Second\n\nBody.\n"],
+        ),
+        run(
+            temp.path(),
+            &["update", "-k", "note", "-c", "# Note\n\nNew body.\n"],
+        ),
+        run(temp.path(), &["delete", "-k", "second"]),
+    ];
+    for output in &outputs {
+        assert!(output.status.success(), "stderr: {}", stderr_of(output));
+        let stderr = stderr_of(output);
+        assert!(
+            !stderr.to_lowercase().contains("journal"),
+            "with no journal.path configured, IWE must say nothing about a \
+             journal on stderr (idle/baseline state, no regression from \
+             the pre-journal default): {stderr:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
 // AC5: a multi-document transaction (>=3 keys, a mix of create / update /
 // delete) -> exactly ONE record, not one per key, with all three effect
 // kinds represented in that one record's effects array. `iwe rename`
