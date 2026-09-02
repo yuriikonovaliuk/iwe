@@ -93,6 +93,15 @@ list_token = "-"
 - `min_prefix_length`: Minimum number of characters typed before completions appear (default: `0`). Measured against the search query after any leading `[` or `[[` is stripped. Raise to `3` (or higher) to suppress the popup until the user has typed a few characters.
 - `trigger_characters`: Characters that open the completion popup (default: `["["]`). Typing any listed character makes the editor request completions from the LSP server. Word characters trigger completion via editor heuristics regardless of this list.
 
+### Journal Settings
+
+``` toml
+[journal]
+path = ".iwe/journal.ndjson"
+```
+
+- `path`: Where IWE appends a transaction journal (default: unset — IWE writes nothing). When set, IWE appends one newline-delimited JSON record after every successfully committed write, naming the transaction, which keys it affected, and how (`create`, `update`, or `delete`) — nothing else, no content or diff. A rejected or aborted write never produces a record. Useful for an audit trail, an undo/backup mechanism, or any external tool (a search indexer, a sync process) that wants to learn what changed without re-diffing content itself. If the path can't be written to, the write that triggered it still succeeds — the journal is a report, not a gate — and the failure is logged as a warning.
+
 ### Date Format Patterns
 
 Date formats use [chrono format specifiers](https://docs.rs/chrono/latest/chrono/format/strftime/index.html):

@@ -28,6 +28,7 @@ fn writes_dj_extension() {
         dir.path(),
         Format::Djot,
         |_key, _content, _prior_content| Ok(()),
+        None,
     )
     .unwrap();
 

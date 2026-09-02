@@ -3,6 +3,7 @@ pub mod file;
 pub mod find;
 pub mod fs;
 pub mod fill_in;
+pub mod journal;
 pub mod loader;
 
 pub use loader::graph_from_path;
