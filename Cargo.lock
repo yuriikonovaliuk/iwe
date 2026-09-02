@@ -1499,6 +1499,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
