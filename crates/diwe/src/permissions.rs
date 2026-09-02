@@ -592,9 +592,29 @@ pub fn check_write_permission_for_content_in(
 /// removal — the two must not depend on each other, since a future
 /// narrowing of the body-immutability rule must not silently stop
 /// protecting deletion (and, symmetrically, a future change to `deletable`
-/// resolution must not silently affect body-immutability). Both checks may
-/// legitimately fire together on the same rejected delete; neither is
-/// required for the other to be correct.
+/// resolution must not silently affect body-immutability).
+///
+/// # M5 fix: mutability never governs a delete (supersedes "both checks may fire together")
+///
+/// This doc comment (and D4's own reasoning in `diwe::fs::apply_changes`'s
+/// removal loop) used to treat it as acceptable — even correct — for the
+/// per-property mutability-diff loop below to *also* reject a delete
+/// whenever a bound schema happened to mark some property of the document
+/// immutable, on the reasoning that "removing a document changes every
+/// property in it, including the immutable ones, from present to gone,
+/// which is exactly the rule a deletion should trip." The knowledge-
+/// compositor's R16 supersedes that reasoning: whether a document may be
+/// *removed* must be governed by exactly one construct, `deletable:` —
+/// never, as a side effect, by an unrelated `mutable:` marking that only
+/// ever says a property may not be *rewritten in place* while the document
+/// continues to exist. A schema that marks one property immutable for
+/// editing purposes must not thereby also make the whole document
+/// undeletable. So the mutability-diff loop below is now gated to
+/// [`WriteOperation::Write`] only; for [`WriteOperation::Delete`] it never
+/// runs, and deletion permission is governed solely by `deletable` above —
+/// "both checks may legitimately fire together" no longer holds for delete;
+/// it still holds, unchanged, for `Write` (a body-immutable document's
+/// ordinary update is unaffected by this fix).
 fn check_write_permission_with_mutability(
     key: &Key,
     content: &str,
@@ -661,6 +681,21 @@ fn check_write_permission_with_mutability(
     // never evaluated, regardless of its rule; a property with no rule at
     // all stays mutable by default (AB9), exactly as `check_write_
     // permission` already enforces.
+    //
+    // M5 fix (see this function's own doc comment, "mutability never
+    // governs a delete"): this loop is skipped entirely for
+    // `WriteOperation::Delete`. Every previously-set property necessarily
+    // looks "touched" by a delete (it goes from present to gone), so
+    // running this loop for a delete would reject the removal against any
+    // unrelated `mutable: false` rule the document's schema happens to
+    // declare — a decision that must belong to `deletable` alone (checked
+    // above), never inferred here as a side effect of the ordinary
+    // per-property diff. Reached only for `WriteOperation::Write`, for
+    // which this loop's behavior is unchanged.
+    if operation != WriteOperation::Write {
+        return Ok(());
+    }
+
     let prior_frontmatter_map = prior_frontmatter.unwrap_or_default();
     let next_frontmatter_map = parse_leading_frontmatter(content).unwrap_or_default();
     let (_, prior_body) = prior_content.map(split_raw_frontmatter).unwrap_or((None, ""));
