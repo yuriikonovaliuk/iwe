@@ -122,6 +122,32 @@ fn schema_violation_error(reports: &[KeyReport]) -> McpError {
     McpError::invalid_params(message, Some(serde_json::json!({ "violations": reports })))
 }
 
+/// The journal effects `changes` represents — every removed key as
+/// [`diwe::journal::Effect::Delete`], every created key as `::Create`,
+/// every updated key as `::Update` — read straight off `Changes`'s own
+/// three-way split rather than re-derived from the filesystem. Mirrors
+/// `diwe::fs`'s private `effects_for`, kept separate since this crate has
+/// no access to that one.
+fn journal_effects_for(changes: &Changes) -> Vec<diwe::journal::KeyEffect> {
+    changes
+        .removes
+        .iter()
+        .map(|key| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Delete))
+        .chain(
+            changes
+                .creates
+                .iter()
+                .map(|(key, _)| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Create)),
+        )
+        .chain(
+            changes
+                .updates
+                .iter()
+                .map(|(key, _)| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Update)),
+        )
+        .collect()
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum KeyDepthParam {
@@ -2080,7 +2106,36 @@ impl IweServer {
     // filesystem write, not after, so a commit refusal actually prevents
     // the write rather than merely being noticed once it already landed).
     fn write_file(&self, key: &Key, content: &str) -> Result<(), String> {
-        self.write_file_with(key, content, NoopTransaction::new)
+        let existed = self.document_file_exists(key);
+        self.write_file_with(key, content, NoopTransaction::new)?;
+        let effect = if existed {
+            diwe::journal::Effect::Update
+        } else {
+            diwe::journal::Effect::Create
+        };
+        self.record_journal_commit(vec![diwe::journal::KeyEffect::new(key, effect)]);
+        Ok(())
+    }
+
+    /// Where this server's transaction journal (`journal.path`, see
+    /// [`diwe::journal`]) resolves to, if configured — `None` both when
+    /// unconfigured (the default) and when this server has no
+    /// `project_path` (the in-memory-only construction used by some
+    /// tests), the same way write-permission resolution already falls
+    /// back when there is no project root to resolve a relative path
+    /// against.
+    fn journal_path(&self) -> Option<PathBuf> {
+        let root = self.project_path.as_ref()?;
+        diwe::config::journal_path_in(root, &self.config)
+    }
+
+    /// Appends one journal record for `effects` if a journal is
+    /// configured — the single call every write path (`write_file`,
+    /// `write_changes_with`) makes after its own writes have all
+    /// succeeded, so a rejected or aborted write never reaches this call
+    /// at all.
+    fn record_journal_commit(&self, effects: Vec<diwe::journal::KeyEffect>) {
+        diwe::journal::record_commit(self.journal_path().as_deref(), effects);
     }
 
     /// Generic core of [`Self::write_file`], parameterized over the
@@ -2174,7 +2229,7 @@ impl IweServer {
         new_tx: impl FnMut() -> TX,
     ) {
         if let Some(base_path) = &self.base_path {
-            let _ = diwe::fs::apply_changes_with(
+            let result = diwe::fs::apply_changes_with(
                 changes,
                 base_path,
                 self.config.format,
@@ -2207,6 +2262,16 @@ impl IweServer {
                 },
                 new_tx,
             );
+            // One journal record for this whole batch (every key
+            // `changes` names), not one per document — mirrors
+            // `diwe::fs::apply_changes`'s own journal composition on the
+            // CLI side, reimplemented here rather than routed through
+            // that no-op-`Transaction`-default wrapper because this call
+            // site is already generic over `TX`. Nothing is recorded if
+            // `apply_changes_with` returned an error partway through.
+            if result.is_ok() {
+                self.record_journal_commit(journal_effects_for(changes));
+            }
         }
     }
 

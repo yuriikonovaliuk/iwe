@@ -297,7 +297,27 @@ pub fn write_document(
     configuration: &Configuration,
     prepared: &PreparedDocument,
 ) -> Result<CreatedDocument, String> {
-    write_document_with(configuration, prepared, NoopTransaction::new)
+    // Snapshotted before the write lands, purely to tell a journal record's
+    // create effect from its update effect (see [`diwe::journal`]) — a
+    // genuine `iwe new`/`iwe create` is almost always a create, but
+    // `IfExists`-driven overwrite modes can target an existing path.
+    let existed = prepared.path.exists();
+    let result = write_document_with(configuration, prepared, NoopTransaction::new);
+    if result.is_ok() {
+        let effect = if existed {
+            diwe::journal::Effect::Update
+        } else {
+            diwe::journal::Effect::Create
+        };
+        let journal_path = std::env::current_dir()
+            .ok()
+            .and_then(|root| diwe::config::journal_path_in(&root, configuration));
+        diwe::journal::record_commit(
+            journal_path.as_deref(),
+            vec![diwe::journal::KeyEffect::new(&prepared.key, effect)],
+        );
+    }
+    result
 }
 
 /// Generic core of [`write_document`], parameterized over the transaction

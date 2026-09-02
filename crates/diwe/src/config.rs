@@ -59,6 +59,19 @@ impl Default for SearchOptions {
     }
 }
 
+/// A transaction journal: on a successful commit, IWE appends one record
+/// noting which keys were affected and how (see [`crate::journal`]) to
+/// `path`. Left unset (the default), IWE writes nothing and behaves
+/// exactly as it does without this option — a tool watching for changes
+/// (an audit trail, an undo/backup mechanism, an external indexer) has to
+/// opt in explicitly by setting this.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalOptions {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 impl Default for LibraryOptions {
     fn default() -> Self {
         Self {
@@ -88,6 +101,8 @@ pub struct Configuration {
     pub completion: CompletionOptions,
     #[serde(default)]
     pub search: SearchOptions,
+    #[serde(default)]
+    pub journal: JournalOptions,
     #[serde(default)]
     pub commands: HashMap<String, Command>,
     #[serde(default)]
@@ -261,6 +276,7 @@ impl Default for Configuration {
             library: Default::default(),
             completion: Default::default(),
             search: Default::default(),
+            journal: Default::default(),
             commands: Default::default(),
             actions: Default::default(),
             templates: Default::default(),
@@ -496,6 +512,22 @@ pub fn library_path_in(project_root: &Path, configuration: &Configuration) -> Pa
     } else {
         project_root.join(&configuration.library.path)
     }
+}
+
+/// Where the transaction journal (`journal.path`) resolves to, given a
+/// project root — `None` when unconfigured, the default. A relative
+/// `journal.path` is resolved against `project_root` (mirroring
+/// [`library_path_in`] and [`schemas_dir_in`]); an absolute one is used
+/// as-is.
+pub fn journal_path_in(project_root: &Path, configuration: &Configuration) -> Option<PathBuf> {
+    configuration.journal.path.as_ref().map(|path| {
+        let path = Path::new(path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            project_root.join(path)
+        }
+    })
 }
 
 pub fn load_config() -> Result<Configuration, String> {
@@ -788,7 +820,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
             "#}
         );
     }

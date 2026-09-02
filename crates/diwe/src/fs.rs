@@ -12,6 +12,7 @@ use liwe::model::{Content, Key, State};
 use liwe::operations::Changes;
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
+use crate::journal::{self, Effect, KeyEffect};
 use crate::permissions::{WriteOperation, WritePermissionError};
 
 pub fn write_file(
@@ -182,13 +183,47 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
 // changes` takes (see its doc comment) — run inside this transaction
 // bracket, after `begin()`, before the actual filesystem write, aborting
 // the transaction and halting on rejection.
+///
+/// `journal_path`, if configured (see [`crate::journal`]), gets exactly one
+/// journal record after every document in `store` has been written
+/// successfully — one record for the whole call, carrying every key it
+/// wrote, not one record per document. Nothing is appended if this
+/// function returns an error partway through, or if `journal_path` is
+/// `None` (the default).
 pub fn write_store_at_path(
     store: &State,
     to: &Path,
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
+    journal_path: Option<&Path>,
 ) -> std::io::Result<()> {
-    write_store_at_path_with(store, to, format, check, NoopTransaction::new)
+    // Snapshotted before the writes land, since every key in `store` will
+    // exist on disk by the time `write_store_at_path_with` returns —
+    // needed only to tell a journal record's create effects from its
+    // update effects; `write_store_at_path_with` itself is unaware of the
+    // journal entirely.
+    let existed: HashMap<&String, bool> = store
+        .iter()
+        .map(|(key, _)| (key, to.join(format!("{}.{}", key, format.extension())).exists()))
+        .collect();
+
+    write_store_at_path_with(store, to, format, check, NoopTransaction::new)?;
+
+    let effects = store
+        .iter()
+        .map(|(key, _)| {
+            let doc_key = Key::name(key);
+            let effect = if existed.get(key).copied().unwrap_or(false) {
+                Effect::Update
+            } else {
+                Effect::Create
+            };
+            KeyEffect::new(&doc_key, effect)
+        })
+        .collect();
+    journal::record_commit(journal_path, effects);
+
+    Ok(())
 }
 
 /// Generic core of [`write_store_at_path`], parameterized over the
@@ -321,13 +356,49 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 // transition (e.g. "frozen, unless this write's sole effect is lifting
 // freeze") — and [`WriteOperation::Write`], since neither ever removes a
 // document.
+///
+/// `journal_path`, if configured (see [`crate::journal`]), gets exactly one
+/// journal record after every one of `changes`'s removes/creates/updates
+/// has landed successfully — one record for the whole call, carrying every
+/// key it affected (a rename's remove *and* create both land in the same
+/// record, for example), not one record per document. Nothing is appended
+/// if this function returns an error partway through, or if `journal_path`
+/// is `None` (the default).
 pub fn apply_changes(
     changes: &Changes,
     base_path: &Path,
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
+    journal_path: Option<&Path>,
 ) -> std::io::Result<()> {
-    apply_changes_with(changes, base_path, format, check, NoopTransaction::new)
+    apply_changes_with(changes, base_path, format, check, NoopTransaction::new)?;
+    journal::record_commit(journal_path, effects_for(changes));
+    Ok(())
+}
+
+/// The journal effects `changes` represents: every removed key as a
+/// [`Effect::Delete`], every created key as an [`Effect::Create`], every
+/// updated key as an [`Effect::Update`] — the same three-way split
+/// `Changes` itself already carries, read straight off it rather than
+/// re-derived from the filesystem.
+fn effects_for(changes: &Changes) -> Vec<KeyEffect> {
+    changes
+        .removes
+        .iter()
+        .map(|key| KeyEffect::new(key, Effect::Delete))
+        .chain(
+            changes
+                .creates
+                .iter()
+                .map(|(key, _)| KeyEffect::new(key, Effect::Create)),
+        )
+        .chain(
+            changes
+                .updates
+                .iter()
+                .map(|(key, _)| KeyEffect::new(key, Effect::Update)),
+        )
+        .collect()
 }
 
 /// Generic core of [`apply_changes`], parameterized over the transaction
