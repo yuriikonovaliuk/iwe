@@ -513,10 +513,33 @@ property: `write rejected: document '<key>', rule 'mutable: false',
 property '<selector>'` (with `(the document body)` appended for
 `$content`).
 
+An entry may also be a mapping carrying the flag plus a `description`,
+which the rejection appends after a colon — so the message can say what
+would be required instead of only that the write was refused:
+
+```yaml
+mutable:
+  $content:
+    mutable: false
+    description: an explicit override via the deferred-override mechanism
+```
+
+gives `... property '$content' (the document body): an explicit override
+via the deferred-override mechanism`.
+
 Like `freeze`, this is checked at write time on every write path, not by
 `iwe schema validate`. **Freeze dominates**: when a document is both
 frozen and carries a property explicitly marked `mutable: true`, the
 write is rejected as frozen, and `mutable` is never consulted.
+
+The top-level `deletable` keyword governs removal of the whole document
+the same way — `deletable: false` rejects `iwe delete` with `delete
+rejected: document '<key>', rule 'deletable: false' (this document cannot
+be deleted)` — and takes the same optional mapping form (`deletable:
+{deletable: false, description: ...}`). It is independent of `mutable`:
+an immutable body does not make a document undeletable, and `deletable:
+false` from any schema bound to the document wins over another's
+explicit `true`. Absent, the document is deletable.
 
 ## 13. Examples
 

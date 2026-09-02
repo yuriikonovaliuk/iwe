@@ -29,7 +29,9 @@
 use std::path::Path;
 
 use crate::config::{schemas_dir, Configuration};
-use crate::schema::{schema_deletable_rule, schema_mutability_rules, MutabilityRule, SchemaBindings};
+use crate::schema::{
+    schema_deletable_rule, schema_mutability_rules, DeletableRule, MutabilityRule, SchemaBindings,
+};
 use liwe::model::document::Document;
 use liwe::model::{parse_leading_frontmatter, split_raw_frontmatter, Frontmatter, Key};
 use liwe::query::filter::{resolve_path, Resolution};
@@ -217,6 +219,12 @@ pub enum WritePermissionError {
         /// The property selector exactly as written in the schema's
         /// `mutable:` mapping (`$content`, or a dotted frontmatter path).
         selector: String,
+        /// The rule's own `description`, when the schema gave one
+        /// (`schema::MutabilityRule::description`): appended to the
+        /// rejection text so the message can say what would be required
+        /// instead (the compositor's R14 override-mechanism message rides
+        /// here).
+        description: Option<String>,
     },
     /// M4/R1 (LAW-16, `m2/design-deletion-carrier`): a [`WriteOperation::
     /// Delete`] was rejected because the schema bound to `key` declares
@@ -230,6 +238,10 @@ pub enum WritePermissionError {
     DeleteProhibited {
         /// The document whose deletion was rejected.
         key: Key,
+        /// The rule's own `description`, when the schema gave one
+        /// (`schema::DeletableRule::description`), appended to the
+        /// rejection text — same purpose as `PropertyImmutable::description`.
+        description: Option<String>,
     },
 }
 
@@ -244,20 +256,34 @@ impl std::fmt::Display for WritePermissionError {
                 key,
                 selector,
                 property,
+                description,
             } => write!(
                 f,
-                "write rejected: document '{key}', rule 'mutable: false', property '{selector}'{}",
+                "write rejected: document '{key}', rule 'mutable: false', property '{selector}'{}{}",
                 if property.is_body() {
                     " (the document body)"
                 } else {
                     ""
-                }
+                },
+                described(description)
             ),
-            WritePermissionError::DeleteProhibited { key } => write!(
+            WritePermissionError::DeleteProhibited { key, description } => write!(
                 f,
-                "delete rejected: document '{key}', rule 'deletable: false' (this document cannot be deleted)"
+                "delete rejected: document '{key}', rule 'deletable: false' (this document cannot be deleted){}",
+                described(description)
             ),
         }
+    }
+}
+
+/// The suffix a rule's optional `description` adds to a rejection line:
+/// `: <description>`, or nothing when the schema gave none — the bare
+/// message is unchanged for every schema written before descriptions
+/// existed.
+fn described(description: &Option<String>) -> String {
+    match description {
+        Some(text) => format!(": {text}"),
+        None => String::new(),
     }
 }
 
@@ -374,6 +400,7 @@ pub fn check_write_permission(
                 key: key.clone(),
                 property: property.clone(),
                 selector: rule.selector.clone(),
+                description: rule.description.clone(),
             });
         }
     }
@@ -442,7 +469,7 @@ pub fn resolve_mutability_rules_in(
 /// schemas directory can't be resolved, this returns `None` — deletable by
 /// default (mirrors AB9) — rather than blocking a removal on a problem
 /// unrelated to deletion.
-pub fn resolve_deletable_rule(config: &Configuration, key: &Key) -> Option<bool> {
+pub fn resolve_deletable_rule(config: &Configuration, key: &Key) -> Option<DeletableRule> {
     match schemas_dir() {
         Ok(dir) => resolve_deletable_rule_in(&dir, config, key),
         Err(_) => None,
@@ -476,23 +503,19 @@ pub fn resolve_deletable_rule_in(
     schemas_dir: &Path,
     config: &Configuration,
     key: &Key,
-) -> Option<bool> {
+) -> Option<DeletableRule> {
     let Ok(bindings) = SchemaBindings::compile(&config.schemas) else {
         return None;
     };
-    let mut saw_true = false;
+    let mut explicit_true = None;
     for name in bindings.schemas_for(key.as_str()) {
         match schema_deletable_rule(schemas_dir, name) {
-            Some(false) => return Some(false),
-            Some(true) => saw_true = true,
+            Some(rule) if !rule.deletable => return Some(rule),
+            Some(rule) => explicit_true = Some(rule),
             None => {}
         }
     }
-    if saw_true {
-        Some(true)
-    } else {
-        None
-    }
+    explicit_true
 }
 
 /// Resolves `key`'s `mutable:` rules via [`resolve_mutability_rules`]
@@ -621,7 +644,7 @@ fn check_write_permission_with_mutability(
     prior_content: Option<&str>,
     mutability: Vec<MutabilityRule>,
     operation: WriteOperation,
-    deletable: Option<bool>,
+    deletable: Option<DeletableRule>,
 ) -> Result<(), WritePermissionError> {
     let prior_frontmatter = prior_content.and_then(parse_leading_frontmatter);
     let prior_frozen = prior_frontmatter
@@ -653,8 +676,13 @@ fn check_write_permission_with_mutability(
     // Reached only once freeze has already had its say (freeze still
     // dominates, per LAW-13, unchanged from before this fix): a frozen
     // document is rejected as `Frozen` above, never reaching this branch.
-    if operation == WriteOperation::Delete && deletable == Some(false) {
-        return Err(WritePermissionError::DeleteProhibited { key: key.clone() });
+    if operation == WriteOperation::Delete {
+        if let Some(rule) = deletable.filter(|rule| !rule.deletable) {
+            return Err(WritePermissionError::DeleteProhibited {
+                key: key.clone(),
+                description: rule.description,
+            });
+        }
     }
 
     // Not frozen prior to this write (including "no prior document at
@@ -953,11 +981,13 @@ mod tests {
                 selector: "$content".to_string(),
                 property: PropertyRef::Body,
                 mutable: false,
+                description: None,
             },
             MutabilityRule {
                 selector: "archived".to_string(),
                 property: PropertyRef::from_selector("archived"),
                 mutable: true,
+                description: None,
             },
         ];
         let doc_key = key("notes/reference");
@@ -970,6 +1000,7 @@ mod tests {
                 key: doc_key.clone(),
                 property: PropertyRef::Body,
                 selector: "$content".to_string(),
+                description: None,
             })
         );
 
@@ -993,6 +1024,7 @@ mod tests {
             selector: "$content".to_string(),
             property: PropertyRef::Body,
             mutable: false,
+            description: None,
         }];
         let result = check_write_permission(
             &document,
@@ -1013,6 +1045,7 @@ mod tests {
             key: key("notes/reference"),
             property: PropertyRef::Body,
             selector: "$content".to_string(),
+            description: None,
         };
         let message = error.to_string();
         assert!(message.contains("notes/reference"), "{message}");
@@ -1030,6 +1063,7 @@ mod tests {
             selector: "status".to_string(),
             property: PropertyRef::from_selector("status"),
             mutable: false,
+            description: None,
         }];
         let result = check_write_permission(
             &document,
@@ -1060,6 +1094,7 @@ mod tests {
             selector: "archived".to_string(),
             property: PropertyRef::from_selector("archived"),
             mutable: true,
+            description: None,
         }];
 
         let result = check_write_permission(
@@ -1098,21 +1133,25 @@ mod tests {
                 selector: "$content".to_string(),
                 property: PropertyRef::Body,
                 mutable: false,
+                description: None,
             },
             MutabilityRule {
                 selector: "status".to_string(),
                 property: PropertyRef::from_selector("status"),
                 mutable: true,
+                description: None,
             },
             MutabilityRule {
                 selector: "owner".to_string(),
                 property: PropertyRef::from_selector("owner"),
                 mutable: true,
+                description: None,
             },
             MutabilityRule {
                 selector: "archived".to_string(),
                 property: PropertyRef::from_selector("archived"),
                 mutable: false,
+                description: None,
             },
         ]
     }
@@ -1139,6 +1178,7 @@ mod tests {
                 key: doc_key,
                 property: PropertyRef::Body,
                 selector: "$content".to_string(),
+                description: None,
             })
         );
     }
@@ -1200,6 +1240,7 @@ mod tests {
                 key: doc_key,
                 property: PropertyRef::from_selector("archived"),
                 selector: "archived".to_string(),
+                description: None,
             })
         );
     }
@@ -1225,6 +1266,7 @@ mod tests {
                 key: doc_key,
                 property: PropertyRef::Body,
                 selector: "$content".to_string(),
+                description: None,
             })
         );
     }
@@ -1301,6 +1343,7 @@ mod tests {
             selector: "$content".to_string(),
             property: PropertyRef::Body,
             mutable: false,
+            description: None,
         }];
 
         let result = check_write_permission_with_mutability(
@@ -1366,13 +1409,14 @@ mod tests {
             Some(prior),
             vec![],
             WriteOperation::Delete,
-            Some(false),
+            Some(DeletableRule::flag(false)),
         );
 
         assert_eq!(
             result,
             Err(WritePermissionError::DeleteProhibited {
-                key: doc_key.clone()
+                key: doc_key.clone(),
+                description: None,
             })
         );
         assert_ne!(
@@ -1381,6 +1425,7 @@ mod tests {
                 key: doc_key,
                 property: PropertyRef::Body,
                 selector: "$content".to_string(),
+                description: None,
             })
         );
     }
@@ -1398,6 +1443,7 @@ mod tests {
             selector: "$content".to_string(),
             property: PropertyRef::Body,
             mutable: false,
+            description: None,
         }];
 
         let result = check_write_permission_with_mutability(
@@ -1428,11 +1474,13 @@ mod tests {
                 selector: "$content".to_string(),
                 property: PropertyRef::Body,
                 mutable: false,
+                description: None,
             },
             MutabilityRule {
                 selector: "status".to_string(),
                 property: PropertyRef::from_selector("status"),
                 mutable: true,
+                description: None,
             },
         ];
 
@@ -1442,7 +1490,7 @@ mod tests {
             Some(prior),
             mutability,
             WriteOperation::Write,
-            Some(false),
+            Some(DeletableRule::flag(false)),
         );
 
         assert!(result.is_ok(), "{result:?}");
@@ -1462,6 +1510,7 @@ mod tests {
             selector: "$content".to_string(),
             property: PropertyRef::Body,
             mutable: false,
+            description: None,
         }];
 
         let result = check_write_permission_with_mutability(
@@ -1470,7 +1519,7 @@ mod tests {
             Some(prior),
             mutability,
             WriteOperation::Write,
-            Some(false),
+            Some(DeletableRule::flag(false)),
         );
 
         assert_eq!(
@@ -1479,6 +1528,7 @@ mod tests {
                 key: doc_key,
                 property: PropertyRef::Body,
                 selector: "$content".to_string(),
+                description: None,
             })
         );
     }
@@ -1518,7 +1568,7 @@ mod tests {
             Some(prior),
             vec![],
             WriteOperation::Delete,
-            Some(true),
+            Some(DeletableRule::flag(true)),
         );
 
         assert_eq!(result, Err(WritePermissionError::Frozen { key: doc_key }));

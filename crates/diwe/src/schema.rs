@@ -156,7 +156,7 @@ pub struct CompiledSchemaSet {
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
     pub mutable: Vec<MutabilityRule>,
-    pub deletable: Option<bool>,
+    pub deletable: Option<DeletableRule>,
 }
 
 /// One entry of a schema's `mutable` mapping (EXT-PER-PROPERTY-MUTABILITY,
@@ -174,6 +174,20 @@ pub struct CompiledSchemaSet {
 /// never make a schema-less document, or an unmentioned property, anything
 /// other than writable exactly as it always was (`m2/design-extensions`'
 /// default-mutable guarantee, AB9).
+///
+/// An entry is either the bare `true`/`false` or a mapping carrying the
+/// flag plus an optional `description` — the same optional prose
+/// `links`/`requires`/`asserts` rules already carry — which the rejection
+/// message appends verbatim, so a schema author (or generator) can say
+/// *what would be required* instead, not only that the write was refused:
+///
+/// ```yaml
+/// mutable:
+///   $content:
+///     mutable: false
+///     description: "an explicit override via the deferred-override mechanism"
+///   archived: true
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct MutabilityRule {
     /// The selector exactly as written in the schema (`$content`, or a
@@ -185,6 +199,32 @@ pub struct MutabilityRule {
     pub property: PropertyRef,
     /// Whether `property` may be written.
     pub mutable: bool,
+    /// The entry's optional `description`, appended to the rejection
+    /// message when the rule refuses a write.
+    pub description: Option<String>,
+}
+
+/// A schema's parsed `deletable` keyword — see the keyword's own doc
+/// comment below. `None` at the use sites means "no rule"; this struct is
+/// the `Some` half, carrying the flag plus the same optional `description`
+/// a [`MutabilityRule`] may carry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeletableRule {
+    /// Whether the document may be removed.
+    pub deletable: bool,
+    /// The keyword's optional `description`, appended to the rejection
+    /// message when the rule refuses a delete.
+    pub description: Option<String>,
+}
+
+impl DeletableRule {
+    /// A bare `deletable: <flag>` with no description.
+    pub fn flag(deletable: bool) -> Self {
+        DeletableRule {
+            deletable,
+            description: None,
+        }
+    }
 }
 
 /// A schema's `deletable` keyword (M4/R1, LAW-16's carrier — see
@@ -203,12 +243,20 @@ pub struct MutabilityRule {
 /// deletable: false
 /// ```
 ///
+/// or, with the optional `description` the rejection message appends:
+///
+/// ```yaml
+/// deletable:
+///   deletable: false
+///   description: "the asset can only be updated in the package's own upstream repository"
+/// ```
+///
 /// Absent keyword: no rule, deletable by default (mirrors `mutable:`'s AB9
 /// default-mutable guarantee — a construct a document's schema never
-/// mentions restricts nothing). Represented as a plain `Option<bool>`
+/// mentions restricts nothing). Represented as an `Option<DeletableRule>`
 /// throughout this crate (parsed by [`parse_deletable_rule`], read back by
-/// [`schema_deletable_rule`]): `None` for "no rule", `Some(false)` for
-/// "delete is rejected", `Some(true)` for an explicit (if redundant)
+/// [`schema_deletable_rule`]): `None` for "no rule", `deletable: false` for
+/// "delete is rejected", `deletable: true` for an explicit (if redundant)
 /// "delete is allowed".
 
 /// One entry of a schema's `asserts` list — a condition the document itself
@@ -230,7 +278,7 @@ pub struct SchemaExtensions {
     pub requires: Vec<RequireRule>,
     pub asserts: Vec<AssertRule>,
     pub mutable: Vec<MutabilityRule>,
-    pub deletable: Option<bool>,
+    pub deletable: Option<DeletableRule>,
 }
 
 /// Split a schema source into the part the document validator understands
@@ -338,6 +386,9 @@ pub fn split_extensions(source: &str) -> Result<SchemaExtensions, Vec<String>> {
 ///   $content: false
 ///   archived: true
 /// ```
+///
+/// An entry may also be a mapping `{ mutable: <bool>, description:
+/// <string> }` — see [`MutabilityRule`] — parsed by [`parse_flag_entry`].
 fn parse_mutability_rules(value: &Value) -> Result<Vec<MutabilityRule>, Vec<String>> {
     let mapping = match value {
         Value::Mapping(mapping) => mapping,
@@ -357,19 +408,63 @@ fn parse_mutability_rules(value: &Value) -> Result<Vec<MutabilityRule>, Vec<Stri
                 continue;
             }
         };
-        match entry.as_bool() {
-            Some(mutable) => rules.push(MutabilityRule {
+        match parse_flag_entry(entry, "mutable", &format!("mutable.{selector}")) {
+            Ok((mutable, description)) => rules.push(MutabilityRule {
                 property: PropertyRef::from_selector(&selector),
                 selector,
                 mutable,
+                description,
             }),
-            None => errors.push(format!("mutable.{selector}: expected true or false")),
+            Err(error) => errors.push(error),
         }
     }
     if errors.is_empty() {
         Ok(rules)
     } else {
         Err(errors)
+    }
+}
+
+/// The value shape a `mutable:` entry and the `deletable:` keyword share: a
+/// bare boolean, or a mapping with the boolean under `keyword` and an
+/// optional `description` string. Returns `(flag, description)`; `at`
+/// names the location in error messages (`mutable.$content`, `deletable`).
+fn parse_flag_entry(
+    value: &Value,
+    keyword: &str,
+    at: &str,
+) -> Result<(bool, Option<String>), String> {
+    if let Some(flag) = value.as_bool() {
+        return Ok((flag, None));
+    }
+    let Value::Mapping(mapping) = value else {
+        return Err(format!("{at}: expected true or false"));
+    };
+    let mut flag = None;
+    let mut description = None;
+    for (key, entry) in mapping {
+        match key.as_str() {
+            Some(k) if k == keyword => match entry.as_bool() {
+                Some(value) => flag = Some(value),
+                None => return Err(format!("{at}.{keyword}: expected true or false")),
+            },
+            Some("description") => match entry.as_str() {
+                Some(text) => description = Some(text.to_string()),
+                None => return Err(format!("{at}.description: expected a string")),
+            },
+            Some(other) => {
+                return Err(format!(
+                    "{at}: unknown field '{other}' (expected '{keyword}' and optionally 'description')"
+                ))
+            }
+            None => return Err(format!("{at}: field names must be strings")),
+        }
+    }
+    match flag {
+        Some(flag) => Ok((flag, description)),
+        None => Err(format!(
+            "{at}: expected true or false, or a mapping with '{keyword}: true/false'"
+        )),
     }
 }
 
@@ -400,10 +495,16 @@ pub fn schema_mutability_rules(dir: &Path, name: &str) -> Vec<MutabilityRule> {
 /// ```yaml
 /// deletable: false
 /// ```
-fn parse_deletable_rule(value: &Value) -> Result<bool, Vec<String>> {
-    value
-        .as_bool()
-        .ok_or_else(|| vec!["deletable: expected true or false".to_string()])
+///
+/// or the `{ deletable: <bool>, description: <string> }` mapping form
+/// [`DeletableRule`] documents, parsed by [`parse_flag_entry`].
+fn parse_deletable_rule(value: &Value) -> Result<DeletableRule, Vec<String>> {
+    parse_flag_entry(value, "deletable", "deletable")
+        .map(|(deletable, description)| DeletableRule {
+            deletable,
+            description,
+        })
+        .map_err(|error| vec![error])
 }
 
 /// Loads just schema `name`'s `deletable` rule from
@@ -415,7 +516,7 @@ fn parse_deletable_rule(value: &Value) -> Result<bool, Vec<String>> {
 /// missing file, unparsable YAML, or a malformed `deletable` keyword all
 /// resolve to `None` ("no rule", deletable by default) rather than blocking
 /// writes on a schema problem unrelated to deletion.
-pub fn schema_deletable_rule(dir: &Path, name: &str) -> Option<bool> {
+pub fn schema_deletable_rule(dir: &Path, name: &str) -> Option<DeletableRule> {
     let path = dir.join(format!("{name}.yaml"));
     let source = read_to_string(&path).ok()?;
     split_extensions(&source).ok()?.deletable
@@ -2795,6 +2896,75 @@ mutable:
         );
     }
 
+    // The mapping form of a `mutable:` entry: the flag under `mutable` plus
+    // an optional `description` the rejection message appends (M5 re-pass
+    // AC6 / R14 -- a generated schema can say what would be required).
+
+    #[test]
+    fn mutable_entry_accepts_the_mapping_form_with_a_description() {
+        let source = "\
+mutable:
+  $content:
+    mutable: false
+    description: an explicit override via the deferred-override mechanism
+  archived:
+    mutable: true
+";
+        let extensions = split_extensions(source).expect("parses");
+        let content_rule = extensions
+            .mutable
+            .iter()
+            .find(|rule| rule.selector == "$content")
+            .expect("$content rule");
+        assert!(!content_rule.mutable);
+        assert_eq!(
+            content_rule.description.as_deref(),
+            Some("an explicit override via the deferred-override mechanism")
+        );
+        let archived_rule = extensions
+            .mutable
+            .iter()
+            .find(|rule| rule.selector == "archived")
+            .expect("archived rule");
+        assert!(archived_rule.mutable);
+        assert_eq!(archived_rule.description, None);
+    }
+
+    #[test]
+    fn bare_boolean_mutable_entry_carries_no_description() {
+        let extensions = split_extensions("mutable:\n  $content: false\n").expect("parses");
+        assert_eq!(extensions.mutable[0].description, None);
+    }
+
+    #[test]
+    fn mutable_entry_mapping_form_rejects_a_missing_flag_and_unknown_fields() {
+        let missing = split_extensions("mutable:\n  $content:\n    description: why\n");
+        assert_eq!(
+            missing.err(),
+            Some(vec![
+                "mutable.$content: expected true or false, or a mapping with 'mutable: true/false'"
+                    .to_string()
+            ])
+        );
+        let unknown =
+            split_extensions("mutable:\n  $content:\n    mutable: false\n    reason: why\n");
+        assert_eq!(
+            unknown.err(),
+            Some(vec![
+                "mutable.$content: unknown field 'reason' (expected 'mutable' and optionally 'description')"
+                    .to_string()
+            ])
+        );
+        let bad_description =
+            split_extensions("mutable:\n  $content:\n    mutable: false\n    description: 3\n");
+        assert_eq!(
+            bad_description.err(),
+            Some(vec![
+                "mutable.$content.description: expected a string".to_string()
+            ])
+        );
+    }
+
     #[test]
     fn schema_mutability_rules_reads_the_named_schema_file_from_disk() {
         let temp = TempDir::new().unwrap();
@@ -2857,7 +3027,7 @@ deletable: false
         let extensions = split_extensions(source).expect("parses");
         assert_eq!(extensions.links.len(), 1);
         assert_eq!(extensions.mutable.len(), 1);
-        assert_eq!(extensions.deletable, Some(false));
+        assert_eq!(extensions.deletable, Some(DeletableRule::flag(false)));
 
         // The document-schema part passed to the validator no longer
         // mentions `deletable`, same "extension keywords are stripped
@@ -2887,7 +3057,39 @@ deletable: false
     fn deletable_keyword_accepts_an_explicit_true() {
         let source = "deletable: true\n";
         let extensions = split_extensions(source).expect("parses");
-        assert_eq!(extensions.deletable, Some(true));
+        assert_eq!(extensions.deletable, Some(DeletableRule::flag(true)));
+    }
+
+    #[test]
+    fn deletable_keyword_accepts_the_mapping_form_with_a_description() {
+        let source = "\
+deletable:
+  deletable: false
+  description: the asset can only be updated in the package's own upstream repository
+";
+        let extensions = split_extensions(source).expect("parses");
+        assert_eq!(
+            extensions.deletable,
+            Some(DeletableRule {
+                deletable: false,
+                description: Some(
+                    "the asset can only be updated in the package's own upstream repository"
+                        .to_string()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn deletable_keyword_mapping_form_rejects_a_missing_flag() {
+        let errors = split_extensions("deletable:\n  description: why\n").err();
+        assert_eq!(
+            errors,
+            Some(vec![
+                "deletable: expected true or false, or a mapping with 'deletable: true/false'"
+                    .to_string()
+            ])
+        );
     }
 
     #[test]
@@ -2900,7 +3102,10 @@ deletable: false
         );
         let dir = temp.path().join(".iwe").join("schemas");
 
-        assert_eq!(schema_deletable_rule(&dir, "mint-guard"), Some(false));
+        assert_eq!(
+            schema_deletable_rule(&dir, "mint-guard"),
+            Some(DeletableRule::flag(false))
+        );
     }
 
     #[test]
