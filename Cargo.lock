@@ -719,6 +719,7 @@ dependencies = [
  "ignore",
  "indoc",
  "itertools 0.15.0",
+ "libc",
  "liwe",
  "log",
  "notify",

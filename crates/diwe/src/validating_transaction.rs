@@ -1,17 +1,19 @@
 //! T7: a [`Transaction`] backend that validates schema rules at `commit()`
-//! time, scoped to an index-backed affected set.
+//! time — over an index-backed affected set, or over the whole store.
 //!
-//! This is a NEW, non-default backend — [`liwe::transaction::NoopTransaction`]
+//! This is a non-default backend — [`liwe::transaction::NoopTransaction`]
 //! stays the default, untouched write-permission passthrough every canonical
-//! write path already routes through (T3/T5/T10/T11's job: freeze /
-//! immutability, not schema shape). [`AffectedSetTransaction`] is a
+//! write path routes through unless `[transactions] validate` in the
+//! configuration says otherwise (T3/T5/T10/T11's job: freeze /
+//! immutability, not schema shape). [`ValidatingTransaction`] is a
 //! different, separate mechanism: it does not check write permission at
 //! all (every `write()` call succeeds), and instead checks, once at
-//! `commit()`, whether the transaction's *final* state satisfies the
-//! index-bounded schema rules over the documents that final state's writes
-//! could have affected. See [`crate::schema::validate_affected_set`] for
-//! the affected-set closure itself and the routing decision for the rule
-//! forms that closure cannot bound.
+//! `commit()`, whether the transaction's *final* state satisfies the schema
+//! rules — the index-bounded link rules over the documents that state's
+//! writes could have affected ([`ValidationScope::AffectedSet`], see
+//! [`crate::schema::validate_affected_set`]), or everything `iwe schema
+//! validate` checks ([`ValidationScope::Full`]: every schema, the
+//! `[invariants]`, and the `always` checkers over the touched keys).
 //!
 //! Validating only at `commit()`, and only the final state, is deliberate:
 //! a multi-write transaction may legitimately pass through invalid
@@ -19,9 +21,29 @@
 //! (`m2/design-transactions`). This backend never inspects the state after
 //! write 1 of a 2-write transaction — only the state after every write
 //! recorded since `begin()` has been applied.
+//!
+//! Two more things a commit guarantees, both for several writers sharing
+//! one store (the compositor's materialized tree, one MCP server per
+//! agent):
+//!
+//! - **Isolation.** The commit — conflict check, validation, application —
+//!   runs under an exclusive lock on `<.iwe>/write.lock`, so two commits
+//!   never validate against the same pre-state and both land. The lock is
+//!   the `.iwe` directory the schemas live in; a store without one (an
+//!   in-memory test) commits unlocked.
+//! - **Conflict detection.** The first `write()` naming a key records what
+//!   that key held on disk at that moment; `commit()` refuses with
+//!   [`ValidationFailure::Conflict`] if any staged key has since changed
+//!   underneath the transaction — the optimistic check a long-lived agent
+//!   transaction needs, since between its `begin()` and its `commit()`
+//!   other agents keep writing.
 
-use std::fs;
-use std::path::PathBuf;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 use liwe::graph::Graph;
 use liwe::model::config::Format;
@@ -29,66 +51,198 @@ use liwe::model::{Key, State};
 use liwe::transaction::{CommitError, Transaction, Write, WriteRejected};
 
 use crate::config::Configuration;
+pub use crate::config::ValidationScope;
 use crate::fs::{new_for_path, write_file};
-use crate::schema::{validate_affected_set, ValidationRun};
+use crate::schema::{
+    render_reports_text, run_checkers, validate_affected_set, validate_store_at, KeyReport,
+    ValidationRun,
+};
+use liwe::schema::Violation;
 
-/// Why an [`AffectedSetTransaction::commit`] failed, beyond the
+/// The name of the store-wide commit lock, inside the `.iwe` directory.
+pub const WRITE_LOCK_FILE: &str = "write.lock";
+
+/// Why a [`ValidatingTransaction::commit`] failed, beyond the
 /// [`CommitError::Failed`] state every [`Transaction`] shares.
 #[derive(Debug)]
-pub enum AffectedSetError {
+pub enum ValidationFailure {
     /// The schema configuration itself (a `.iwe/schemas/*.yaml` file, or
     /// the `[schemas]` bindings in `config.toml`) could not be compiled.
     Config(Vec<String>),
-    /// The transaction's final state violates the index-bounded schema
-    /// rules checked at commit. None of this transaction's writes were
-    /// applied.
+    /// The transaction's final state violates the schema rules checked at
+    /// commit. None of this transaction's writes were applied (or, for a
+    /// checker failure found after application, all were reverted).
     Violations(ValidationRun),
-    /// A filesystem failure while reading the current on-disk state or
-    /// writing the transaction's changes.
+    /// A staged key changed on disk between the transaction's first write
+    /// to it and its commit. Nothing was applied; the caller re-reads and
+    /// retries.
+    Conflict(Vec<Key>),
+    /// A filesystem failure while locking, reading the current on-disk
+    /// state, or writing the transaction's changes.
     Io(std::io::Error),
 }
 
+/// The name this failure type had while the backend only knew the
+/// affected-set scope.
+pub type AffectedSetError = ValidationFailure;
+
+impl fmt::Display for ValidationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Config(errors) => {
+                write!(f, "schema configuration error: {}", errors.join("; "))
+            }
+            Self::Violations(run) => {
+                write!(
+                    f,
+                    "schema validation failed:\n{}",
+                    render_reports_text(&run.reports).trim_end()
+                )
+            }
+            Self::Conflict(keys) => {
+                let listed: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                write!(
+                    f,
+                    "write conflict: changed on disk since this transaction read them: {}",
+                    listed.join(", ")
+                )
+            }
+            Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ValidationFailure {}
+
 /// A [`Transaction`] backend that performs schema validation at `commit()`
-/// time, scoped to an index-backed affected set (T7).
+/// time (T7).
 ///
 /// `write()` always succeeds — this backend is not a permission gate.
 /// `commit()` builds the state that would result from applying every write
-/// recorded since `begin()` on top of what is currently on disk, computes
-/// the affected set for the keys those writes touched (via
-/// [`validate_affected_set`]), and checks only that bounded set of
-/// documents. If it is clean, every pending write is applied to disk and
-/// the transaction succeeds; if not, nothing is written and `commit()`
-/// returns the violations.
-pub struct AffectedSetTransaction {
+/// recorded since `begin()` on top of what is currently on disk and
+/// validates it to the configured [`ValidationScope`]. If it is clean,
+/// every pending write is applied to disk and the transaction succeeds; if
+/// not, nothing is written and `commit()` returns the failure.
+pub struct ValidatingTransaction {
     base_path: PathBuf,
     format: Format,
     config: Configuration,
     schemas_dir: PathBuf,
+    scope: ValidationScope,
+    checker_root: PathBuf,
     pending: Vec<Write>,
+    /// What each staged key held on disk when this transaction first
+    /// wrote it (`None`: no file). The conflict baseline.
+    baseline: BTreeMap<Key, Option<u64>>,
     failed: bool,
 }
 
-impl AffectedSetTransaction {
+/// The name this backend had while it only knew the affected-set scope;
+/// [`ValidatingTransaction::new`] still defaults to that scope.
+pub type AffectedSetTransaction = ValidatingTransaction;
+
+fn digest(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// An exclusive advisory lock on `path`, released on drop.
+struct StoreLock(#[allow(dead_code)] File);
+
+impl StoreLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: flock on a file descriptor this process owns.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(Self(file))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: releasing the lock this struct acquired; the descriptor
+        // closes right after.
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+impl ValidatingTransaction {
+    /// A backend over the store at `base_path`, validating to the
+    /// affected-set scope; see [`Self::with_scope`] for the full one.
     pub fn new(
         base_path: impl Into<PathBuf>,
         format: Format,
         config: Configuration,
         schemas_dir: impl Into<PathBuf>,
     ) -> Self {
+        let base_path = base_path.into();
         Self {
-            base_path: base_path.into(),
+            checker_root: base_path.clone(),
+            base_path,
             format,
             config,
             schemas_dir: schemas_dir.into(),
+            scope: ValidationScope::AffectedSet,
             pending: Vec::new(),
+            baseline: BTreeMap::new(),
             failed: false,
         }
+    }
+
+    /// The scope validated at commit. [`ValidationScope::None`] is treated
+    /// as the affected set — a backend that validates nothing is
+    /// [`liwe::transaction::NoopTransaction`], not this one.
+    pub fn with_scope(mut self, scope: ValidationScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// The directory the `always` checkers run in (their `root`), when
+    /// the library does not sit at the project root. Defaults to
+    /// `base_path`.
+    pub fn with_checker_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.checker_root = root.into();
+        self
+    }
+
+    pub fn scope(&self) -> ValidationScope {
+        self.scope
     }
 
     /// The writes recorded on this transaction since the last `begin`,
     /// `commit`, or `abort`.
     pub fn pending(&self) -> &[Write] {
         &self.pending
+    }
+
+    fn file_path(&self, key: &Key) -> PathBuf {
+        self.base_path.join(key.to_path(self.format))
+    }
+
+    fn on_disk(&self, key: &Key) -> Option<String> {
+        fs::read_to_string(self.file_path(key)).ok()
+    }
+
+    /// Where the store-wide commit lock lives: next to the schemas, in
+    /// `.iwe`. `None` when the schemas directory has no parent to lock in.
+    fn lock_path(&self) -> Option<PathBuf> {
+        let dir = self.schemas_dir.parent()?;
+        dir.is_dir().then(|| dir.join(WRITE_LOCK_FILE))
     }
 
     /// The state that would result from applying every pending write on
@@ -123,18 +277,33 @@ impl AffectedSetTransaction {
         keys
     }
 
+    /// The staged keys whose on-disk content no longer matches what this
+    /// transaction saw when it first wrote them.
+    fn conflicts(&self) -> Vec<Key> {
+        self.baseline
+            .iter()
+            .filter(|(key, seen)| self.on_disk(key).as_deref().map(digest) != **seen)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
     fn apply_pending(&self) -> std::io::Result<()> {
         for write in &self.pending {
             match write {
                 Write::Put(key, content) => {
-                    let file_path = self.base_path.join(key.to_path(self.format));
+                    let file_path = self.file_path(key);
                     if let Some(parent) = file_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
-                    write_file(&key.as_str().to_string(), content, &self.base_path, self.format)?;
+                    write_file(
+                        &key.as_str().to_string(),
+                        content,
+                        &self.base_path,
+                        self.format,
+                    )?;
                 }
                 Write::Remove(key) => {
-                    let file_path = self.base_path.join(key.to_path(self.format));
+                    let file_path = self.file_path(key);
                     if file_path.exists() {
                         fs::remove_file(&file_path)?;
                     }
@@ -143,18 +312,168 @@ impl AffectedSetTransaction {
         }
         Ok(())
     }
+
+    /// Puts every touched key back to `prior` — the compensating move
+    /// when a checker rejects a state that was already applied.
+    fn restore(&self, prior: &BTreeMap<Key, Option<String>>) -> std::io::Result<()> {
+        for (key, content) in prior {
+            let file_path = self.file_path(key);
+            match content {
+                Some(content) => {
+                    if let Some(parent) = file_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(&file_path, content)?;
+                }
+                None => {
+                    if file_path.exists() {
+                        fs::remove_file(&file_path)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The reports validation produces for `state`, to this transaction's
+    /// scope.
+    fn reports_for(&self, state: &State, touched: &[Key]) -> Result<Vec<KeyReport>, Vec<String>> {
+        let graph = Graph::from_state(
+            state,
+            false,
+            self.config.format_options(),
+            self.config.library.frontmatter_document_title.clone(),
+        );
+        let run = match self.scope {
+            ValidationScope::Full => validate_store_at(&self.schemas_dir, &self.config, &graph)?,
+            ValidationScope::AffectedSet | ValidationScope::None => {
+                validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
+                    .map(|(run, _affected)| run)?
+            }
+        };
+        Ok(run.reports)
+    }
+
+    /// Refuses the final state if it violates anything the current state
+    /// does not. A violation that already stands on disk — someone else's
+    /// debt, or a rule that tightened after the document was written — is
+    /// not this transaction's to pay, and must not turn every unrelated
+    /// write into a refusal; a violation this transaction would introduce
+    /// is. The pre-state is validated only when the final state has
+    /// reports at all, so a clean write costs one validation.
+    fn validate_final_state(&self, touched: &[Key]) -> Result<(), ValidationFailure> {
+        let after = self
+            .reports_for(&self.final_state(), touched)
+            .map_err(ValidationFailure::Config)?;
+        if after.is_empty() {
+            return Ok(());
+        }
+        let before = self
+            .reports_for(&new_for_path(&self.base_path, self.format), touched)
+            .map_err(ValidationFailure::Config)?;
+        let standing: HashSet<(String, String, String)> = before
+            .iter()
+            .flat_map(|report| {
+                report.violations.iter().map(move |violation| {
+                    (
+                        report.key.to_string(),
+                        report.schema.clone(),
+                        violation.message.clone(),
+                    )
+                })
+            })
+            .collect();
+        let introduced: Vec<KeyReport> = after
+            .into_iter()
+            .filter_map(|report| {
+                let violations: Vec<Violation> = report
+                    .violations
+                    .into_iter()
+                    .filter(|violation| {
+                        !standing.contains(&(
+                            report.key.to_string(),
+                            report.schema.clone(),
+                            violation.message.clone(),
+                        ))
+                    })
+                    .collect();
+                (!violations.is_empty()).then(|| KeyReport {
+                    key: report.key,
+                    schema: report.schema,
+                    violations,
+                })
+            })
+            .collect();
+        if introduced.is_empty() {
+            Ok(())
+        } else {
+            Err(ValidationFailure::Violations(ValidationRun {
+                documents: introduced.len(),
+                schemas: 0,
+                reports: introduced,
+            }))
+        }
+    }
+
+    /// The `always` checkers over the touched keys, against the applied
+    /// state. Only the reports configured to fail count; warnings are the
+    /// CLI's to print.
+    fn failing_checker_reports(&self, touched: &[Key]) -> Option<ValidationRun> {
+        if self.scope != ValidationScope::Full || self.config.checkers.is_empty() {
+            return None;
+        }
+        let checked = run_checkers(&self.config, &self.checker_root, touched, false);
+        if checked.failing.is_empty() {
+            return None;
+        }
+        Some(ValidationRun {
+            documents: touched.len(),
+            schemas: 0,
+            reports: checked.failing,
+        })
+    }
+
+    fn commit_locked(&mut self) -> Result<(), ValidationFailure> {
+        let conflicts = self.conflicts();
+        if !conflicts.is_empty() {
+            return Err(ValidationFailure::Conflict(conflicts));
+        }
+
+        let touched = self.touched_keys();
+        self.validate_final_state(&touched)?;
+
+        let prior: BTreeMap<Key, Option<String>> = touched
+            .iter()
+            .map(|key| (key.clone(), self.on_disk(key)))
+            .collect();
+        self.apply_pending().map_err(ValidationFailure::Io)?;
+
+        if let Some(run) = self.failing_checker_reports(&touched) {
+            self.restore(&prior).map_err(ValidationFailure::Io)?;
+            return Err(ValidationFailure::Violations(run));
+        }
+        Ok(())
+    }
 }
 
-impl Transaction for AffectedSetTransaction {
-    type Error = AffectedSetError;
+impl Transaction for ValidatingTransaction {
+    type Error = ValidationFailure;
 
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.pending.clear();
+        self.baseline.clear();
         self.failed = false;
         Ok(())
     }
 
     fn write(&mut self, write: Write) -> Result<(), WriteRejected<Self::Error>> {
+        let key = match &write {
+            Write::Put(key, _) | Write::Remove(key) => key.clone(),
+        };
+        if !self.baseline.contains_key(&key) {
+            let seen = self.on_disk(&key).as_deref().map(digest);
+            self.baseline.insert(key, seen);
+        }
         self.pending.push(write);
         Ok(())
     }
@@ -163,38 +482,34 @@ impl Transaction for AffectedSetTransaction {
         if self.failed {
             return Err(CommitError::Failed);
         }
-
-        let touched = self.touched_keys();
-        if touched.is_empty() {
-            self.pending.clear();
+        if self.pending.is_empty() {
+            self.baseline.clear();
             return Ok(());
         }
 
-        let state = self.final_state();
-        let graph = Graph::from_state(
-            &state,
-            false,
-            self.config.format_options(),
-            self.config.library.frontmatter_document_title.clone(),
-        );
-
-        match validate_affected_set(&self.schemas_dir, &self.config, &graph, &touched) {
-            Err(errors) => Err(CommitError::Other(AffectedSetError::Config(errors))),
-            Ok((run, _affected)) if !run.reports.is_empty() => {
-                Err(CommitError::Other(AffectedSetError::Violations(run)))
-            }
-            Ok(_) => match self.apply_pending() {
-                Ok(()) => {
-                    self.pending.clear();
-                    Ok(())
-                }
-                Err(error) => Err(CommitError::Other(AffectedSetError::Io(error))),
+        let lock = match self.lock_path() {
+            Some(path) => match StoreLock::acquire(&path) {
+                Ok(lock) => Some(lock),
+                Err(error) => return Err(CommitError::Other(ValidationFailure::Io(error))),
             },
+            None => None,
+        };
+        let result = self.commit_locked();
+        drop(lock);
+
+        match result {
+            Ok(()) => {
+                self.pending.clear();
+                self.baseline.clear();
+                Ok(())
+            }
+            Err(failure) => Err(CommitError::Other(failure)),
         }
     }
 
     fn abort(&mut self) -> Result<(), Self::Error> {
         self.pending.clear();
+        self.baseline.clear();
         self.failed = false;
         Ok(())
     }
@@ -289,7 +604,10 @@ mod tests {
         let single_write_result = tx.commit();
         println!("Test A, single-write transaction (write 1 alone) commit result: {single_write_result:?}");
         assert!(
-            matches!(single_write_result, Err(CommitError::Other(AffectedSetError::Violations(_)))),
+            matches!(
+                single_write_result,
+                Err(CommitError::Other(AffectedSetError::Violations(_)))
+            ),
             "committing write 1 alone should be rejected: for THIS transaction, write 1's \
              content is the final state, and it violates the min-links rule"
         );
@@ -376,7 +694,10 @@ mod tests {
 
         match &result {
             Err(CommitError::Other(AffectedSetError::Violations(run))) => {
-                println!("Direct-link closure test, violation reports: {:?}", run.reports);
+                println!(
+                    "Direct-link closure test, violation reports: {:?}",
+                    run.reports
+                );
                 assert!(
                     run.reports.iter().any(|r| r.key == Key::name("hubs/hub")),
                     "hubs/hub was never touched by this transaction, but it links to the \
@@ -438,7 +759,9 @@ mod tests {
             Err(CommitError::Other(AffectedSetError::Violations(run))) => {
                 println!("Reach closure test, violation reports: {:?}", run.reports);
                 assert!(
-                    run.reports.iter().any(|r| r.key == Key::name("concepts/leaf")),
+                    run.reports
+                        .iter()
+                        .any(|r| r.key == Key::name("concepts/leaf")),
                     "concepts/leaf was never touched by this transaction, but it reaches the \
                      touched key through the 'Is a' scope — it should have been pulled into \
                      the affected set via ViaWalk::inbound and rejected for a broken chain"
@@ -451,5 +774,250 @@ mod tests {
             "# Mid\n\n## Is a\n\n- [Entity](../root/entity)\n",
             "the rejected commit must not have overwritten the file on disk"
         );
+    }
+
+    /// Full scope: a shape rule (`properties` on the frontmatter) that the
+    /// affected-set scope never looks at is enforced, and a store-wide
+    /// `[invariants]` count is enforced too — a write that is fine on its
+    /// own but pushes the store over an invariant is refused.
+    #[test]
+    fn full_scope_enforces_shape_rules_and_invariants() {
+        use crate::config::Invariant;
+
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "note",
+            "frontmatter:\n  type: object\n  required: [type]\n  properties:\n    type: { const: note }\n",
+        );
+        create_dir_all(temp.path().join("notes")).unwrap();
+
+        let mut config = config_with(&[("note", "notes/**")]);
+        config.invariants.insert(
+            "one-hub".to_string(),
+            Invariant {
+                filter: "role: hub".to_string(),
+                expect: toml::Value::Integer(1),
+                description: None,
+            },
+        );
+
+        // Shape: missing `type` is rejected under full scope ...
+        let mut full = transaction_for(&temp, config.clone()).with_scope(ValidationScope::Full);
+        full.begin().unwrap();
+        full.write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
+            .unwrap();
+        let result = full.commit();
+        println!("full scope, shape violation: {result:?}");
+        assert!(matches!(
+            result,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert!(!temp.path().join("notes/a.md").exists());
+
+        // ... and accepted by the affected-set scope, which only knows
+        // link rules.
+        let mut bounded = transaction_for(&temp, config.clone());
+        bounded.begin().unwrap();
+        bounded
+            .write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
+            .unwrap();
+        assert!(bounded.commit().is_ok());
+        fs::remove_file(temp.path().join("notes/a.md")).unwrap();
+
+        // Invariant: with the hub present the count is 1 and a valid
+        // note commits; removing the hub breaks the invariant and is
+        // refused even though the removed document itself is bound to no
+        // rule that fails.
+        write(
+            temp.path().join("notes/hub.md"),
+            "---\ntype: note\nrole: hub\n---\n# Hub\n",
+        )
+        .unwrap();
+        full.begin().unwrap();
+        full.write(Write::Put(
+            Key::name("notes/a"),
+            "---\ntype: note\n---\n# A\n".to_string(),
+        ))
+        .unwrap();
+        let result = full.commit();
+        println!("full scope, valid note with invariant satisfied: {result:?}");
+        assert!(result.is_ok());
+
+        full.begin().unwrap();
+        full.write(Write::Remove(Key::name("notes/hub"))).unwrap();
+        let result = full.commit();
+        println!("full scope, invariant broken by removal: {result:?}");
+        match &result {
+            Err(CommitError::Other(ValidationFailure::Violations(run))) => {
+                assert!(run
+                    .reports
+                    .iter()
+                    .any(|r| r.key == Key::name("invariants/one-hub")));
+            }
+            other => panic!("expected the invariant to refuse the removal, got {other:?}"),
+        }
+        assert!(temp.path().join("notes/hub.md").exists());
+    }
+
+    /// A violation already standing on disk is not this transaction's to
+    /// pay: an unrelated write commits over it, while a write that
+    /// introduces a violation of its own is still refused — and the
+    /// refusal names only the introduced one.
+    #[test]
+    fn standing_violations_do_not_block_unrelated_writes() {
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 1\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+        // Someone else's debt: a note with no links.
+        write(temp.path().join("notes/debt.md"), "# Debt\n").unwrap();
+        write(temp.path().join("notes/b.md"), "# B\n\nSee [Debt](debt).\n").unwrap();
+
+        let mut tx = transaction_for(&temp, config_with(&[("note", "notes/**")]))
+            .with_scope(ValidationScope::Full);
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A\n\nSee [B](b).\n".to_string(),
+        ))
+        .unwrap();
+        let result = tx.commit();
+        println!("standing violation, unrelated write: {result:?}");
+        assert!(
+            result.is_ok(),
+            "the standing violation on notes/debt is not this write's"
+        );
+        assert!(temp.path().join("notes/a.md").exists());
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/c"), "# C\n".to_string()))
+            .unwrap();
+        let result = tx.commit();
+        println!("standing violation plus an introduced one: {result:?}");
+        match &result {
+            Err(CommitError::Other(ValidationFailure::Violations(run))) => {
+                let keys: Vec<String> = run.reports.iter().map(|r| r.key.to_string()).collect();
+                assert_eq!(
+                    keys,
+                    vec!["notes/c".to_string()],
+                    "only the introduced violation is reported"
+                );
+            }
+            other => panic!("expected the introduced violation to be refused, got {other:?}"),
+        }
+        assert!(!temp.path().join("notes/c.md").exists());
+    }
+
+    /// Conflict detection: a key staged by this transaction and then
+    /// changed on disk by someone else before commit refuses the commit,
+    /// names the key, and leaves the other writer's content in place.
+    #[test]
+    fn commit_refuses_when_a_staged_key_changed_underneath() {
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 0\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+        write(temp.path().join("notes/a.md"), "# A\n").unwrap();
+
+        let mut tx = transaction_for(&temp, config_with(&[("note", "notes/**")]));
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/a"), "# A, mine\n".to_string()))
+            .unwrap();
+
+        // Another writer lands first.
+        write(temp.path().join("notes/a.md"), "# A, theirs\n").unwrap();
+
+        let result = tx.commit();
+        println!("conflict test, commit result: {result:?}");
+        match &result {
+            Err(CommitError::Other(ValidationFailure::Conflict(keys))) => {
+                assert_eq!(keys, &vec![Key::name("notes/a")]);
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            read_to_string(temp.path().join("notes/a.md")).unwrap(),
+            "# A, theirs\n"
+        );
+
+        // A fresh transaction that reads the new content commits fine.
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A, merged\n".to_string(),
+        ))
+        .unwrap();
+        assert!(tx.commit().is_ok());
+        assert_eq!(
+            read_to_string(temp.path().join("notes/a.md")).unwrap(),
+            "# A, merged\n"
+        );
+    }
+
+    /// A failing `always` checker is enforced under full scope, and its
+    /// rejection is compensating: the write was applied for the checker to
+    /// read, then put back.
+    #[cfg(unix)]
+    #[test]
+    fn full_scope_runs_always_checkers_and_reverts_on_failure() {
+        use crate::config::Checker;
+
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 0\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+        write(temp.path().join("notes/a.md"), "# A\n").unwrap();
+
+        let mut config = config_with(&[("note", "notes/**")]);
+        // Fails any key whose file contains the word "forbidden".
+        config.checkers.insert(
+            "no-forbidden".to_string(),
+            Checker {
+                command: r#"python3 -c '
+import json,sys,os
+inp=json.load(sys.stdin)
+out=[]
+for k in inp["keys"]:
+    p=os.path.join(inp["root"],k+".md")
+    if os.path.exists(p) and "forbidden" in open(p).read():
+        out.append({"key":k,"violations":[{"message":"forbidden word"}]})
+print(json.dumps(out))'"#
+                    .to_string(),
+                warn: false,
+                always: true,
+                description: None,
+            },
+        );
+
+        let mut tx = transaction_for(&temp, config).with_scope(ValidationScope::Full);
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A\n\nforbidden\n".to_string(),
+        ))
+        .unwrap();
+        tx.write(Write::Put(Key::name("notes/b"), "# B\n".to_string()))
+            .unwrap();
+        let result = tx.commit();
+        println!("checker test, commit result: {result:?}");
+        assert!(matches!(
+            result,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert_eq!(
+            read_to_string(temp.path().join("notes/a.md")).unwrap(),
+            "# A\n",
+            "the rejected write must have been reverted"
+        );
+        assert!(
+            !temp.path().join("notes/b.md").exists(),
+            "the sibling write of the rejected transaction must have been reverted too"
+        );
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A\n\nfine\n".to_string(),
+        ))
+        .unwrap();
+        assert!(tx.commit().is_ok());
     }
 }

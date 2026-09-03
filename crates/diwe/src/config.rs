@@ -72,6 +72,34 @@ pub struct JournalOptions {
     pub path: Option<String>,
 }
 
+/// How far a write's transaction looks before it lets the write land.
+/// `none` (the default) keeps AB9's no-op passthrough: the pending
+/// documents are shape-checked on their own and nothing else stands
+/// between a tool call and the disk. `affected-set` checks the
+/// index-bounded link rules over the documents the write can reach
+/// (`crate::validating_transaction`). `full` validates the whole store's
+/// final state the way `iwe schema validate` does — every schema, the
+/// `[invariants]`, and the `always` checkers over the touched keys — and
+/// refuses the commit on any failing report, so a store that is clean
+/// before a write is clean after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ValidationScope {
+    #[default]
+    None,
+    AffectedSet,
+    Full,
+}
+
+/// `[transactions]`: what a write's transaction backend does at commit.
+/// Left at its default, IWE behaves exactly as without the section.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionOptions {
+    #[serde(default)]
+    pub validate: ValidationScope,
+}
+
 impl Default for LibraryOptions {
     fn default() -> Self {
         Self {
@@ -103,6 +131,8 @@ pub struct Configuration {
     pub search: SearchOptions,
     #[serde(default)]
     pub journal: JournalOptions,
+    #[serde(default)]
+    pub transactions: TransactionOptions,
     #[serde(default)]
     pub commands: HashMap<String, Command>,
     #[serde(default)]
@@ -277,6 +307,7 @@ impl Default for Configuration {
             completion: Default::default(),
             search: Default::default(),
             journal: Default::default(),
+            transactions: Default::default(),
             commands: Default::default(),
             actions: Default::default(),
             templates: Default::default(),
@@ -820,7 +851,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `transactions`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
             "#}
         );
     }

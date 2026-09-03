@@ -1824,6 +1824,24 @@ pub fn validate_pending_documents_in(
     validate_documents_in(dir, config, &graph, &keys, false)
 }
 
+/// The whole-store validation `iwe schema validate` runs, against an
+/// explicit schemas directory instead of the one resolved from the
+/// current directory: every schema over `keys` with the full link checks,
+/// plus the graph-wide `[invariants]`. Checkers are not run here — they
+/// read the disk, and a caller validating a state that is not yet on disk
+/// (`crate::validating_transaction`) runs them after applying it.
+pub fn validate_store_at(
+    dir: &Path,
+    config: &Configuration,
+    graph: &Graph,
+) -> Result<ValidationRun, Vec<String>> {
+    let mut keys = graph.keys();
+    keys.sort();
+    let mut run = validate_documents_in(dir, config, graph, &keys, true)?;
+    run.reports.extend(check_invariants(config, graph)?);
+    Ok(run)
+}
+
 fn validate_documents_in(
     dir: &Path,
     config: &Configuration,
@@ -2052,6 +2070,13 @@ pub fn validate_affected_set(
     let mut schemas_used = HashSet::new();
     let mut cache = RunCache::new();
     for key in &affected_keys {
+        // A touched key the state does not hold — a document this
+        // transaction removes, or one it creates seen from the state
+        // before it — still pulls its referrers in above, but has no
+        // document of its own to check.
+        if !graph.has_key(key) {
+            continue;
+        }
         let names = bindings.schemas_for(&key.to_string());
         if names.is_empty() {
             continue;

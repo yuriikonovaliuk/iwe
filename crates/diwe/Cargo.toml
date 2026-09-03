@@ -33,6 +33,7 @@ bm25.workspace = true
 fuzzy-matcher.workspace = true
 notify = "8"
 chrono.workspace = true
+libc = "0.2"
 serde_json.workspace = true
 uuid.workspace = true
 

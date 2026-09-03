@@ -52,10 +52,12 @@ fn write_changes_with_is_reachable_and_drivable_from_outside_the_crate() {
     let changes = Changes::new().create(Key::name("note"), "# Note\n".to_string());
     let log = TransactionLog::new();
 
-    server.write_changes_with(&changes, {
-        let log = log.clone();
-        move || RecordingTransaction::new(log.clone())
-    });
+    server
+        .write_changes_with(&changes, {
+            let log = log.clone();
+            move || RecordingTransaction::new(log.clone())
+        })
+        .unwrap();
 
     assert_eq!(log.begin_count(), 1);
     assert_eq!(log.commit_count(), 1);
