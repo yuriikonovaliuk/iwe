@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::Local;
 use diwe::config::{
     library_path_in, schemas_dir_in, ActionDefinition, CompletionOptions, Configuration,
-    MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
+    MarkdownOptions, NoteTemplate, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
 use diwe::fs::{new_for_path, new_from_hashmap};
@@ -121,50 +121,6 @@ fn schema_violation_error(reports: &[KeyReport]) -> McpError {
     let mut message = String::from("schema validation failed; change rejected:\n");
     message.push_str(&render_reports_text(reports));
     McpError::invalid_params(message, Some(serde_json::json!({ "violations": reports })))
-}
-
-/// The journal effects `changes` represents — every removed key as
-/// [`diwe::journal::Effect::Delete`], every created key as `::Create`,
-/// every updated key as `::Update` — read straight off `Changes`'s own
-/// three-way split rather than re-derived from the filesystem. Mirrors
-/// Commits a validating transaction, turning its refusal — violations,
-/// a write conflict, a configuration error — into the message the tool
-/// caller sees.
-fn commit_validated(tx: &mut ValidatingTransaction) -> Result<(), String> {
-    use liwe::transaction::CommitError;
-    match tx.commit() {
-        Ok(()) => Ok(()),
-        Err(CommitError::Failed) => {
-            let _ = tx.abort();
-            Err("write rejected: transaction is in the failed state".to_string())
-        }
-        Err(CommitError::Other(failure)) => {
-            let _ = tx.abort();
-            Err(format!("write rejected: {failure}"))
-        }
-    }
-}
-
-/// `diwe::fs`'s private `effects_for`, kept separate since this crate has
-/// no access to that one.
-fn journal_effects_for(changes: &Changes) -> Vec<diwe::journal::KeyEffect> {
-    changes
-        .removes
-        .iter()
-        .map(|key| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Delete))
-        .chain(
-            changes
-                .creates
-                .iter()
-                .map(|(key, _)| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Create)),
-        )
-        .chain(
-            changes
-                .updates
-                .iter()
-                .map(|(key, _)| diwe::journal::KeyEffect::new(key, diwe::journal::Effect::Update)),
-        )
-        .collect()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2145,30 +2101,13 @@ impl IweServer {
         Ok(())
     }
 
-    /// The validating backend `[transactions] validate` asks for, or
-    /// `None` when it is left at its default (`none`) or this server has
-    /// no store on disk to validate against. Built fresh per write: the
-    /// backend is cheap, and its conflict baseline must start empty.
+    /// The validating backend `[transactions] validate` asks for over this
+    /// server's store, or `None` when it is left at its default (`none`)
+    /// or this server has no store on disk to validate against.
     fn validating_backend(&self) -> Option<ValidatingTransaction> {
-        let scope = self.config.transactions.validate;
-        if scope == ValidationScope::None {
-            return None;
-        }
         let base_path = self.base_path.as_ref()?;
-        let root = self
-            .project_path
-            .clone()
-            .unwrap_or_else(|| base_path.clone());
-        Some(
-            ValidatingTransaction::new(
-                base_path.clone(),
-                self.config.format,
-                self.config.clone(),
-                schemas_dir_in(&root),
-            )
-            .with_scope(scope)
-            .with_checker_root(root),
-        )
+        let root = self.project_path.as_ref().unwrap_or(base_path);
+        ValidatingTransaction::for_config(&self.config, base_path, root)
     }
 
     /// [`Self::write_file_with`] for a backend that applies the write
@@ -2179,25 +2118,12 @@ impl IweServer {
         &self,
         key: &Key,
         content: &str,
-        mut tx: ValidatingTransaction,
+        tx: ValidatingTransaction,
     ) -> Result<(), String> {
         if self.document_path(key).is_none() {
             return Ok(());
         }
-        tx.begin()
-            .map_err(|_| format!("transaction backend failed to begin for '{key}'"))?;
-        if tx
-            .write(TxWrite::Put(key.clone(), content.to_string()))
-            .is_err()
-        {
-            let _ = tx.abort();
-            return Err(format!("write rejected by transaction backend for '{key}'"));
-        }
-        if let Err(message) = self.enforce_write_permission(key, content) {
-            let _ = tx.abort();
-            return Err(message);
-        }
-        commit_validated(&mut tx)
+        tx.put_one(key, content, |_prior| self.enforce_write_permission(key, content))
     }
 
     /// One transaction over the whole of `changes` — removes, creates and
@@ -2209,55 +2135,23 @@ impl IweServer {
     fn write_changes_validated(
         &self,
         changes: &Changes,
-        mut tx: ValidatingTransaction,
+        tx: ValidatingTransaction,
     ) -> Result<(), String> {
         let Some(root) = self.project_path.as_ref().or(self.base_path.as_ref()) else {
             return Ok(());
         };
         let schemas_dir = schemas_dir_in(root);
-        let check = |key: &Key, content: &str, operation: diwe::permissions::WriteOperation| {
-            let prior = self
-                .document_path(key)
-                .and_then(|path| std::fs::read_to_string(path).ok());
+        tx.apply_changes(changes, |key, content, prior, operation| {
             diwe::permissions::check_write_permission_for_content_in(
                 &self.config,
                 &schemas_dir,
                 key,
                 content,
-                prior.as_deref(),
+                prior,
                 operation,
             )
             .map_err(|rejected| rejected.to_string())
-        };
-
-        tx.begin()
-            .map_err(|_| "transaction backend failed to begin".to_string())?;
-        for key in &changes.removes {
-            if tx.write(TxWrite::Remove(key.clone())).is_err() {
-                let _ = tx.abort();
-                return Err(format!("write rejected by transaction backend for '{key}'"));
-            }
-            if self.document_file_exists(key) {
-                if let Err(message) = check(key, "", diwe::permissions::WriteOperation::Delete) {
-                    let _ = tx.abort();
-                    return Err(message);
-                }
-            }
-        }
-        for (key, markdown) in changes.creates.iter().chain(changes.updates.iter()) {
-            if tx
-                .write(TxWrite::Put(key.clone(), markdown.clone()))
-                .is_err()
-            {
-                let _ = tx.abort();
-                return Err(format!("write rejected by transaction backend for '{key}'"));
-            }
-            if let Err(message) = check(key, markdown, diwe::permissions::WriteOperation::Write) {
-                let _ = tx.abort();
-                return Err(message);
-            }
-        }
-        commit_validated(&mut tx)
+        })
     }
 
     /// Where this server's transaction journal (`journal.path`, see
@@ -2364,7 +2258,7 @@ impl IweServer {
             None => self.write_changes_with(changes, NoopTransaction::new),
             Some(tx) => {
                 self.write_changes_validated(changes, tx)?;
-                self.record_journal_commit(journal_effects_for(changes));
+                self.record_journal_commit(diwe::fs::journal_effects_for(changes));
                 Ok(())
             }
         }
@@ -2424,7 +2318,7 @@ impl IweServer {
             // `apply_changes_with` returned an error partway through.
             match result {
                 Ok(()) => {
-                    self.record_journal_commit(journal_effects_for(changes));
+                    self.record_journal_commit(diwe::fs::journal_effects_for(changes));
                     Ok(())
                 }
                 Err(error) => Err(error.to_string()),

@@ -48,11 +48,13 @@ use std::path::{Path, PathBuf};
 use liwe::graph::Graph;
 use liwe::model::config::Format;
 use liwe::model::{Key, State};
+use liwe::operations::Changes;
 use liwe::transaction::{CommitError, Transaction, Write, WriteRejected};
 
 use crate::config::Configuration;
 pub use crate::config::ValidationScope;
 use crate::fs::{new_for_path, write_file};
+use crate::permissions::WriteOperation;
 use crate::schema::{
     render_reports_text, run_checkers, validate_affected_set, validate_store_at, KeyReport,
     ValidationRun,
@@ -224,10 +226,122 @@ impl ValidatingTransaction {
         self.scope
     }
 
+    /// The backend `[transactions] validate` asks for over the store at
+    /// `base_path` inside the project at `root` (where `.iwe/` lives), or
+    /// `None` when the section is left at its default (`none`) — the
+    /// caller then stays on [`liwe::transaction::NoopTransaction`]. Built
+    /// fresh per write: the backend is cheap, and its conflict baseline
+    /// must start empty. The one construction both binaries share, so a
+    /// store gated for the MCP server is gated for the CLI too.
+    pub fn for_config(config: &Configuration, base_path: &Path, root: &Path) -> Option<Self> {
+        let scope = config.transactions.validate;
+        if scope == ValidationScope::None {
+            return None;
+        }
+        Some(
+            Self::new(
+                base_path,
+                config.format,
+                config.clone(),
+                crate::config::schemas_dir_in(root),
+            )
+            .with_scope(scope)
+            .with_checker_root(root),
+        )
+    }
+
     /// The writes recorded on this transaction since the last `begin`,
     /// `commit`, or `abort`.
     pub fn pending(&self) -> &[Write] {
         &self.pending
+    }
+
+    /// Commits, turning a refusal — violations, a write conflict, a
+    /// configuration error — into the message the caller shows, and
+    /// aborting so the transaction is reusable.
+    pub fn commit_or_abort(&mut self) -> Result<(), String> {
+        match self.commit() {
+            Ok(()) => Ok(()),
+            Err(CommitError::Failed) => {
+                let _ = self.abort();
+                Err("write rejected: transaction is in the failed state".to_string())
+            }
+            Err(CommitError::Other(failure)) => {
+                let _ = self.abort();
+                Err(format!("write rejected: {failure}"))
+            }
+        }
+    }
+
+    /// One document written through this backend: staged, permission-
+    /// checked inside the bracket (`check` sees the prior on-disk content,
+    /// `None` for a create), and landed by `commit()` — the store is
+    /// touched inside the backend's lock and nowhere else, so the caller
+    /// must not write the file itself afterwards.
+    pub fn put_one(
+        mut self,
+        key: &Key,
+        content: &str,
+        check: impl FnOnce(Option<&str>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.begin()
+            .map_err(|_| format!("transaction backend failed to begin for '{key}'"))?;
+        if self
+            .write(Write::Put(key.clone(), content.to_string()))
+            .is_err()
+        {
+            let _ = self.abort();
+            return Err(format!("write rejected by transaction backend for '{key}'"));
+        }
+        let prior = self.on_disk(key);
+        if let Err(message) = check(prior.as_deref()) {
+            let _ = self.abort();
+            return Err(message);
+        }
+        self.commit_or_abort()
+    }
+
+    /// One transaction over the whole of `changes` — removes, creates and
+    /// updates staged together and validated as one final state, so a
+    /// rename or extract whose intermediate states dangle is judged on
+    /// where it ends up (`m2/design-transactions`). Write permission is
+    /// checked per key inside the bracket, as [`crate::fs::apply_changes`]
+    /// does: a removal is checked with `""` as its outgoing content and
+    /// [`WriteOperation::Delete`], and only when the file exists.
+    pub fn apply_changes(
+        mut self,
+        changes: &Changes,
+        check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.begin()
+            .map_err(|_| "transaction backend failed to begin".to_string())?;
+        for key in &changes.removes {
+            if self.write(Write::Remove(key.clone())).is_err() {
+                let _ = self.abort();
+                return Err(format!("write rejected by transaction backend for '{key}'"));
+            }
+            if let Some(existing) = self.on_disk(key) {
+                if let Err(message) = check(key, "", Some(&existing), WriteOperation::Delete) {
+                    let _ = self.abort();
+                    return Err(message);
+                }
+            }
+        }
+        for (key, markdown) in changes.creates.iter().chain(changes.updates.iter()) {
+            if self
+                .write(Write::Put(key.clone(), markdown.clone()))
+                .is_err()
+            {
+                let _ = self.abort();
+                return Err(format!("write rejected by transaction backend for '{key}'"));
+            }
+            let prior = self.on_disk(key);
+            if let Err(message) = check(key, markdown, prior.as_deref(), WriteOperation::Write) {
+                let _ = self.abort();
+                return Err(message);
+            }
+        }
+        self.commit_or_abort()
     }
 
     fn file_path(&self, key: &Key) -> PathBuf {

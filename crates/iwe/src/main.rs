@@ -33,9 +33,9 @@ use iwe::internal::claude::{
     EnableOptions, SessionOptions, StageOptions,
 };
 use iwe::new::{
-    normalize_content, read_stdin, read_stdin_if_available, write_document, ContentOptions,
-    CreateOptions, DocumentCreator, IfExists, PreparedDocument, Variables, BODY_VARIABLE,
-    LEGACY_BODY_VARIABLE, RESERVED_VARIABLES, TITLE_VARIABLE,
+    normalize_content, read_stdin, read_stdin_if_available, validating_backend, write_document,
+    ContentOptions, CreateOptions, DocumentCreator, IfExists, PreparedDocument, Variables,
+    BODY_VARIABLE, LEGACY_BODY_VARIABLE, RESERVED_VARIABLES, TITLE_VARIABLE,
 };
 use iwe::projection_args::{parse_projection_extend, parse_projection_replace};
 use iwe::render::{FindBlockRenderer, RetrieveRenderer};
@@ -2865,22 +2865,46 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
 // this same kind of error via `eprintln!` + `std::process::exit(1)`; this
 // wrapper now matches that convention instead of being the one path that
 // panics on it.
+//
+// Under `[transactions] validate` the whole change set is instead one
+// validating transaction (`ValidatingTransaction::apply_changes`): a
+// rename's remove and create are judged as one final state, and the
+// backend lands them itself, so the journal record is this wrapper's to
+// write once the commit has succeeded.
 fn apply_changes(changes: &Changes, configuration: &Configuration) {
-    if let Err(e) = diwe::fs::apply_changes(
-        changes,
-        &get_library_path(configuration),
-        configuration.format,
-        |key, content, prior_content, operation| {
-            diwe::permissions::check_write_permission_for_content(
-                configuration,
-                key,
-                content,
-                prior_content,
-                operation,
-            )
-        },
-        get_journal_path(configuration).as_deref(),
-    ) {
+    let check = |key: &Key,
+                 content: &str,
+                 prior_content: Option<&str>,
+                 operation: diwe::permissions::WriteOperation| {
+        diwe::permissions::check_write_permission_for_content(
+            configuration,
+            key,
+            content,
+            prior_content,
+            operation,
+        )
+    };
+    let result = match validating_backend(configuration) {
+        None => diwe::fs::apply_changes(
+            changes,
+            &get_library_path(configuration),
+            configuration.format,
+            check,
+            get_journal_path(configuration).as_deref(),
+        )
+        .map_err(|e| e.to_string()),
+        Some(tx) => tx
+            .apply_changes(changes, |key, content, prior_content, operation| {
+                check(key, content, prior_content, operation).map_err(|rejected| rejected.to_string())
+            })
+            .map(|()| {
+                diwe::journal::record_commit(
+                    get_journal_path(configuration).as_deref(),
+                    diwe::fs::journal_effects_for(changes),
+                )
+            }),
+    };
+    if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
@@ -4067,7 +4091,14 @@ fn write_single_document(
     configuration: &Configuration,
 ) -> Result<(), String> {
     let existed = path.exists();
-    write_single_document_with(key, content, path, check, NoopTransaction::new)?;
+    match validating_backend(configuration) {
+        None => write_single_document_with(key, content, path, check, NoopTransaction::new)?,
+        // The backend lands the write itself at `commit()`, under its
+        // lock; `check` runs inside the bracket just as above.
+        Some(tx) => tx.put_one(key, content, |prior| {
+            check(key, content, prior).map_err(|rejected| rejected.to_string())
+        })?,
+    }
     let effect = if existed {
         diwe::journal::Effect::Update
     } else {

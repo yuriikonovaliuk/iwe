@@ -9,6 +9,7 @@ use rand::distr::Alphanumeric;
 use rand::Rng;
 
 use diwe::config::{Configuration, NoteTemplate, DEFAULT_KEY_DATE_FORMAT};
+use diwe::validating_transaction::ValidatingTransaction;
 use liwe::graph::Graph;
 use liwe::locale::get_locale;
 use liwe::markdown::MarkdownReader;
@@ -302,7 +303,10 @@ pub fn write_document(
     // genuine `iwe new`/`iwe create` is almost always a create, but
     // `IfExists`-driven overwrite modes can target an existing path.
     let existed = prepared.path.exists();
-    let result = write_document_with(configuration, prepared, NoopTransaction::new);
+    let result = match validating_backend(configuration) {
+        None => write_document_with(configuration, prepared, NoopTransaction::new),
+        Some(tx) => write_document_validated(configuration, prepared, tx),
+    };
     if result.is_ok() {
         let effect = if existed {
             diwe::journal::Effect::Update
@@ -320,10 +324,54 @@ pub fn write_document(
     result
 }
 
+/// The store the CLI writes — `library.path` under the working directory,
+/// which is also the project root `.iwe/` lives in — and the validating
+/// backend `[transactions] validate` asks for over it, or `None` at the
+/// section's default. Every CLI write path asks this before falling back
+/// to `NoopTransaction`, so a store gated for the MCP server is gated for
+/// `iwe create`/`update`/`rename`/… identically.
+pub fn validating_backend(configuration: &Configuration) -> Option<ValidatingTransaction> {
+    let root = std::env::current_dir().ok()?;
+    let base_path = if configuration.library.path.is_empty() {
+        root.clone()
+    } else {
+        root.join(&configuration.library.path)
+    };
+    ValidatingTransaction::for_config(configuration, &base_path, &root)
+}
+
+/// [`write_document_with`] for a backend that lands the write itself at
+/// `commit()`: the document is staged, permission-checked inside the
+/// bracket exactly as the no-op path does, and written to disk by the
+/// backend under its lock — not by this function afterwards.
+fn write_document_validated(
+    configuration: &Configuration,
+    prepared: &PreparedDocument,
+    tx: ValidatingTransaction,
+) -> Result<CreatedDocument, String> {
+    tx.put_one(&prepared.key, &prepared.content, |prior_content| {
+        diwe::permissions::check_write_permission_for_content(
+            configuration,
+            &prepared.key,
+            &prepared.content,
+            prior_content,
+            diwe::permissions::WriteOperation::Write,
+        )
+        .map_err(|rejected| rejected.to_string())
+    })?;
+    Ok(CreatedDocument {
+        path: prepared
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| prepared.path.clone()),
+    })
+}
+
 /// Generic core of [`write_document`], parameterized over the transaction
 /// backend via a factory (`new_tx`) called once to build the transaction
-/// used for this write. `write_document` always calls this with
-/// `NoopTransaction::new`; T6's tests call it with a factory that builds a
+/// used for this write. `write_document` calls this with
+/// `NoopTransaction::new` unless `[transactions] validate` names a
+/// validating backend; T6's tests call it with a factory that builds a
 /// call-recording stub instead (`liwe::transaction::RecordingTransaction`),
 /// to prove this call site actually drives `begin`/`write`/`commit`/
 /// `abort` on whatever `Transaction` it is given, rather than merely

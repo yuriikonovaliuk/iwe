@@ -3,6 +3,7 @@ mod common;
 mod attach_test;
 mod c1_compliance_test;
 mod cli_filter_test;
+mod cli_write_gate_test;
 mod completions_test;
 mod create_test;
 mod d4_delete_mutability_test;

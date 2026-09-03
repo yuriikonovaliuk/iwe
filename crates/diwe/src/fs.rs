@@ -374,7 +374,7 @@ pub fn apply_changes(
     journal_path: Option<&Path>,
 ) -> std::io::Result<()> {
     apply_changes_with(changes, base_path, format, check, NoopTransaction::new)?;
-    journal::record_commit(journal_path, effects_for(changes));
+    journal::record_commit(journal_path, journal_effects_for(changes));
     Ok(())
 }
 
@@ -382,8 +382,10 @@ pub fn apply_changes(
 /// [`Effect::Delete`], every created key as an [`Effect::Create`], every
 /// updated key as an [`Effect::Update`] — the same three-way split
 /// `Changes` itself already carries, read straight off it rather than
-/// re-derived from the filesystem.
-fn effects_for(changes: &Changes) -> Vec<KeyEffect> {
+/// re-derived from the filesystem. Public for the write paths that land
+/// `changes` through a validating backend instead of [`apply_changes`]
+/// and record the same journal effects themselves.
+pub fn journal_effects_for(changes: &Changes) -> Vec<KeyEffect> {
     changes
         .removes
         .iter()
