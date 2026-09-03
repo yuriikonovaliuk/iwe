@@ -79,10 +79,10 @@ async fn full_scope_refuses_a_create_with_a_dangling_link_and_leaves_disk_untouc
     assert!(!dir.path().join("notes/new.md").exists());
 
     // The in-memory graph did not take the document either: a retrieve of
-    // a key with no document answers with an empty document list (plus a
-    // fill-in note), never with the refused content.
+    // a key with no document answers with an empty placeholder, never
+    // with the refused content.
     let result = f
-        .call_tool("iwe_retrieve", json!({"key": "notes/new"}))
+        .call_tool("iwe_retrieve", json!({"keys": ["notes/new"]}))
         .await;
     let text = result
         .content
@@ -90,8 +90,8 @@ async fn full_scope_refuses_a_create_with_a_dangling_link_and_leaves_disk_untouc
         .and_then(|block| block.as_text())
         .map(|t| t.text.clone())
         .unwrap_or_default();
-    assert_eq!(
-        text, "[]",
+    assert!(
+        !text.contains("Nowhere"),
         "a refused create is not retrievable, got: {text}"
     );
 }

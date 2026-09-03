@@ -1,5 +1,6 @@
 mod fixture;
 
+mod agent_transaction_test;
 mod attach_test;
 mod extract_test;
 mod find_test;

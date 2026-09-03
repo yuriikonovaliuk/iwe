@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::Local;
 use diwe::config::{
     library_path_in, schemas_dir_in, ActionDefinition, CompletionOptions, Configuration,
-    MarkdownOptions, NoteTemplate, DEFAULT_KEY_DATE_FORMAT,
+    MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
 use diwe::fs::{new_for_path, new_from_hashmap};
@@ -753,6 +753,68 @@ pub struct IweServer {
     config: Configuration,
     index: Arc<Mutex<Option<Bm25Index>>>,
     seen: Arc<Mutex<HashSet<Finding>>>,
+    /// The agent transaction open on this server, if any — see
+    /// [`OpenTransaction`]. A `std` mutex, not tokio's: it is taken from
+    /// the synchronous write paths and never held across an await.
+    open_tx: Arc<std::sync::Mutex<Option<OpenTransaction>>>,
+}
+
+/// An agent transaction (`iwe_tx_begin` … `iwe_tx_commit`/`iwe_tx_abort`).
+/// While one is open every write tool stages its writes here instead of
+/// committing them one at a time: the in-memory graph takes each write
+/// immediately (so the agent's later reads and operations see its own
+/// staged state), disk takes nothing until `iwe_tx_commit`, which
+/// validates the final state as one unit, refuses it whole if it is not
+/// clean or a staged key changed underneath the transaction, and lands it
+/// under the store lock with a single journal record. Abort — explicit,
+/// or forced by a refused commit — reloads the graph from disk, dropping
+/// the staged state.
+struct OpenTransaction {
+    backend: ValidatingTransaction,
+    /// Every staged key's effect, in staging order; collapsed per key
+    /// into the one journal record at commit ([`collapse_effects`]).
+    effects: Vec<diwe::journal::KeyEffect>,
+}
+
+impl OpenTransaction {
+    fn staged_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for effect in &self.effects {
+            if !keys.contains(&effect.key) {
+                keys.push(effect.key.clone());
+            }
+        }
+        keys
+    }
+}
+
+/// One effect per key for a transaction's journal record, from the
+/// sequence of effects its writes staged: a create later updated is a
+/// create; a create later deleted never happened; anything deleted and
+/// re-created is an update; otherwise the last effect stands.
+fn collapse_effects(effects: &[diwe::journal::KeyEffect]) -> Vec<diwe::journal::KeyEffect> {
+    use diwe::journal::Effect;
+    let mut collapsed: Vec<(String, Option<Effect>)> = Vec::new();
+    for effect in effects {
+        match collapsed.iter_mut().find(|(key, _)| *key == effect.key) {
+            None => collapsed.push((effect.key.clone(), Some(effect.effect.clone()))),
+            Some((_, slot)) => {
+                *slot = match (slot.take(), effect.effect.clone()) {
+                    (Some(Effect::Create), Effect::Update) => Some(Effect::Create),
+                    (Some(Effect::Create), Effect::Delete) => None,
+                    (None, Effect::Create) => Some(Effect::Create),
+                    (Some(Effect::Delete), Effect::Create) => Some(Effect::Update),
+                    (_, later) => Some(later),
+                };
+            }
+        }
+    }
+    collapsed
+        .into_iter()
+        .filter_map(|(key, effect)| {
+            effect.map(|effect| diwe::journal::KeyEffect::new(&Key::name(&key), effect))
+        })
+        .collect()
 }
 
 #[tool_router]
@@ -1624,6 +1686,121 @@ impl IweServer {
 
         to_json_result(&ChangesOutput::from(&combined))
     }
+
+    #[tool(
+        description = "Open a transaction: until iwe_tx_commit, every write tool (create, update, delete, rename, extract, inline, attach, query --set, normalize) stages its writes instead of committing them, while your own reads see the staged state. Commit validates the final state as one unit and lands it atomically with one journal record; abort discards it. Use it for multi-document changes that must land together or not at all. Needs `[transactions] validate` set for the store."
+    )]
+    async fn iwe_tx_begin(&self) -> Result<CallToolResult, McpError> {
+        // The graph lock serializes against in-flight writes so a begin
+        // never lands between a tool's stage and its graph mutation.
+        let _graph = self.graph.lock().await;
+        let mut open = self.open_tx.lock().expect("open transaction lock");
+        if let Some(tx) = open.as_ref() {
+            return Err(McpError::invalid_params(
+                format!(
+                    "a transaction is already open with {} staged write(s) ({}); commit or abort it first",
+                    tx.effects.len(),
+                    tx.staged_keys().join(", ")
+                ),
+                None,
+            ));
+        }
+        let Some(mut backend) = self.validating_backend() else {
+            return Err(McpError::invalid_params(
+                "transactions are not enabled for this store: set `[transactions] validate = \"affected-set\"` or `\"full\"` in .iwe/config.toml".to_string(),
+                None,
+            ));
+        };
+        backend
+            .begin()
+            .map_err(|e| McpError::internal_error(format!("transaction failed to begin: {e}"), None))?;
+        let scope = backend.scope();
+        *open = Some(OpenTransaction {
+            backend,
+            effects: Vec::new(),
+        });
+        drop(open);
+
+        #[derive(Serialize)]
+        struct TxBegun {
+            status: &'static str,
+            validate: ValidationScope,
+        }
+        to_json_result(&TxBegun {
+            status: "open",
+            validate: scope,
+        })
+    }
+
+    #[tool(
+        description = "Commit the open transaction: validates the final state of every staged write as one unit (schemas, invariants, checkers, to the store's configured scope), refuses the whole transaction if it is not clean or a staged document changed on disk since it was staged — in which case nothing lands and the staged state is discarded — and otherwise lands every write atomically with a single journal record."
+    )]
+    async fn iwe_tx_commit(&self) -> Result<CallToolResult, McpError> {
+        let graph = self.graph.lock().await;
+        let taken = self.open_tx.lock().expect("open transaction lock").take();
+        let Some(mut tx) = taken else {
+            return Err(McpError::invalid_params(
+                "no transaction is open; call iwe_tx_begin first".to_string(),
+                None,
+            ));
+        };
+        let keys = tx.staged_keys();
+        match tx.backend.commit_or_abort() {
+            Ok(()) => {
+                self.record_journal_commit(collapse_effects(&tx.effects));
+                drop(graph);
+                #[derive(Serialize)]
+                struct TxCommitted {
+                    status: &'static str,
+                    keys: Vec<String>,
+                }
+                to_json_result(&TxCommitted {
+                    status: "committed",
+                    keys,
+                })
+            }
+            Err(message) => {
+                drop(graph);
+                self.reload_graph_from_disk().await;
+                Err(McpError::invalid_params(
+                    format!(
+                        "transaction refused; nothing was written and the staged changes to {} were discarded: {message}",
+                        if keys.is_empty() { "no documents".to_string() } else { keys.join(", ") }
+                    ),
+                    None,
+                ))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Abort the open transaction: discards every staged write and reloads the graph from disk. Nothing is written."
+    )]
+    async fn iwe_tx_abort(&self) -> Result<CallToolResult, McpError> {
+        let taken = {
+            let _graph = self.graph.lock().await;
+            self.open_tx.lock().expect("open transaction lock").take()
+        };
+        let Some(mut tx) = taken else {
+            return Err(McpError::invalid_params(
+                "no transaction is open".to_string(),
+                None,
+            ));
+        };
+        let keys = tx.staged_keys();
+        let _ = tx.backend.abort();
+        self.reload_graph_from_disk().await;
+
+        #[derive(Serialize)]
+        struct TxAborted {
+            status: &'static str,
+            discarded: Vec<String>,
+        }
+        to_json_result(&TxAborted {
+            status: "aborted",
+            discarded: keys,
+        })
+    }
 }
 
 fn build_tree_node(
@@ -1911,6 +2088,7 @@ impl IweServer {
             config: configuration.clone(),
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
+            open_tx: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1933,6 +2111,7 @@ impl IweServer {
             config,
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
+            open_tx: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2088,17 +2267,107 @@ impl IweServer {
     // the write rather than merely being noticed once it already landed).
     fn write_file(&self, key: &Key, content: &str) -> Result<(), String> {
         let existed = self.document_file_exists(key);
-        match self.validating_backend() {
-            None => self.write_file_with(key, content, NoopTransaction::new)?,
-            Some(tx) => self.write_file_validated(key, content, tx)?,
-        }
         let effect = if existed {
             diwe::journal::Effect::Update
         } else {
             diwe::journal::Effect::Create
         };
+        if self.document_path(key).is_some() {
+            let mut open = self.open_tx.lock().expect("open transaction lock");
+            if let Some(tx) = open.as_mut() {
+                // Staged, not committed: permission is judged now (a
+                // refused write leaves the transaction open and
+                // untouched), validation at `iwe_tx_commit`.
+                self.enforce_write_permission(key, content)?;
+                if tx
+                    .backend
+                    .write(TxWrite::Put(key.clone(), content.to_string()))
+                    .is_err()
+                {
+                    return Err(format!("write rejected by transaction backend for '{key}'"));
+                }
+                tx.effects.push(diwe::journal::KeyEffect::new(key, effect));
+                return Ok(());
+            }
+        }
+        match self.validating_backend() {
+            None => self.write_file_with(key, content, NoopTransaction::new)?,
+            Some(tx) => self.write_file_validated(key, content, tx)?,
+        }
         self.record_journal_commit(vec![diwe::journal::KeyEffect::new(key, effect)]);
         Ok(())
+    }
+
+    /// Stages the whole of `changes` on the open transaction, if there is
+    /// one — `Some(result)` — or reports `None` for the caller to commit
+    /// them itself. Permission is judged per key now, as
+    /// [`ValidatingTransaction::apply_changes`] does; a refusal leaves the
+    /// transaction as it was.
+    fn stage_changes(&self, changes: &Changes) -> Option<Result<(), String>> {
+        let root = self.project_path.as_ref().or(self.base_path.as_ref())?;
+        let mut open = self.open_tx.lock().expect("open transaction lock");
+        let tx = open.as_mut()?;
+        let schemas_dir = schemas_dir_in(root);
+        let check = |key: &Key, content: &str, operation: diwe::permissions::WriteOperation| {
+            let prior = self
+                .document_path(key)
+                .and_then(|path| std::fs::read_to_string(path).ok());
+            diwe::permissions::check_write_permission_for_content_in(
+                &self.config,
+                &schemas_dir,
+                key,
+                content,
+                prior.as_deref(),
+                operation,
+            )
+            .map_err(|rejected| rejected.to_string())
+        };
+        for key in &changes.removes {
+            if self.document_file_exists(key) {
+                if let Err(message) = check(key, "", diwe::permissions::WriteOperation::Delete) {
+                    return Some(Err(message));
+                }
+            }
+        }
+        for (key, markdown) in changes.creates.iter().chain(changes.updates.iter()) {
+            if let Err(message) = check(key, markdown, diwe::permissions::WriteOperation::Write) {
+                return Some(Err(message));
+            }
+        }
+        for key in &changes.removes {
+            if tx.backend.write(TxWrite::Remove(key.clone())).is_err() {
+                return Some(Err(format!("write rejected by transaction backend for '{key}'")));
+            }
+        }
+        for (key, markdown) in changes.creates.iter().chain(changes.updates.iter()) {
+            if tx
+                .backend
+                .write(TxWrite::Put(key.clone(), markdown.clone()))
+                .is_err()
+            {
+                return Some(Err(format!("write rejected by transaction backend for '{key}'")));
+            }
+        }
+        tx.effects.extend(diwe::fs::journal_effects_for(changes));
+        Some(Ok(()))
+    }
+
+    /// Replaces the in-memory graph with what is on disk — the move that
+    /// drops an aborted transaction's staged state. The search index is
+    /// rebuilt lazily on the next write.
+    async fn reload_graph_from_disk(&self) {
+        let Some(base_path) = self.base_path.as_ref() else {
+            return;
+        };
+        let state = new_for_path(base_path, self.config.format);
+        let reloaded = Graph::from_state(
+            &state,
+            false,
+            self.config.format_options(),
+            self.config.library.frontmatter_document_title.clone(),
+        );
+        *self.graph.lock().await = reloaded;
+        *self.index.lock().await = None;
     }
 
     /// The validating backend `[transactions] validate` asks for over this
@@ -2254,6 +2523,9 @@ impl IweServer {
     // wire the identical hook, so enforcement is consistent across both
     // binaries without re-implementing it here.
     fn write_changes(&self, changes: &Changes) -> Result<(), String> {
+        if let Some(staged) = self.stage_changes(changes) {
+            return staged;
+        }
         match self.validating_backend() {
             None => self.write_changes_with(changes, NoopTransaction::new),
             Some(tx) => {
