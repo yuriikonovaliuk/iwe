@@ -148,7 +148,7 @@ impl fmt::Display for ValidationFailure {
                     .collect();
                 write!(
                     f,
-                    "{} rejected: refused by the configured write scope",
+                    "WriteScopeDenied: {} rejected: refused by the configured write scope",
                     listed.join(", ")
                 )
             }
