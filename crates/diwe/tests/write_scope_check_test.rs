@@ -32,6 +32,7 @@ use liwe::model::config::Format;
 use liwe::model::Key;
 use liwe::transaction::{CommitError, Transaction, Write};
 
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn key(s: &str) -> Key {
@@ -71,6 +72,26 @@ fn transaction_for(temp: &TempDir, config: Configuration) -> ValidatingTransacti
         config,
         temp.path().join(".iwe").join("schemas"),
     )
+}
+
+/// Mirrors [`transaction_for`] but goes through the production
+/// `for_config()` construction gate — the path the CLI's
+/// `validating_backend` and iwec's MCP backend both take. Tests in this
+/// section assert on the contract `for_config` actually serves, not on
+/// `new`'s default-scope behavior.
+fn backend_for_config(temp: &TempDir, config: Configuration) -> Option<ValidatingTransaction> {
+    let base = temp.path().to_path_buf();
+    ValidatingTransaction::for_config(&config, &base, &base)
+}
+
+/// The schemas dir a `for_config` construction points at — `.iwe/schemas`
+/// under the project root. `for_config` does not require this to exist at
+/// construction time, but the contract requires the store to have an
+/// `.iwe/` so its `commit()` lock-root resolves and the test is exercising
+/// the production path.
+fn ensure_dot_iwe(temp: &TempDir) {
+    let dot_iwe: PathBuf = temp.path().join(".iwe");
+    std::fs::create_dir_all(dot_iwe.join("schemas")).expect("create .iwe/schemas");
 }
 
 // ---------------------------------------------------------------------
@@ -317,5 +338,176 @@ fn write_scope_denied_display_names_the_key_and_says_rejected() {
     assert!(
         message.contains("rejected"),
         "Display message must contain \"rejected\": {message:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// t4-cli-parity: `ValidatingTransaction::for_config` construction gate.
+//
+// The pre-t4 defect was that `for_config` returned `None` whenever
+// `transactions.validate == None`, even if `deny` or `allow` was
+// non-empty — so a store configured for write-scope enforcement only
+// (`deny = ["mind/**"]`, no `validate` key) bypassed the validating
+// backend entirely and committed through `NoopTransaction`, with the
+// scope check never running. `for_config` now constructs a backend
+// whenever validate is non-None OR deny/allow is non-empty.
+//
+// When the only trigger is non-empty deny/allow, the constructed
+// backend's internal `scope` is `ValidationScope::None` so the
+// schema-validation cost at `commit()` is skipped entirely — the scope
+// check is what gates the commit, and no schema work is paid.
+//
+// These tests cover the gate end-to-end: the construction, the scope
+// check's two outcomes, and the skip of schema validation.
+// ---------------------------------------------------------------------
+
+#[test]
+fn for_config_with_deny_only_config_constructs_a_backend_with_none_scope() {
+    let temp = TempDir::new().unwrap();
+    ensure_dot_iwe(&temp);
+
+    // deny non-empty, validate left at its default None: a backend must
+    // still be built — otherwise the scope check never runs and the
+    // milestone's production default (deny-only `[transactions]` blocks)
+    // silently no-ops.
+    let config = config_with_scope(&["mind/**"], &[]);
+    assert_eq!(
+        config.transactions.validate,
+        diwe::config::ValidationScope::None
+    );
+    assert!(!config.transactions.deny.is_empty());
+
+    let backend = backend_for_config(&temp, config)
+        .expect("for_config must build a backend for a deny-only config");
+
+    // Constructed solely for write-scope enforcement: internal `scope`
+    // is None so the schema-validation cost at commit is skipped.
+    assert_eq!(
+        backend.scope(),
+        diwe::config::ValidationScope::None,
+        "deny/allow-only construction must keep scope None so commit() skips validation"
+    );
+}
+
+#[test]
+fn for_config_with_default_unrestricted_config_still_returns_none() {
+    let temp = TempDir::new().unwrap();
+    ensure_dot_iwe(&temp);
+
+    // No-op behavior: validate=None, deny=[], allow=[] — the pre-t4
+    // "returns None" case is preserved exactly for the unrestricted
+    // default, so a store that opted into nothing stays on
+    // NoopTransaction and costs nothing.
+    let config = config_with_scope(&[], &[]);
+    assert_eq!(
+        config.transactions.validate,
+        diwe::config::ValidationScope::None
+    );
+    assert!(config.transactions.deny.is_empty());
+    assert!(config.transactions.allow.is_empty());
+
+    assert!(
+        backend_for_config(&temp, config).is_none(),
+        "unrestricted default config must continue to return None from for_config"
+    );
+}
+
+#[test]
+fn for_config_with_allow_only_config_constructs_a_backend_with_none_scope() {
+    let temp = TempDir::new().unwrap();
+    ensure_dot_iwe(&temp);
+
+    let config = config_with_scope(&[], &["mind/**"]);
+    let backend = backend_for_config(&temp, config)
+        .expect("for_config must build a backend for an allow-only config");
+    assert_eq!(backend.scope(), diwe::config::ValidationScope::None);
+}
+
+/// The deny/allow-only path goes end-to-end: a denied commit is
+/// refused by the scope check (the reason for the construction gate),
+/// a permitted commit lands — and the schema-validation cost is
+/// genuinely skipped at `scope == None`, never the refusal reason.
+#[test]
+fn for_config_deny_only_backend_enforces_scope_and_skips_schema_validation() {
+    let temp = TempDir::new().unwrap();
+    ensure_dot_iwe(&temp);
+
+    // Schema that would refuse a note with no links: a write to a
+    // permitted key whose content lacks the required link would
+    // trigger `Violations` at scope `AffectedSet`. We use it here to
+    // prove the validation is skipped at `scope == None` — the
+    // permitted commit must land, not be refused with Violations,
+    // even though the content would otherwise violate this schema.
+    fs::write(
+        temp.path().join(".iwe/schemas/note.yaml"),
+        "links:\n  - min: 1\n",
+    )
+    .expect("write schema");
+
+    let config = config_with_scope(&["mind/**"], &[]);
+    let mut backend = backend_for_config(&temp, config).expect("for_config");
+
+    // Denied commit, content that would also violate the schema — the
+    // scope check must fire first and refuse with WriteScopeDenied,
+    // not Violations.
+    backend.begin().unwrap();
+    backend
+        .write(Write::Put(
+            key("mind/a"),
+            "# A\n\nno links here\n".to_string(),
+        ))
+        .unwrap();
+    let denied = backend.commit();
+    assert!(
+        matches!(
+            &denied,
+            Err(CommitError::Other(ValidationFailure::WriteScopeDenied(keys)))
+                if keys.contains(&key("mind/a"))
+        ),
+        "denied commit must be refused with WriteScopeDenied naming the key: {denied:?}"
+    );
+
+    // The scope check fired, not schema validation: the refused
+    // reason must be WriteScopeDenied, never Violations.
+    assert!(
+        !matches!(
+            &denied,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ),
+        "the schema-validation cost must be skipped at scope None — the refusal must \
+         come from the scope check, not from a schema Violations run"
+    );
+
+    // Permitted commit, content that WOULD violate the schema — the
+    // schema validation is skipped at scope None, so the commit must
+    // land, never be refused with Violations. This is the smoking-gun
+    // for the gate: had validation run (scope = AffectedSet), this
+    // would have failed with Violations; at scope = None it lands.
+    let mut backend2 = backend_for_config(&temp, config_with_scope(&["mind/**"], &[]))
+        .expect("for_config for second commit");
+    backend2.begin().unwrap();
+    backend2
+        .write(Write::Put(
+            key("notes/a"),
+            "# A\n\nno links here\n".to_string(),
+        ))
+        .unwrap();
+    let permitted = backend2.commit();
+    assert!(
+        matches!(&permitted, Ok(())),
+        "a permitted commit must succeed at scope None — schema validation is skipped: \
+         {permitted:?}"
+    );
+    assert!(
+        !matches!(
+            &permitted,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ),
+        "permitted commit must not be refused with Violations at scope None: {permitted:?}"
+    );
+    assert_eq!(
+        on_disk(temp.path(), "notes/a").as_deref(),
+        Some("# A\n\nno links here\n"),
+        "permitted commit content must land on disk — schema validation cost was skipped"
     );
 }
