@@ -116,17 +116,30 @@ fn env_allow_only_discards_file_deny_entirely() {
 // ---------------------------------------------------------------------
 // Test (c): both env vars set non-empty in the same process env ->
 // load_config() fails fast, regardless of file contents.
+//
+// Fixture note: the file's own deny/allow start EMPTY here (no
+// `[transactions]` section at all), so the only way either list can end
+// up non-empty is via the env overlay. A prior version of this fixture
+// started the file with both deny and allow already non-empty before
+// applying env overrides, which could not distinguish "fail-fast fires
+// because the *env-driven final resolved state* has both lists
+// non-empty" (the actual contract rule) from a weaker/wrong
+// implementation that fails fast merely because the file itself already
+// had both lists populated, independent of any env involvement. Starting
+// from an empty-file fixture and populating both lists purely from env
+// makes this test actually pin the env-triggered fail-fast path.
 // ---------------------------------------------------------------------
 
 #[test]
 fn both_env_vars_set_non_empty_fails_fast_regardless_of_file_contents() {
-    let file = "version = 3\n\n[transactions]\ndeny = [\"a/**\"]\nallow = [\"b/**\"]\n";
+    let file = "version = 3\n";
 
     let result = load_with(file, Some("x/**"), Some("y/**"));
 
     assert!(
         result.is_err(),
-        "both env vars non-empty must fail fast (exact variant TBD, see module docs): {result:?}"
+        "both env vars non-empty (file's own deny/allow start empty) must fail fast \
+         (exact variant TBD, see module docs): {result:?}"
     );
 }
 
