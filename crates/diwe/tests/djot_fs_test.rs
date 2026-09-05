@@ -29,6 +29,7 @@ fn writes_dj_extension() {
         Format::Djot,
         |_key, _content, _prior_content| Ok(()),
         None,
+        None,
     )
     .unwrap();
 

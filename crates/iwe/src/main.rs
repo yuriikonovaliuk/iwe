@@ -2836,7 +2836,14 @@ fn squash_command(args: Squash) {
 // `[transactions] validate`, so (like `write_document`/
 // `write_single_document`/`apply_changes`'s own `None` branches) it needs
 // its own explicit acquire of the store-wide commit lock rather than
-// inheriting one from a validating backend it never uses.
+// inheriting one from a validating backend it never uses. The actual
+// fencing check against that guard does not run here, immediately after
+// acquisition (or anywhere before the store write is entered) — it is
+// passed down as `Some(&guard)` into `diwe::fs::write_store_at_path`
+// instead, which re-checks it immediately before each document's real
+// filesystem write, so no reclaim window opens between the check and the
+// write it guards (same pattern as `apply_changes`/`diwe::fs::apply_changes`
+// after 5-iwe-t3's fencing relocation).
 fn write_graph(graph: Graph, configuration: &Configuration) {
     let guard = match acquire_cli_commit_lock() {
         Ok(guard) => guard,
@@ -2845,10 +2852,6 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
             std::process::exit(1);
         }
     };
-    if let Err(error) = guard.check_fencing() {
-        eprintln!("Error: write refused: {error}");
-        std::process::exit(1);
-    }
     diwe::fs::write_store_at_path(
         &graph.export(),
         &get_library_path(configuration),
@@ -2863,6 +2866,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
             )
         },
         get_journal_path(configuration).as_deref(),
+        Some(&guard),
     )
     .expect("Failed to write graph");
     drop(guard);

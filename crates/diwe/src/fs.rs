@@ -191,12 +191,25 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
 /// wrote, not one record per document. Nothing is appended if this
 /// function returns an error partway through, or if `journal_path` is
 /// `None` (the default).
+///
+/// `lock_guard`: `Some(guard)` when this whole-store rewrite lands under
+/// `acquire_cli_commit_lock`'s hold (`crates/iwe/src/main.rs`'s
+/// `write_graph`, `iwe normalize`'s bare `--key` branch) — `check_fencing`
+/// is re-checked against it immediately before each document's actual
+/// filesystem write down in `write_store_at_path_with`, closing the same
+/// reclaim window `apply_changes_with`'s own per-write checks close
+/// (5-iwe-t3 / design-5): this path never goes through
+/// `ValidatingTransaction`'s `commit_locked` fence, so each write needs its
+/// own guard against landing after its lock was reclaimed. `None` for every
+/// other caller (T6's tests, driving a stub `Transaction` that never went
+/// through that lock in the first place).
 pub fn write_store_at_path(
     store: &State,
     to: &Path,
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
     journal_path: Option<&Path>,
+    lock_guard: Option<&CommitLockGuard>,
 ) -> std::io::Result<()> {
     // Snapshotted before the writes land, since every key in `store` will
     // exist on disk by the time `write_store_at_path_with` returns —
@@ -208,7 +221,7 @@ pub fn write_store_at_path(
         .map(|(key, _)| (key, to.join(format!("{}.{}", key, format.extension())).exists()))
         .collect();
 
-    write_store_at_path_with(store, to, format, check, NoopTransaction::new)?;
+    write_store_at_path_with(store, to, format, check, lock_guard, NoopTransaction::new)?;
 
     let effects = store
         .iter()
@@ -246,11 +259,18 @@ pub fn write_store_at_path(
 /// predicate fed only the outgoing content can't enforce a rule about a
 /// transition (e.g. "frozen, unless this write's sole effect is lifting
 /// freeze"), since it never sees what the document looked like before.
+///
+/// `lock_guard` is threaded straight through from
+/// [`write_store_at_path`] — `check_fencing` is re-checked against it
+/// immediately before each document's actual filesystem write, per-key
+/// (this function batches every document of a whole-store rewrite into one
+/// call, so each write needs its own check, not one for the whole batch).
 pub fn write_store_at_path_with<TX: Transaction>(
     store: &State,
     to: &Path,
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
+    lock_guard: Option<&CommitLockGuard>,
     mut new_tx: impl FnMut() -> TX,
 ) -> std::io::Result<()> {
     for (key, content) in store.iter() {
@@ -276,6 +296,18 @@ pub fn write_store_at_path_with<TX: Transaction>(
         if tx.commit().is_err() {
             let _ = tx.abort();
             return Err(transaction_backend_failed(&doc_key));
+        }
+        // Fencing check, immediately before the irreversible step (the
+        // actual filesystem write below): mirrors the checks `apply_changes_with`
+        // runs before each of its on-disk steps — a whole-store rewrite
+        // never goes through `ValidatingTransaction`'s own `commit_locked`
+        // fence, so each document's write needs its own guard against a
+        // slow holder's write landing after its lock was reclaimed
+        // (5-iwe-t3 / design-5). One check for the whole batch would leave
+        // every later key's write unguarded by anything closer than the
+        // first key's check.
+        if let Some(guard) = lock_guard {
+            guard.check_fencing().map_err(fencing_refused)?;
         }
         if let Err(e) = write_file(key, content, to, format) {
             return Err(e);
@@ -885,7 +917,7 @@ mod tests {
             store.insert("a".to_string(), "# A\n".to_string());
             let log = TransactionLog::new();
 
-            let result = write_store_at_path_with(&store, dir.path(), Format::Markdown, allow, {
+            let result = write_store_at_path_with(&store, dir.path(), Format::Markdown, allow, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });

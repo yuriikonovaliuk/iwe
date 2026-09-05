@@ -1,10 +1,12 @@
 //! Placement test for
 //! `efforts/knowledge-compositor/m6-b-cutover-preconditions/t5-fencing-check-before-write/contract`,
-//! covering the two `crates/iwe/src` sites the contract names
-//! (`new.rs`'s `write_document`/`write_document_with`, and `main.rs`'s
-//! `write_single_document`/`write_single_document_with`). The sibling
-//! site in `crates/diwe/src/fs.rs` has its own placement test in that
-//! crate's `tests/fencing_placement_test.rs`.
+//! covering the `crates/iwe/src` sites the contract names (`new.rs`'s
+//! `write_document`/`write_document_with`, `main.rs`'s
+//! `write_single_document`/`write_single_document_with`, and `main.rs`'s
+//! `write_graph` for 5-iwe's whole-store normalize path). The sibling
+//! sites in `crates/diwe/src/fs.rs` (`apply_changes_with`,
+//! `write_store_at_path_with`) have placement tests in that crate's
+//! `tests/fencing_placement_test.rs`.
 //!
 //! # Why a source-inspection test, not a race
 //!
@@ -201,5 +203,43 @@ fn main_rs_write_single_document_check_fencing_runs_immediately_before_the_write
         &body,
         "std::fs::write(path, content)",
         "crates/iwe/src/main.rs::write_single_document_with",
+    );
+}
+
+/// 5-iwe's `write_graph` site (`crates/iwe/src/main.rs`, `iwe normalize`'s
+/// bare whole-store branch): `check_fencing()` must not run anywhere in
+/// `write_graph` before the store write is entered — i.e. before
+/// `graph.export()` and `diwe::fs::write_store_at_path` — but must instead
+/// be handed down into the store write as `Some(&guard)` and re-checked
+/// immediately before each document's actual disk write inside
+/// `crates/diwe/src/fs.rs::write_store_at_path_with` (whose own placement
+/// test in `crates/diwe/tests/fencing_placement_test.rs` asserts that
+/// per-write half). This fails if the check is moved back into this
+/// function ahead of `graph.export()` — the pre-fix placement that
+/// reopened a reclaim window between the check and the writes it guards.
+#[test]
+fn main_rs_write_graph_does_not_check_fencing_before_the_store_write() {
+    let source = read_source("src/main.rs");
+    let body = extract_fn_body(&source, "write_graph");
+    let write_at = body.find("write_store_at_path(").unwrap_or_else(|| {
+        panic!(
+            "crates/iwe/src/main.rs::write_graph: could not find the `write_store_at_path(` call \
+             -- has this function's write path been renamed or removed?"
+        )
+    });
+    assert!(
+        !body[..write_at].contains("check_fencing()"),
+        "crates/iwe/src/main.rs::write_graph: `check_fencing()` runs before `write_store_at_path(` \
+         has even been entered, i.e. before `graph.export()` -- this is the pre-fix placement that \
+         leaves a reclaim window between the check and the writes it guards. The check must instead \
+         live immediately before each actual disk write inside `write_store_at_path_with` (see \
+         crates/diwe/tests/fencing_placement_test.rs); this function's only job is to hand the \
+         guard down as `Some(&guard)`."
+    );
+    assert!(
+        body[write_at + "write_store_at_path(".len()..].contains("Some(&guard)"),
+        "crates/iwe/src/main.rs::write_graph: the commit-lock guard is not handed down into \
+         `diwe::fs::write_store_at_path` -- without `Some(&guard)` the per-write fence checks \
+         inside `write_store_at_path_with` never run at all."
     );
 }

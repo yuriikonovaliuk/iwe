@@ -131,7 +131,7 @@ fn write_store_at_path_begins_and_commits_once_per_document() {
     store.insert("b".to_string(), "# B\n".to_string());
 
     let log = TransactionLog::new();
-    write_store_at_path_with(&store, dir.path(), Format::Markdown, |_, _, _| Ok(()), {
+    write_store_at_path_with(&store, dir.path(), Format::Markdown, |_, _, _| Ok(()), None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     })

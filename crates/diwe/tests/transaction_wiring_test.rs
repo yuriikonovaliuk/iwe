@@ -65,7 +65,7 @@ fn write_store_at_path_with_is_reachable_and_drivable_from_outside_the_crate() {
     store.insert("note".to_string(), "# Note\n".to_string());
     let log = TransactionLog::new();
 
-    let result = write_store_at_path_with(&store, dir.path(), Format::Markdown, allow, {
+    let result = write_store_at_path_with(&store, dir.path(), Format::Markdown, allow, None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });

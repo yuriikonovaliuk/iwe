@@ -1,7 +1,8 @@
 //! Placement test for
 //! `efforts/knowledge-compositor/m6-b-cutover-preconditions/t5-fencing-check-before-write/contract`,
-//! covering `crates/diwe/src/fs.rs`'s `apply_changes_with` -- the third
-//! of the three sites the contract names. See
+//! covering `crates/diwe/src/fs.rs`'s `apply_changes_with` and
+//! `write_store_at_path_with` — the diwe-side halves of two of the sites
+//! the contract (and its sibling task 5-iwe) names. See
 //! `crates/iwe/tests/fencing_placement_test.rs` for the full rationale
 //! (why this is a source-inspection test rather than a race, and what it
 //! deliberately does not claim to prove) and the sibling test suite,
@@ -144,5 +145,31 @@ fn apply_changes_with_check_fencing_runs_immediately_before_each_write() {
         "fs::write(&file_path, markdown)",
         1,
         "crates/diwe/src/fs.rs::apply_changes_with (update)",
+    );
+}
+
+/// 5-iwe's `write_store_at_path_with` half of the whole-store normalize
+/// site (the diwe-side counterpart to `crates/iwe/src/main.rs`'s
+/// `write_graph`, which passes its guard down as `Some(&guard)`):
+/// `check_fencing()` must sit immediately before that function's actual
+/// filesystem write (`write_file(...)`) -- after that same document's
+/// `tx.commit()`, with nothing schedulable in between, per-key. The
+/// "after graph.export() and any internal preparation" guarantee of the
+/// task's acceptance criterion holds from the outside (`graph.export()`
+/// runs in the iwe crate before `write_store_at_path` is entered); this
+/// per-write check is the closest thing to the disk write the whole call
+/// chain has. Fails if the check is absent here (e.g. moved back into
+/// `write_graph`, before `graph.export()`), since then no `check_fencing()`
+/// call precedes any of these writes at all.
+#[test]
+fn write_store_at_path_with_check_fencing_runs_immediately_before_the_write() {
+    let source = read_source();
+    let body = extract_fn_body(&source, "write_store_at_path_with");
+
+    assert_check_fencing_guards_this_write(
+        &body,
+        "write_file(key, content, to, format)",
+        0,
+        "crates/diwe/src/fs.rs::write_store_at_path_with",
     );
 }
