@@ -304,7 +304,13 @@ pub fn write_document(
     // `IfExists`-driven overwrite modes can target an existing path.
     let existed = prepared.path.exists();
     let result = match validating_backend(configuration) {
-        None => write_document_with(configuration, prepared, NoopTransaction::new),
+        None => {
+            let guard = acquire_cli_commit_lock()?;
+            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
+            let result = write_document_with(configuration, prepared, NoopTransaction::new);
+            drop(guard);
+            result
+        }
         Some(tx) => write_document_validated(configuration, prepared, tx),
     };
     if result.is_ok() {
@@ -322,6 +328,62 @@ pub fn write_document(
         );
     }
     result
+}
+
+/// Acquires the store-wide commit lock for a CLI write that will land
+/// through [`NoopTransaction`] rather than [`ValidatingTransaction`] —
+/// i.e. every write whose store has no `[transactions] validate` backend
+/// configured (`validating_backend` returns `None`).
+///
+/// [`ValidatingTransaction::commit`] already acquires this same lock
+/// (`liwe::write_lock::acquire_commit_lock`) for its own commit-attempt
+/// window; a `NoopTransaction` write never goes through that `commit`,
+/// so without this it would land under no lock at all — 5-iwe-t3 widens
+/// the lock's coverage to that path too, closing the one gap the
+/// pre-existing `StoreLock` (itself only ever engaged by
+/// `ValidatingTransaction`) already had. The two paths are mutually
+/// exclusive per `validating_backend`'s own `None`/`Some` split, so a
+/// single process never holds this lock twice at once.
+///
+/// Called at the start of the commit attempt — right before the
+/// `NoopTransaction` write function it guards, never at any earlier
+/// staging/editing step (there is none for a one-shot CLI write). On
+/// [`liwe::write_lock::CommitLockError::Timeout`] this refuses
+/// immediately with a deterministic message rather than blocking
+/// indefinitely; callers must still call
+/// [`liwe::write_lock::CommitLockGuard::check_fencing`] themselves,
+/// immediately before their own irreversible apply step, and hold the
+/// returned guard for exactly that window, dropping it on every exit
+/// path (success, permission refusal, or fencing refusal alike).
+pub fn acquire_cli_commit_lock() -> Result<liwe::write_lock::CommitLockGuard, String> {
+    let root = std::env::current_dir()
+        .map_err(|e| format!("write refused: could not resolve the project root: {e}"))?;
+    let guard = liwe::write_lock::acquire_commit_lock(&root)
+        .map_err(|error| format!("write refused: {error}"))?;
+    widen_fencing_window_for_test();
+    Ok(guard)
+}
+
+/// Test-only synchronization point, never engaged in ordinary operation:
+/// a real commit attempt's acquire-to-apply window is microseconds wide
+/// (this CLI's own writes do no meaningfully slow work between the two),
+/// far too narrow for an external test process to land a concurrent
+/// reclaim inside it deterministically. When
+/// `IWE_TEST_LOCK_FENCING_DELAY_MS` names a positive millisecond count,
+/// sleeps that long here — right after the lock is acquired and before
+/// the caller checks fencing — so a test can widen that window on
+/// demand and prove the reclaim is actually caught, rather than winning
+/// a race some fraction of the time. The variable is never set outside
+/// a test harness that opts in, so this reads one environment variable
+/// (a no-op absent it) on every other call.
+fn widen_fencing_window_for_test() {
+    if let Ok(millis) = std::env::var("IWE_TEST_LOCK_FENCING_DELAY_MS") {
+        if let Ok(millis) = millis.parse::<u64>() {
+            if millis > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(millis));
+            }
+        }
+    }
 }
 
 /// The store the CLI writes — `library.path` under the working directory,

@@ -41,7 +41,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -50,6 +50,7 @@ use liwe::model::config::Format;
 use liwe::model::{Key, State};
 use liwe::operations::Changes;
 use liwe::transaction::{CommitError, Transaction, Write, WriteRejected};
+use liwe::write_lock::{acquire_commit_lock, CommitLockError, CommitLockGuard};
 
 use crate::config::Configuration;
 pub use crate::config::ValidationScope;
@@ -61,7 +62,11 @@ use crate::schema::{
 };
 use liwe::schema::Violation;
 
-/// The name of the store-wide commit lock, inside the `.iwe` directory.
+/// The name of the store-wide commit lock, inside the `.iwe` directory —
+/// kept for the on-disk path it names, which is exactly
+/// [`liwe::write_lock::DEFAULT_LOCK_PATH`]'s tail component; the lock
+/// itself is [`liwe::write_lock::acquire_commit_lock`] now, not a raw
+/// `flock` on this file (5-iwe-t3).
 pub const WRITE_LOCK_FILE: &str = "write.lock";
 
 /// Why a [`ValidatingTransaction::commit`] failed, beyond the
@@ -82,6 +87,18 @@ pub enum ValidationFailure {
     /// A filesystem failure while locking, reading the current on-disk
     /// state, or writing the transaction's changes.
     Io(std::io::Error),
+    /// The store-wide commit lock was held by a live holder for the whole
+    /// acquire-timeout window. Refused immediately, deterministically —
+    /// this commit attempt never blocks indefinitely. Nothing was
+    /// applied.
+    LockTimeout,
+    /// This commit attempt's hold on the commit lock was superseded — a
+    /// later acquire (a reclaim of what looked, from the outside, like a
+    /// stale lock) took over — between acquiring it and the write's
+    /// irreversible apply step. Caught by
+    /// [`liwe::write_lock::CommitLockGuard::check_fencing`] immediately
+    /// before that step, so nothing was applied.
+    LockStale,
 }
 
 /// The name this failure type had while the backend only knew the
@@ -110,6 +127,14 @@ impl fmt::Display for ValidationFailure {
                 )
             }
             Self::Io(error) => write!(f, "{error}"),
+            Self::LockTimeout => write!(
+                f,
+                "write refused: timed out waiting to acquire the store's commit lock"
+            ),
+            Self::LockStale => write!(
+                f,
+                "write refused: commit lock hold was superseded by a later acquire; nothing was applied"
+            ),
         }
     }
 }
@@ -149,36 +174,23 @@ fn digest(content: &str) -> u64 {
     hasher.finish()
 }
 
-/// An exclusive advisory lock on `path`, released on drop.
-struct StoreLock(#[allow(dead_code)] File);
-
-impl StoreLock {
-    fn acquire(path: &Path) -> std::io::Result<Self> {
-        let file = File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            // SAFETY: flock on a file descriptor this process owns.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error());
+/// Test-only synchronization point, never engaged in ordinary operation:
+/// widens the gap between acquiring the commit lock and checking its
+/// fencing, which for most stores is otherwise microseconds wide — too
+/// narrow for an external test to land a concurrent reclaim inside it
+/// deterministically. When `IWE_TEST_LOCK_FENCING_DELAY_MS` names a
+/// positive millisecond count, sleeps that long; the variable is never
+/// set outside a test harness that opts in, so this costs one
+/// environment lookup per commit attempt otherwise. Mirrors
+/// `iwe::new::widen_fencing_window_for_test`, which does the same for
+/// the CLI's `NoopTransaction` writes — this crate does not depend on
+/// `iwe`, so the two copies stay independent rather than sharing one.
+fn widen_fencing_window_for_test() {
+    if let Ok(millis) = std::env::var("IWE_TEST_LOCK_FENCING_DELAY_MS") {
+        if let Ok(millis) = millis.parse::<u64>() {
+            if millis > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(millis));
             }
-        }
-        Ok(Self(file))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: releasing the lock this struct acquired; the descriptor
-        // closes right after.
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
@@ -352,11 +364,16 @@ impl ValidatingTransaction {
         fs::read_to_string(self.file_path(key)).ok()
     }
 
-    /// Where the store-wide commit lock lives: next to the schemas, in
-    /// `.iwe`. `None` when the schemas directory has no parent to lock in.
-    fn lock_path(&self) -> Option<PathBuf> {
-        let dir = self.schemas_dir.parent()?;
-        dir.is_dir().then(|| dir.join(WRITE_LOCK_FILE))
+    /// The repo root [`liwe::write_lock::acquire_commit_lock`] locks
+    /// under — the directory containing the `.iwe` the schemas live in,
+    /// which is also where [`liwe::write_lock::DEFAULT_LOCK_PATH`]
+    /// (`.iwe/write.lock`) resolves to, matching [`WRITE_LOCK_FILE`]'s
+    /// on-disk location exactly (no migration for an existing store).
+    /// `None` when the schemas directory has no `.iwe` parent to lock in.
+    fn lock_root(&self) -> Option<PathBuf> {
+        let dot_iwe = self.schemas_dir.parent()?;
+        let root = dot_iwe.parent()?;
+        dot_iwe.is_dir().then(|| root.to_path_buf())
     }
 
     /// The state that would result from applying every pending write on
@@ -598,7 +615,7 @@ impl ValidatingTransaction {
         })
     }
 
-    fn commit_locked(&mut self) -> Result<(), ValidationFailure> {
+    fn commit_locked(&mut self, guard: Option<&CommitLockGuard>) -> Result<(), ValidationFailure> {
         let conflicts = self.conflicts();
         if !conflicts.is_empty() {
             return Err(ValidationFailure::Conflict(conflicts));
@@ -606,6 +623,21 @@ impl ValidatingTransaction {
 
         let touched = self.touched_keys();
         self.validate_final_state(&touched)?;
+
+        // Fencing check, immediately before the irreversible step (the
+        // on-disk apply below): if this hold has been superseded by a
+        // later acquire since we took it — most likely a reclaim of what
+        // looked, from the outside, like a stale lock — refuse rather
+        // than risk a slow holder's write landing after another writer
+        // already took over (5-iwe-t3 / design-5's split-brain guard).
+        if let Some(guard) = guard {
+            match guard.check_fencing() {
+                Ok(()) => {}
+                Err(CommitLockError::Stale) => return Err(ValidationFailure::LockStale),
+                Err(CommitLockError::Timeout) => return Err(ValidationFailure::LockTimeout),
+                Err(CommitLockError::Io(error)) => return Err(ValidationFailure::Io(error)),
+            }
+        }
 
         let prior: BTreeMap<Key, Option<String>> = touched
             .iter()
@@ -657,15 +689,35 @@ impl Transaction for ValidatingTransaction {
             return Ok(());
         }
 
-        let lock = match self.lock_path() {
-            Some(path) => match StoreLock::acquire(&path) {
-                Ok(lock) => Some(lock),
-                Err(error) => return Err(CommitError::Other(ValidationFailure::Io(error))),
+        // Acquired here, at the very start of the commit attempt — never
+        // during `write()`/staging — and held across conflict detection,
+        // `validate_final_state`, apply and journal-append, released on
+        // every exit below (the `drop(guard)` runs regardless of which
+        // arm `result` took).
+        let guard = match self.lock_root() {
+            Some(root) => match acquire_commit_lock(&root) {
+                Ok(guard) => Some(guard),
+                Err(CommitLockError::Timeout) => {
+                    return Err(CommitError::Other(ValidationFailure::LockTimeout));
+                }
+                Err(CommitLockError::Stale) => {
+                    // Never returned by acquisition itself — only by
+                    // `check_fencing` on an already-held guard — but
+                    // matched here so this stays exhaustive if that ever
+                    // changes.
+                    return Err(CommitError::Other(ValidationFailure::LockStale));
+                }
+                Err(CommitLockError::Io(error)) => {
+                    return Err(CommitError::Other(ValidationFailure::Io(error)));
+                }
             },
             None => None,
         };
-        let result = self.commit_locked();
-        drop(lock);
+        if guard.is_some() {
+            widen_fencing_window_for_test();
+        }
+        let result = self.commit_locked(guard.as_ref());
+        drop(guard);
 
         match result {
             Ok(()) => {
@@ -690,6 +742,7 @@ mod tests {
     use super::*;
 
     use std::fs::{create_dir_all, read_to_string, write};
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
@@ -1189,5 +1242,115 @@ print(json.dumps(out))'"#
         ))
         .unwrap();
         assert!(tx.commit().is_ok());
+    }
+
+    /// 5-iwe-t3: every CLI write funnels through this backend's `commit()`
+    /// (see `iwe/src/new.rs::validating_backend`, `iwe/src/main.rs`'s
+    /// `apply_changes`/`write_single_document_with`), which now acquires
+    /// `liwe::write_lock::acquire_commit_lock` at the start of the
+    /// attempt. A live, heartbeating holder that never releases forces
+    /// the acquire past its timeout: the commit is refused
+    /// deterministically, in bounded time, and nothing lands on disk.
+    #[test]
+    fn commit_times_out_when_a_live_holder_keeps_the_lock() {
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 0\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+
+        // A live, correctly heartbeating holder of the exact lock
+        // `commit()` will try to acquire (same repo root, same
+        // `liwe::write_lock::DEFAULT_LOCK_PATH`).
+        let holder = liwe::write_lock::acquire_commit_lock(temp.path())
+            .expect("test holder must acquire the lock first");
+
+        let config = config_with(&[("note", "notes/**")]);
+        let mut tx = transaction_for(&temp, config);
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let result = tx.commit();
+        let elapsed = start.elapsed();
+
+        drop(holder);
+
+        match &result {
+            Err(CommitError::Other(ValidationFailure::LockTimeout)) => {}
+            other => panic!("expected LockTimeout, got {other:?}"),
+        }
+        assert!(
+            !temp.path().join("notes/a.md").exists(),
+            "a timed-out commit attempt must not have created the file"
+        );
+        // Bounded: never hangs past a small multiple of the module's own
+        // acquire timeout (3s as of 5-iwe-t2).
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "commit() must refuse in bounded time rather than block indefinitely, took {elapsed:?}"
+        );
+    }
+
+    /// 5-iwe-t3: `check_fencing()` runs immediately before the irreversible
+    /// on-disk apply (`commit_locked`, between `validate_final_state` and
+    /// `apply_pending`). This drives `commit_locked` directly with a guard
+    /// that a concurrent writer has already reclaimed out from under —
+    /// standing in for a reclaim landing between `commit()`'s own acquire
+    /// and its apply step — and proves the write is caught before it
+    /// touches disk: the file's content is byte-for-byte identical before
+    /// and after the refused attempt.
+    #[test]
+    fn commit_locked_refuses_when_the_lock_is_reclaimed_before_apply_leaving_disk_untouched() {
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 0\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+        write(temp.path().join("notes/a.md"), "# A\n").unwrap();
+
+        let config = config_with(&[("note", "notes/**")]);
+        let mut tx = transaction_for(&temp, config);
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A, mine\n".to_string(),
+        ))
+        .unwrap();
+
+        // The guard `commit()` would be holding for this attempt's
+        // window, acquired the same way `commit()` acquires its own.
+        let guard = liwe::write_lock::acquire_commit_lock(temp.path())
+            .expect("test guard must acquire the lock first");
+
+        // A concurrent writer reclaims the same on-disk lock mid-window:
+        // a second, independently configured `iwe_lock::FileLock` at the
+        // identical path, whose `stale_after` treats any gap since the
+        // last heartbeat as reclaimable. A well-configured acquirer never
+        // does this (`stale_after` must exceed `heartbeat_interval` by a
+        // safety margin — `iwe_lock`'s own documented invariant); this
+        // reclaimer deliberately violates that margin to force,
+        // deterministically, exactly the race `check_fencing` exists to
+        // catch, rather than waiting out real staleness timing.
+        let _reclaimer = iwe_lock::FileLock::new(iwe_lock::LockConfig {
+            path: temp.path().join(".iwe").join(WRITE_LOCK_FILE),
+            heartbeat_interval: Duration::from_millis(1),
+            stale_after: Duration::from_nanos(1),
+            acquire_timeout: Duration::from_secs(1),
+        })
+        .acquire()
+        .expect("reclaim must succeed: the held generation is already older than 1ns");
+
+        let before = read_to_string(temp.path().join("notes/a.md")).unwrap();
+        let result = tx.commit_locked(Some(&guard));
+        let after = read_to_string(temp.path().join("notes/a.md")).unwrap();
+
+        match &result {
+            Err(ValidationFailure::LockStale) => {}
+            other => panic!("expected LockStale, got {other:?}"),
+        }
+        assert_eq!(
+            before, after,
+            "fencing must catch the reclaim before the irreversible apply step: \
+             disk content must be identical before and after the refused attempt"
+        );
+        assert_eq!(after, "# A\n", "the pre-existing content must survive unmodified");
     }
 }

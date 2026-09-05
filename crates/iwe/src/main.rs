@@ -33,9 +33,10 @@ use iwe::internal::claude::{
     EnableOptions, SessionOptions, StageOptions,
 };
 use iwe::new::{
-    normalize_content, read_stdin, read_stdin_if_available, validating_backend, write_document,
-    ContentOptions, CreateOptions, DocumentCreator, IfExists, PreparedDocument, Variables,
-    BODY_VARIABLE, LEGACY_BODY_VARIABLE, RESERVED_VARIABLES, TITLE_VARIABLE,
+    acquire_cli_commit_lock, normalize_content, read_stdin, read_stdin_if_available,
+    validating_backend, write_document, ContentOptions, CreateOptions, DocumentCreator, IfExists,
+    PreparedDocument, Variables, BODY_VARIABLE, LEGACY_BODY_VARIABLE, RESERVED_VARIABLES,
+    TITLE_VARIABLE,
 };
 use iwe::projection_args::{parse_projection_extend, parse_projection_replace};
 use iwe::render::{FindBlockRenderer, RetrieveRenderer};
@@ -2828,7 +2829,26 @@ fn squash_command(args: Squash) {
     print!("{}", patch.export_key(&args.key.into()).unwrap_or_default())
 }
 
+// `normalize_command`'s bare (no `--key`) form lands its whole-store
+// rewrite through `diwe::fs::write_store_at_path`, always via
+// `NoopTransaction` — this call site never goes through
+// `validating_backend`/`ValidatingTransaction` regardless of
+// `[transactions] validate`, so (like `write_document`/
+// `write_single_document`/`apply_changes`'s own `None` branches) it needs
+// its own explicit acquire of the store-wide commit lock rather than
+// inheriting one from a validating backend it never uses.
 fn write_graph(graph: Graph, configuration: &Configuration) {
+    let guard = match acquire_cli_commit_lock() {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("Error: {message}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = guard.check_fencing() {
+        eprintln!("Error: write refused: {error}");
+        std::process::exit(1);
+    }
     diwe::fs::write_store_at_path(
         &graph.export(),
         &get_library_path(configuration),
@@ -2844,7 +2864,8 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
         },
         get_journal_path(configuration).as_deref(),
     )
-    .expect("Failed to write graph")
+    .expect("Failed to write graph");
+    drop(guard);
 }
 
 // WP-06..WP-09: delete_command/rename_command/extract_command/
@@ -2885,14 +2906,20 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
         )
     };
     let result = match validating_backend(configuration) {
-        None => diwe::fs::apply_changes(
-            changes,
-            &get_library_path(configuration),
-            configuration.format,
-            check,
-            get_journal_path(configuration).as_deref(),
-        )
-        .map_err(|e| e.to_string()),
+        None => (|| -> Result<(), String> {
+            let guard = acquire_cli_commit_lock()?;
+            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
+            let result = diwe::fs::apply_changes(
+                changes,
+                &get_library_path(configuration),
+                configuration.format,
+                check,
+                get_journal_path(configuration).as_deref(),
+            )
+            .map_err(|e| e.to_string());
+            drop(guard);
+            result
+        })(),
         Some(tx) => tx
             .apply_changes(changes, |key, content, prior_content, operation| {
                 check(key, content, prior_content, operation).map_err(|rejected| rejected.to_string())
@@ -4092,7 +4119,13 @@ fn write_single_document(
 ) -> Result<(), String> {
     let existed = path.exists();
     match validating_backend(configuration) {
-        None => write_single_document_with(key, content, path, check, NoopTransaction::new)?,
+        None => {
+            let guard = acquire_cli_commit_lock()?;
+            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
+            let result = write_single_document_with(key, content, path, check, NoopTransaction::new);
+            drop(guard);
+            result?
+        }
         // The backend lands the write itself at `commit()`, under its
         // lock; `check` runs inside the bracket just as above.
         Some(tx) => tx.put_one(key, content, |prior| {
