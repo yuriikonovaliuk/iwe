@@ -478,6 +478,10 @@ pub struct CreateParams {
     pub variables: Option<serde_json::Map<String, serde_json::Value>>,
     #[schemars(skip)]
     pub frontmatter: Option<serde_json::Map<String, serde_json::Value>>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -486,6 +490,10 @@ pub struct UpdateParams {
     pub key: String,
     #[schemars(description = "New full markdown content")]
     pub content: String,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -494,6 +502,10 @@ pub struct DeleteParams {
     pub key: String,
     #[schemars(description = "Preview changes without applying. Default: false")]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -531,6 +543,10 @@ pub struct QueryParams {
     )]
     #[serde(default)]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into (update/delete only). Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -552,6 +568,10 @@ pub struct RenameParams {
     pub new_key: String,
     #[schemars(description = "Preview changes without applying. Default: false")]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -605,6 +625,10 @@ pub struct ExtractParams {
     pub list: Option<bool>,
     #[schemars(description = "Preview changes without applying. Default: false")]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -623,6 +647,10 @@ pub struct InlineParams {
     pub keep_target: Option<bool>,
     #[schemars(description = "Preview changes without applying. Default: false")]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -639,6 +667,14 @@ struct ReferenceEntry {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct NormalizeParams {
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage these writes into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AttachParams {
     #[schemars(
         description = "Configured attach action(s) to attach to (e.g. 'today'). Pass one or more action names; the source is attached under each resolved target."
@@ -651,6 +687,10 @@ pub struct AttachParams {
     pub list: Option<bool>,
     #[schemars(description = "Preview changes without applying. Default: false")]
     pub dry_run: Option<bool>,
+    #[schemars(
+        description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -753,10 +793,26 @@ pub struct IweServer {
     config: Configuration,
     index: Arc<Mutex<Option<Bm25Index>>>,
     seen: Arc<Mutex<HashSet<Finding>>>,
-    /// The agent transaction open on this server, if any — see
-    /// [`OpenTransaction`]. A `std` mutex, not tokio's: it is taken from
-    /// the synchronous write paths and never held across an await.
-    open_tx: Arc<std::sync::Mutex<Option<OpenTransaction>>>,
+    /// Every agent transaction open on this server, keyed by the opaque
+    /// handle `iwe_tx_begin` returned for it — see [`OpenTransaction`]. A
+    /// `std` mutex, not tokio's: it is taken from the synchronous write
+    /// paths and never held across an await.
+    open_txs: Arc<std::sync::Mutex<HashMap<String, OpenTransaction>>>,
+}
+
+/// The map key `open_txs` uses for a transaction begun without an
+/// explicit `handle` — today's single-implicit-transaction slot,
+/// preserved unchanged so no-handle callers see identical behavior
+/// (including "already open" refusing a second implicit begin).
+const DEFAULT_TX_HANDLE: &str = "default";
+
+/// Every write-tool/`tx_commit`/`tx_abort` parameter struct carries an
+/// optional `handle`; this resolves it to the `open_txs` map key —
+/// [`DEFAULT_TX_HANDLE`] when omitted.
+fn resolve_tx_handle(handle: &Option<String>) -> String {
+    handle
+        .clone()
+        .unwrap_or_else(|| DEFAULT_TX_HANDLE.to_string())
 }
 
 /// An agent transaction (`iwe_tx_begin` … `iwe_tx_commit`/`iwe_tx_abort`).
@@ -769,11 +825,21 @@ pub struct IweServer {
 /// under the store lock with a single journal record. Abort — explicit,
 /// or forced by a refused commit — reloads the graph from disk, dropping
 /// the staged state.
+///
+/// `graph` is this transaction's own private snapshot, cloned from the
+/// server's live graph at `iwe_tx_begin`, so its staged writes are
+/// visible to its own later calls (same handle) but invisible to every
+/// other handle and to no-handle callers until this transaction commits —
+/// except for the default handle, where `graph` *is* the server's shared
+/// `IweServer::graph` (an `Arc` clone, not a snapshot), preserving
+/// today's exact behavior: the agent's own no-handle reads see the
+/// implicit transaction's staged state, as they always have.
 struct OpenTransaction {
     backend: ValidatingTransaction,
     /// Every staged key's effect, in staging order; collapsed per key
     /// into the one journal record at commit ([`collapse_effects`]).
     effects: Vec<diwe::journal::KeyEffect>,
+    graph: Arc<Mutex<Graph>>,
 }
 
 impl OpenTransaction {
@@ -815,6 +881,30 @@ fn collapse_effects(effects: &[diwe::journal::KeyEffect]) -> Vec<diwe::journal::
             effect.map(|effect| diwe::journal::KeyEffect::new(&Key::name(&key), effect))
         })
         .collect()
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TxBeginParams {
+    #[schemars(
+        description = "Explicit name for this transaction, so it can stay open alongside another one — pass this same value as `handle` to every write tool and to iwe_tx_commit/iwe_tx_abort that should target it. Omit to use the implicit default transaction slot (today's behavior): refused if a default transaction is already open."
+    )]
+    pub handle: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TxCommitParams {
+    #[schemars(
+        description = "Transaction handle to commit. Omit to commit the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TxAbortParams {
+    #[schemars(
+        description = "Transaction handle to abort. Omit to abort the implicit default transaction (today's behavior)."
+    )]
+    pub handle: Option<String>,
 }
 
 #[tool_router]
@@ -1109,7 +1199,8 @@ impl IweServer {
         };
 
         let key = Key::name(&key_name);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&key).is_some() || self.document_file_exists(&key) {
             return match params.if_exists {
@@ -1132,7 +1223,7 @@ impl IweServer {
         // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
         // run it before mutating the in-memory graph so a rejection leaves
         // both graph and disk untouched rather than just disk.
-        self.write_file(&key, &markdown)
+        self.write_file(&key, &markdown, &params.handle)
             .map_err(|message| McpError::invalid_params(message, None))?;
         graph.insert_document(key.clone(), markdown.clone());
 
@@ -1162,7 +1253,8 @@ impl IweServer {
         Parameters(params): Parameters<UpdateParams>,
     ) -> Result<CallToolResult, McpError> {
         let key = Key::name(&params.key);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&key).is_none() {
             return Err(McpError::invalid_params(
@@ -1180,7 +1272,7 @@ impl IweServer {
         // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
         // run it before mutating the in-memory graph so a rejection leaves
         // both graph and disk untouched rather than just disk.
-        self.write_file(&key, &params.content)
+        self.write_file(&key, &params.content, &params.handle)
             .map_err(|message| McpError::invalid_params(message, None))?;
         graph.update_document(key.clone(), params.content.clone());
 
@@ -1221,13 +1313,14 @@ impl IweServer {
         Parameters(params): Parameters<DeleteParams>,
     ) -> Result<CallToolResult, McpError> {
         let key = Key::name(&params.key);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
         let changes = op_delete(&graph, &key).map_err(op_error_to_mcp)?;
 
         let mut warnings = Vec::new();
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
-            self.write_changes(&changes)
+            self.write_changes(&changes, &params.handle)
                 .map_err(|message| McpError::invalid_params(message, None))?;
             Self::apply_changes(&mut graph, &changes);
             warnings = self.stats_after_delete(&graph, &changes).await;
@@ -1260,7 +1353,8 @@ impl IweServer {
         }
 
         let dry_run = params.dry_run.unwrap_or(false);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         let index = match &op {
             Operation::Find(find) if find.search.is_some() => Some(
@@ -1318,7 +1412,7 @@ impl IweServer {
                         // inside `write_file`; run it before mutating the
                         // in-memory graph so a rejection leaves both graph
                         // and disk untouched rather than just disk.
-                        self.write_file(key, content)
+                        self.write_file(key, content, &params.handle)
                             .map_err(|message| McpError::invalid_params(message, None))?;
                         graph.update_document(key.clone(), content.clone());
                     }
@@ -1341,7 +1435,7 @@ impl IweServer {
                 let mut warnings = Vec::new();
                 if !dry_run {
                     self.ensure_schema_clean(&pending_from_changes(&combined))?;
-                    self.write_changes(&combined)
+                    self.write_changes(&combined, &params.handle)
                         .map_err(|message| McpError::invalid_params(message, None))?;
                     Self::apply_changes(&mut graph, &combined);
                     warnings = self.stats_after_delete(&graph, &combined).await;
@@ -1360,12 +1454,13 @@ impl IweServer {
     ) -> Result<CallToolResult, McpError> {
         let old_key = Key::name(&params.old_key);
         let new_key = Key::name(&params.new_key);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
         let changes = op_rename(&graph, &old_key, &new_key).map_err(op_error_to_mcp)?;
 
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
-            self.write_changes(&changes)
+            self.write_changes(&changes, &params.handle)
                 .map_err(|message| McpError::invalid_params(message, None))?;
             Self::apply_changes(&mut graph, &changes);
         }
@@ -1381,7 +1476,8 @@ impl IweServer {
         Parameters(params): Parameters<ExtractParams>,
     ) -> Result<CallToolResult, McpError> {
         let source_key = Key::name(&params.key);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&source_key).is_none() {
             return Err(McpError::invalid_params(
@@ -1453,7 +1549,7 @@ impl IweServer {
 
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
-            self.write_changes(&changes)
+            self.write_changes(&changes, &params.handle)
                 .map_err(|message| McpError::invalid_params(message, None))?;
             Self::apply_changes(&mut graph, &changes);
         }
@@ -1469,7 +1565,8 @@ impl IweServer {
         Parameters(params): Parameters<InlineParams>,
     ) -> Result<CallToolResult, McpError> {
         let source_key = Key::name(&params.key);
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&source_key).is_none() {
             return Err(McpError::invalid_params(
@@ -1545,7 +1642,7 @@ impl IweServer {
 
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
-            self.write_changes(&changes)
+            self.write_changes(&changes, &params.handle)
                 .map_err(|message| McpError::invalid_params(message, None))?;
             Self::apply_changes(&mut graph, &changes);
         }
@@ -1556,8 +1653,12 @@ impl IweServer {
     #[tool(
         description = "Normalize all document formatting across the knowledge graph. Re-parses and re-writes all documents to ensure consistent formatting"
     )]
-    async fn iwe_normalize(&self) -> Result<CallToolResult, McpError> {
-        let graph = self.graph.lock().await;
+    async fn iwe_normalize(
+        &self,
+        Parameters(params): Parameters<NormalizeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let graph = graph_arc.lock().await;
         let state = graph.export();
         let original_count = state.len();
 
@@ -1566,7 +1667,7 @@ impl IweServer {
             for (key_str, normalized_content) in &state {
                 let key = Key::name(key_str);
                 if self.read_file(&key).as_deref() != Some(normalized_content.as_str()) {
-                    self.write_file(&key, normalized_content)
+                    self.write_file(&key, normalized_content, &params.handle)
                         .map_err(|message| McpError::invalid_params(message, None))?;
                     changed += 1;
                 }
@@ -1621,7 +1722,8 @@ impl IweServer {
             McpError::invalid_params("'key' is required when not in list mode".to_string(), None)
         })?;
 
-        let mut graph = self.graph.lock().await;
+        let graph_arc = self.tx_graph(&params.handle)?;
+        let mut graph = graph_arc.lock().await;
 
         let source_key = Key::name(source_key_str);
         if (&*graph).get_node_id(&source_key).is_none() {
@@ -1679,7 +1781,7 @@ impl IweServer {
 
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&combined))?;
-            self.write_changes(&combined)
+            self.write_changes(&combined, &params.handle)
                 .map_err(|message| McpError::invalid_params(message, None))?;
             Self::apply_changes(&mut graph, &combined);
         }
@@ -1688,14 +1790,21 @@ impl IweServer {
     }
 
     #[tool(
-        description = "Open a transaction: until iwe_tx_commit, every write tool (create, update, delete, rename, extract, inline, attach, query --set, normalize) stages its writes instead of committing them, while your own reads see the staged state. Commit validates the final state as one unit and lands it atomically with one journal record; abort discards it. Use it for multi-document changes that must land together or not at all. Needs `[transactions] validate` set for the store."
+        description = "Open a transaction: until iwe_tx_commit, every write tool (create, update, delete, rename, extract, inline, attach, query --set, normalize) stages its writes instead of committing them, while your own reads see the staged state. Commit validates the final state as one unit and lands it atomically with one journal record; abort discards it. Use it for multi-document changes that must land together or not at all. Pass an explicit `handle` to keep several transactions open at once (e.g. interleaving two changes); omit it for the implicit default transaction (today's single-transaction behavior). Needs `[transactions] validate` set for the store."
     )]
-    async fn iwe_tx_begin(&self) -> Result<CallToolResult, McpError> {
+    async fn iwe_tx_begin(
+        &self,
+        Parameters(params): Parameters<TxBeginParams>,
+    ) -> Result<CallToolResult, McpError> {
         // The graph lock serializes against in-flight writes so a begin
-        // never lands between a tool's stage and its graph mutation.
+        // never lands between a tool's stage and its graph mutation. Only
+        // taken for the default handle's sake (see `tx_graph`'s doc
+        // comment) — an explicit handle's transaction gets its own
+        // private graph snapshot below and never touches this lock.
+        let key = resolve_tx_handle(&params.handle);
         let _graph = self.graph.lock().await;
-        let mut open = self.open_tx.lock().expect("open transaction lock");
-        if let Some(tx) = open.as_ref() {
+        let mut open = self.open_txs.lock().expect("open transaction lock");
+        if let Some(tx) = open.get(&key) {
             return Err(McpError::invalid_params(
                 format!(
                     "a transaction is already open with {} staged write(s) ({}); commit or abort it first",
@@ -1715,29 +1824,50 @@ impl IweServer {
             .begin()
             .map_err(|e| McpError::internal_error(format!("transaction failed to begin: {e}"), None))?;
         let scope = backend.scope();
-        *open = Some(OpenTransaction {
-            backend,
-            effects: Vec::new(),
-        });
+        // Default: alias the server's own shared graph, so this
+        // transaction's writes land exactly where they always have and
+        // no-handle reads see them, unchanged from today. Explicit
+        // handle: a private snapshot, isolated from every other handle
+        // (and from the default) until this transaction's own commit.
+        let tx_graph = if key == DEFAULT_TX_HANDLE {
+            self.graph.clone()
+        } else {
+            Arc::new(Mutex::new((*_graph).clone()))
+        };
+        open.insert(
+            key.clone(),
+            OpenTransaction {
+                backend,
+                effects: Vec::new(),
+                graph: tx_graph,
+            },
+        );
         drop(open);
 
         #[derive(Serialize)]
         struct TxBegun {
             status: &'static str,
             validate: ValidationScope,
+            handle: String,
         }
         to_json_result(&TxBegun {
             status: "open",
             validate: scope,
+            handle: key,
         })
     }
 
     #[tool(
-        description = "Commit the open transaction: validates the final state of every staged write as one unit (schemas, invariants, checkers, to the store's configured scope), refuses the whole transaction if it is not clean or a staged document changed on disk since it was staged — in which case nothing lands and the staged state is discarded — and otherwise lands every write atomically with a single journal record."
+        description = "Commit the open transaction: validates the final state of every staged write as one unit (schemas, invariants, checkers, to the store's configured scope), refuses the whole transaction if it is not clean or a staged document changed on disk since it was staged — in which case nothing lands and the staged state is discarded — and otherwise lands every write atomically with a single journal record. Pass the `handle` returned by iwe_tx_begin to commit a specific transaction; omit it for the implicit default one."
     )]
-    async fn iwe_tx_commit(&self) -> Result<CallToolResult, McpError> {
-        let graph = self.graph.lock().await;
-        let taken = self.open_tx.lock().expect("open transaction lock").take();
+    async fn iwe_tx_commit(
+        &self,
+        Parameters(params): Parameters<TxCommitParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let key = resolve_tx_handle(&params.handle);
+        let is_default = key == DEFAULT_TX_HANDLE;
+        let mut graph = self.graph.lock().await;
+        let taken = self.open_txs.lock().expect("open transaction lock").remove(&key);
         let Some(mut tx) = taken else {
             return Err(McpError::invalid_params(
                 "no transaction is open; call iwe_tx_begin first".to_string(),
@@ -1747,6 +1877,34 @@ impl IweServer {
         let keys = tx.staged_keys();
         match tx.backend.commit_or_abort() {
             Ok(()) => {
+                // The default handle's writes already landed directly on
+                // `self.graph` as each write tool ran (today's exact
+                // behavior). An explicit handle staged into its own
+                // private graph instead, so land its final per-key
+                // content into the shared graph now that it is committed
+                // to disk, using each key's collapsed effect to decide
+                // create/update/delete — the same collapsing `tx_commit`
+                // already does for the journal record.
+                if !is_default {
+                    let tx_graph = tx.graph.lock().await;
+                    for effect in collapse_effects(&tx.effects) {
+                        let effect_key = Key::name(&effect.key);
+                        match effect.effect {
+                            diwe::journal::Effect::Delete => {
+                                graph.remove_document(effect_key);
+                            }
+                            diwe::journal::Effect::Create | diwe::journal::Effect::Update => {
+                                if let Some(content) = tx_graph.export_key(&effect_key) {
+                                    if (&*graph).get_node_id(&effect_key).is_some() {
+                                        graph.update_document(effect_key, content);
+                                    } else {
+                                        graph.insert_document(effect_key, content);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.record_journal_commit(collapse_effects(&tx.effects));
                 drop(graph);
                 #[derive(Serialize)]
@@ -1761,7 +1919,16 @@ impl IweServer {
             }
             Err(message) => {
                 drop(graph);
-                self.reload_graph_from_disk().await;
+                // The default handle's staged writes live on the shared
+                // graph, so discarding them means reloading the whole
+                // graph from disk — exactly today's behavior. An
+                // explicit handle's staged writes lived only in its own
+                // private graph (dropped with `tx` here), so the shared
+                // graph — and any other still-open transaction's own
+                // staged state — was never touched and needs no reload.
+                if is_default {
+                    self.reload_graph_from_disk().await;
+                }
                 Err(McpError::invalid_params(
                     format!(
                         "transaction refused; nothing was written and the staged changes to {} were discarded: {message}",
@@ -1774,12 +1941,17 @@ impl IweServer {
     }
 
     #[tool(
-        description = "Abort the open transaction: discards every staged write and reloads the graph from disk. Nothing is written."
+        description = "Abort the open transaction: discards every staged write and reloads the graph from disk. Nothing is written. Pass the `handle` returned by iwe_tx_begin to abort a specific transaction; omit it for the implicit default one."
     )]
-    async fn iwe_tx_abort(&self) -> Result<CallToolResult, McpError> {
+    async fn iwe_tx_abort(
+        &self,
+        Parameters(params): Parameters<TxAbortParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let key = resolve_tx_handle(&params.handle);
+        let is_default = key == DEFAULT_TX_HANDLE;
         let taken = {
             let _graph = self.graph.lock().await;
-            self.open_tx.lock().expect("open transaction lock").take()
+            self.open_txs.lock().expect("open transaction lock").remove(&key)
         };
         let Some(mut tx) = taken else {
             return Err(McpError::invalid_params(
@@ -1789,7 +1961,14 @@ impl IweServer {
         };
         let keys = tx.staged_keys();
         let _ = tx.backend.abort();
-        self.reload_graph_from_disk().await;
+        // Only the default handle's staged writes ever touched the
+        // shared graph (aliased to it); an explicit handle's staged
+        // writes lived solely in its own private graph, dropped with
+        // `tx` — nothing else to discard, and no other open transaction
+        // (including the default) is disturbed.
+        if is_default {
+            self.reload_graph_from_disk().await;
+        }
 
         #[derive(Serialize)]
         struct TxAborted {
@@ -2088,7 +2267,7 @@ impl IweServer {
             config: configuration.clone(),
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
-            open_tx: Arc::new(std::sync::Mutex::new(None)),
+            open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2111,7 +2290,7 @@ impl IweServer {
             config,
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
-            open_tx: Arc::new(std::sync::Mutex::new(None)),
+            open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2265,16 +2444,17 @@ impl IweServer {
     // commit-gates-persist ordering (`commit` is attempted before the real
     // filesystem write, not after, so a commit refusal actually prevents
     // the write rather than merely being noticed once it already landed).
-    fn write_file(&self, key: &Key, content: &str) -> Result<(), String> {
+    fn write_file(&self, key: &Key, content: &str, handle: &Option<String>) -> Result<(), String> {
         let existed = self.document_file_exists(key);
         let effect = if existed {
             diwe::journal::Effect::Update
         } else {
             diwe::journal::Effect::Create
         };
+        let tx_key = resolve_tx_handle(handle);
         if self.document_path(key).is_some() {
-            let mut open = self.open_tx.lock().expect("open transaction lock");
-            if let Some(tx) = open.as_mut() {
+            let mut open = self.open_txs.lock().expect("open transaction lock");
+            if let Some(tx) = open.get_mut(&tx_key) {
                 // Staged, not committed: permission is judged now (a
                 // refused write leaves the transaction open and
                 // untouched), validation at `iwe_tx_commit`.
@@ -2289,6 +2469,15 @@ impl IweServer {
                 tx.effects.push(diwe::journal::KeyEffect::new(key, effect));
                 return Ok(());
             }
+            // An explicit handle that names no open transaction is a
+            // caller error, not a silent fall-through to an unstaged
+            // direct write — only the default (omitted) handle falls
+            // through, matching today's exact no-handle behavior.
+            if tx_key != DEFAULT_TX_HANDLE {
+                return Err(format!(
+                    "no transaction is open for handle '{tx_key}'; call iwe_tx_begin first"
+                ));
+            }
         }
         match self.validating_backend() {
             None => self.write_file_with(key, content, NoopTransaction::new)?,
@@ -2298,15 +2487,17 @@ impl IweServer {
         Ok(())
     }
 
-    /// Stages the whole of `changes` on the open transaction, if there is
-    /// one — `Some(result)` — or reports `None` for the caller to commit
-    /// them itself. Permission is judged per key now, as
+    /// Stages the whole of `changes` on the open transaction named by
+    /// `handle` (the default/implicit one when omitted), if there is one
+    /// — `Some(result)` — or reports `None` for the caller to commit them
+    /// itself. Permission is judged per key now, as
     /// [`ValidatingTransaction::apply_changes`] does; a refusal leaves the
     /// transaction as it was.
-    fn stage_changes(&self, changes: &Changes) -> Option<Result<(), String>> {
+    fn stage_changes(&self, changes: &Changes, handle: &Option<String>) -> Option<Result<(), String>> {
         let root = self.project_path.as_ref().or(self.base_path.as_ref())?;
-        let mut open = self.open_tx.lock().expect("open transaction lock");
-        let tx = open.as_mut()?;
+        let tx_key = resolve_tx_handle(handle);
+        let mut open = self.open_txs.lock().expect("open transaction lock");
+        let tx = open.get_mut(&tx_key)?;
         let schemas_dir = schemas_dir_in(root);
         let check = |key: &Key, content: &str, operation: diwe::permissions::WriteOperation| {
             let prior = self
@@ -2368,6 +2559,31 @@ impl IweServer {
         );
         *self.graph.lock().await = reloaded;
         *self.index.lock().await = None;
+    }
+
+    /// The graph a write tool should read and mutate for `handle`: the
+    /// server's shared, live `self.graph` for the default (omitted)
+    /// handle — identical to today's single-transaction behavior, so a
+    /// no-handle caller's own reads keep seeing its staged writes — or
+    /// the named transaction's own private snapshot for an explicit
+    /// handle, kept invisible to every other handle until its commit
+    /// (T7: handle-keyed per-transaction isolation). Errors if an
+    /// explicit handle names no open transaction, rather than silently
+    /// falling back to the shared graph and bypassing the isolation the
+    /// caller asked for by naming a handle at all.
+    fn tx_graph(&self, handle: &Option<String>) -> Result<Arc<Mutex<Graph>>, McpError> {
+        let key = resolve_tx_handle(handle);
+        if key == DEFAULT_TX_HANDLE {
+            return Ok(self.graph.clone());
+        }
+        let open = self.open_txs.lock().expect("open transaction lock");
+        match open.get(&key) {
+            Some(tx) => Ok(tx.graph.clone()),
+            None => Err(McpError::invalid_params(
+                format!("no transaction is open for handle '{key}'; call iwe_tx_begin first"),
+                None,
+            )),
+        }
     }
 
     /// The validating backend `[transactions] validate` asks for over this
@@ -2522,9 +2738,17 @@ impl IweServer {
     // `diwe::fs::apply_changes` through their own wrapper in `main.rs`)
     // wire the identical hook, so enforcement is consistent across both
     // binaries without re-implementing it here.
-    fn write_changes(&self, changes: &Changes) -> Result<(), String> {
-        if let Some(staged) = self.stage_changes(changes) {
+    fn write_changes(&self, changes: &Changes, handle: &Option<String>) -> Result<(), String> {
+        if let Some(staged) = self.stage_changes(changes, handle) {
             return staged;
+        }
+        // Same guard as `write_file`: an explicit handle naming no open
+        // transaction is a caller error, not a silent unstaged write.
+        if resolve_tx_handle(handle) != DEFAULT_TX_HANDLE {
+            return Err(format!(
+                "no transaction is open for handle '{}'; call iwe_tx_begin first",
+                resolve_tx_handle(handle)
+            ));
         }
         match self.validating_backend() {
             None => self.write_changes_with(changes, NoopTransaction::new),
