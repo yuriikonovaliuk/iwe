@@ -658,16 +658,17 @@ fn parse_env_pattern_list(raw: &str) -> Vec<String> {
 /// empty list. If neither env var is set, the file's parsed deny/allow
 /// apply unchanged.
 ///
-/// Fail-fast: this task's fail-fast is on a *conflicting override*, not a
-/// general file validator — it only runs when an env override actually
-/// happened (either var set to a non-empty string). A file that already
-/// carries non-empty `deny` and `allow` with neither env var set loads
-/// unchanged, exactly as before this task. When an override did happen
-/// and the resulting deny/allow are both non-empty, `load_config` returns
-/// `Err` — this is the existing `Result<Configuration, String>` error
-/// type, not a new error type. There is no error enum on this path: the
-/// error is a `String` message beginning with `"conflicting transactions
-/// override:"`, which callers/tests can match on with `starts_with`.
+/// Fail-fast: this task's fail-fast is on the *final resolved* deny/allow
+/// pair, evaluated unconditionally after the overlay is applied — not
+/// gated on whether an env override actually happened. A config file that
+/// already carries non-empty `deny` and `allow` with neither env var set
+/// fails fast exactly the same as an env override that resolves to both
+/// non-empty; the source of the conflicting values does not matter, only
+/// the final state. `load_config` returns `Err` — this is the existing
+/// `Result<Configuration, String>` error type, not a new error type.
+/// There is no error enum on this path: the error is a `String` message
+/// beginning with `"conflicting transactions override:"`, which
+/// callers/tests can match on with `starts_with`.
 fn apply_transactions_env_overlay(transactions: &mut TransactionOptions) -> Result<(), String> {
     let deny_env = env::var(ENV_TRANSACTIONS_DENY)
         .ok()
@@ -688,7 +689,7 @@ fn apply_transactions_env_overlay(transactions: &mut TransactionOptions) -> Resu
             .unwrap_or_default();
     }
 
-    if override_applied && !transactions.deny.is_empty() && !transactions.allow.is_empty() {
+    if !transactions.deny.is_empty() && !transactions.allow.is_empty() {
         return Err(format!(
             "conflicting transactions override: resolved deny ({:?}) and allow ({:?}) are both non-empty; set only one of {} / {}",
             transactions.deny, transactions.allow, ENV_TRANSACTIONS_DENY, ENV_TRANSACTIONS_ALLOW
