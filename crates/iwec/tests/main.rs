@@ -2,6 +2,7 @@ mod fixture;
 
 mod agent_transaction_test;
 mod attach_test;
+mod cli_mcp_write_scope_parity_test;
 mod expire_suppressions_mcp_test;
 mod extract_test;
 mod find_test;
@@ -19,6 +20,7 @@ mod schema_test;
 mod squash_test;
 mod stats_test;
 mod stats_warnings_test;
+mod t4_cli_mcp_write_scope_parity_test;
 mod transaction_wiring_test;
 mod tx_commit_lock_wiring_test;
 mod validating_write_gate_test;

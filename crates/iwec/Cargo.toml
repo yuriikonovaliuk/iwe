@@ -45,5 +45,5 @@ diwe.workspace = true
 iwe-lock.workspace = true
 indoc.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "test-util", "net", "time"] }
-rmcp = { version = "3", features = ["server", "client", "macros", "transport-io", "transport-async-rw", "transport-streamable-http-client-reqwest", "schemars"] }
+rmcp = { version = "3", features = ["server", "client", "macros", "transport-io", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "schemars"] }
 anyhow = "1"
