@@ -1,0 +1,19 @@
+[package]
+name = "iwe-lock"
+description = "Crash-safe, heartbeat-based file lock with generation fencing"
+include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs"]
+
+version.workspace = true
+repository.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+# Requires std::fs::File::{lock, lock_shared, try_lock, unlock}, stabilized
+# in 1.89 — higher than the workspace-wide MSRV, so set explicitly here
+# rather than inheriting workspace.package.rust-version.
+rust-version = "1.89"
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true

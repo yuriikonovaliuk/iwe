@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/liwe", "crates/diwe", "crates/iwe", "crates/iwes", "crates/iwec"]
+members = ["crates/liwe", "crates/diwe", "crates/iwe", "crates/iwes", "crates/iwec", "crates/iwe-lock"]
 resolver = "2"
 
 [workspace.package]

@@ -1504,6 +1504,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwe-lock"
+version = "0.23.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "iwec"
 version = "0.23.0"
 dependencies = [

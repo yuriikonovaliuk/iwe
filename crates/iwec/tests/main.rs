@@ -2,6 +2,7 @@ mod fixture;
 
 mod agent_transaction_test;
 mod attach_test;
+mod expire_suppressions_mcp_test;
 mod extract_test;
 mod find_test;
 mod freeze_dominates_mutability_test;
