@@ -14,6 +14,8 @@ mod enforcement_mode_matrix_test;
 mod expire_suppressions_cli_test;
 mod export_dot_test;
 mod extract_test;
+mod fencing_check_before_write_test;
+mod fencing_placement_test;
 mod find_test;
 mod freeze_dominates_mutability_test;
 mod freeze_multi_property_write_test;
