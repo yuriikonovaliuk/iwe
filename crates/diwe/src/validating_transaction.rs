@@ -547,6 +547,57 @@ impl ValidatingTransaction {
         })
     }
 
+    /// The compiled-in always-checkers (`crate::checkers`) — distinct from
+    /// the configurable external `[checkers.*]` above: these have no
+    /// `[checkers.<name>].always` toggle, no suppression-window opt-out,
+    /// and no touched-keys gate. They run on every `validate = "full"`
+    /// commit regardless of what this transaction wrote, because what they
+    /// check (e.g. a suppression's calendar expiry) can go stale
+    /// independent of any write touching it — an affected-set validation
+    /// would never catch that.
+    fn always_checker_violations(&self) -> Option<ValidationRun> {
+        if self.scope != ValidationScope::Full {
+            return None;
+        }
+        let expired = crate::checkers::expire_suppressions::ExpireSuppressionsChecker
+            .check(&self.checker_root);
+        if expired.is_empty() {
+            return None;
+        }
+        let today = chrono::Local::now().date_naive();
+        let violations = expired
+            .into_iter()
+            .map(|violation| {
+                let age_days = (today - violation.expiry).num_days();
+                Violation {
+                    breadcrumb: Vec::new(),
+                    message: format!(
+                        "suppression '{}' expired {} ({age_days}d ago, marker: {})",
+                        violation.key,
+                        violation.expiry,
+                        violation.marker_path.display()
+                    ),
+                    hint: Some(
+                        "delete the '# suppress:' line and restore [checkers.<name>].always \
+                         back to its default, or extend `until` and commit the new date"
+                            .to_string(),
+                    ),
+                    schema_pointer: "/suppressions".to_string(),
+                    keyword: "suppression-expiry".to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        Some(ValidationRun {
+            documents: violations.len(),
+            schemas: 0,
+            reports: vec![KeyReport {
+                key: Key::name("checkers/expire-suppressions"),
+                schema: "checker:expire-suppressions".to_string(),
+                violations,
+            }],
+        })
+    }
+
     fn commit_locked(&mut self) -> Result<(), ValidationFailure> {
         let conflicts = self.conflicts();
         if !conflicts.is_empty() {
@@ -563,6 +614,11 @@ impl ValidatingTransaction {
         self.apply_pending().map_err(ValidationFailure::Io)?;
 
         if let Some(run) = self.failing_checker_reports(&touched) {
+            self.restore(&prior).map_err(ValidationFailure::Io)?;
+            return Err(ValidationFailure::Violations(run));
+        }
+
+        if let Some(run) = self.always_checker_violations() {
             self.restore(&prior).map_err(ValidationFailure::Io)?;
             return Err(ValidationFailure::Violations(run));
         }

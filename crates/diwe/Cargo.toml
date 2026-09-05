@@ -27,6 +27,7 @@ toml.workspace = true
 toml_edit.workspace = true
 ignore.workspace = true
 globset.workspace = true
+regex.workspace = true
 csv.workspace = true
 tiktoken-rs.workspace = true
 bm25.workspace = true
