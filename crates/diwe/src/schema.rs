@@ -49,18 +49,35 @@ impl SchemaBindings {
     pub fn schemas_for(&self, key: &str) -> Vec<&str> {
         self.rules
             .iter()
-            .filter(|(_, patterns)| {
-                patterns.iter().fold(false, |bound, (matcher, negated)| {
-                    if matcher.is_match(key) {
-                        !negated
-                    } else {
-                        bound
-                    }
-                })
-            })
+            .filter(|(_, patterns)| patterns_match(patterns, key))
             .map(|(name, _)| name.as_str())
             .collect()
     }
+}
+
+/// Whether `key` matches the already-compiled pattern list, using
+/// [`SchemaBinding`]'s glob semantics: a leading `!` negates, and later
+/// patterns override earlier ones for the same key.
+fn patterns_match(patterns: &[(GlobMatcher, bool)], key: &str) -> bool {
+    patterns.iter().fold(false, |bound, (matcher, negated)| {
+        if matcher.is_match(key) {
+            !negated
+        } else {
+            bound
+        }
+    })
+}
+
+/// Whether `key` matches at least one of `patterns` (raw, uncompiled
+/// strings), using the same glob syntax as [`SchemaBinding::r#match`] —
+/// `mind/**` matches everything under `mind/`, a leading `!` negates, and
+/// later patterns override earlier ones for the same key. Invalid patterns
+/// are treated as non-matching rather than reported, since callers such as
+/// [`crate::config::write_permitted`] have no error channel of their own.
+pub fn patterns_match_raw(patterns: &[String], key: &str) -> bool {
+    let mut errors = Vec::new();
+    let compiled = compile_patterns("pattern", patterns, &mut errors);
+    patterns_match(&compiled, key)
 }
 
 fn compile_patterns(

@@ -49,7 +49,10 @@ fn store(gated: bool) -> TempDir {
             ..Default::default()
         },
         schemas,
-        transactions: TransactionOptions { validate: scope },
+        transactions: TransactionOptions {
+            validate: scope,
+            ..Default::default()
+        },
         ..Default::default()
     };
     write(base.join(".iwe/config.toml"), toml::to_string(&config).unwrap()).unwrap();

@@ -10,7 +10,9 @@ use toml_edit::{value, DocumentMut, Item};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schema::patterns_match_raw;
 use crate::search::{parse_language, Language};
+use liwe::model::Key;
 pub use liwe::model::config::{
     DjotOptions, Format, FormatOptions, FormattingOptions, InlineType, LineBreakStyle, LinkType,
     MarkdownOptions, Operation, RefsPath, RefsText, TargetType, WikiLinkPath,
@@ -98,6 +100,16 @@ pub enum ValidationScope {
 pub struct TransactionOptions {
     #[serde(default)]
     pub validate: ValidationScope,
+    /// Keys a write may not touch, in [`SchemaBinding::r#match`] glob
+    /// syntax. Left empty (the default), nothing is denied on this basis.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Keys a write may touch, in the same glob syntax. Non-empty, this is
+    /// an allowlist: only matching keys are permitted and `deny` is not
+    /// consulted. Left empty (the default), nothing is restricted on this
+    /// basis.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 impl Default for LibraryOptions {
@@ -561,6 +573,24 @@ pub fn journal_path_in(project_root: &Path, configuration: &Configuration) -> Op
     })
 }
 
+/// Whether a write to `key` is permitted under `[transactions]`'s
+/// `deny`/`allow` lists. `allow`, if non-empty, is an allowlist: the write
+/// is permitted iff `key` matches at least one `allow` pattern, and `deny`
+/// is not consulted. Otherwise, `deny`, if non-empty, is a denylist: the
+/// write is permitted iff `key` matches none of its patterns. With both
+/// empty, every write is permitted — today's unrestricted behavior.
+/// Pattern syntax matches [`SchemaBinding::r#match`]'s glob semantics.
+pub fn write_permitted(deny: &[String], allow: &[String], key: &Key) -> bool {
+    let key = key.as_str();
+    if !allow.is_empty() {
+        return patterns_match_raw(allow, key);
+    }
+    if !deny.is_empty() {
+        return !patterns_match_raw(deny, key);
+    }
+    true
+}
+
 pub fn load_config() -> Result<Configuration, String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
@@ -892,5 +922,39 @@ mod tests {
     fn template_configuration_round_trips() {
         let rendered = toml::to_string(&Configuration::template()).expect("serializes");
         toml::from_str::<Configuration>(&rendered).expect("parses");
+    }
+
+    #[test]
+    fn write_permitted_with_no_deny_or_allow_is_unrestricted() {
+        let key = Key::name("mind/anything");
+        assert!(write_permitted(&[], &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_denies_a_matching_deny_pattern() {
+        let deny = vec!["mind/**".to_string()];
+        let key = Key::name("mind/notes");
+        assert!(!write_permitted(&deny, &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_allows_a_non_matching_deny_pattern() {
+        let deny = vec!["mind/**".to_string()];
+        let key = Key::name("world/notes");
+        assert!(write_permitted(&deny, &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_allows_a_matching_allow_pattern() {
+        let allow = vec!["mind/**".to_string()];
+        let key = Key::name("mind/notes");
+        assert!(write_permitted(&[], &allow, &key));
+    }
+
+    #[test]
+    fn write_permitted_denies_a_non_matching_allow_pattern() {
+        let allow = vec!["mind/**".to_string()];
+        let key = Key::name("world/notes");
+        assert!(!write_permitted(&[], &allow, &key));
     }
 }
