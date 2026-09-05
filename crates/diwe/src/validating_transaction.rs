@@ -52,7 +52,7 @@ use liwe::operations::Changes;
 use liwe::transaction::{CommitError, Transaction, Write, WriteRejected};
 use liwe::write_lock::{acquire_commit_lock, CommitLockError, CommitLockGuard};
 
-use crate::config::Configuration;
+use crate::config::{write_permitted, Configuration};
 pub use crate::config::ValidationScope;
 use crate::fs::{new_for_path, write_file};
 use crate::permissions::WriteOperation;
@@ -99,6 +99,12 @@ pub enum ValidationFailure {
     /// [`liwe::write_lock::CommitLockGuard::check_fencing`] immediately
     /// before that step, so nothing was applied.
     LockStale,
+    /// One or more of the transaction's touched keys are refused by
+    /// `[transactions]`'s `deny`/`allow` lists on the resolved
+    /// configuration (see [`crate::config::write_permitted`]). Nothing was
+    /// applied — the transaction falls back to its pending state, exactly
+    /// as for the other pre-apply failure modes.
+    WriteScopeDenied(Vec<Key>),
 }
 
 /// The name this failure type had while the backend only knew the
@@ -135,6 +141,17 @@ impl fmt::Display for ValidationFailure {
                 f,
                 "write refused: commit lock hold was superseded by a later acquire; nothing was applied"
             ),
+            Self::WriteScopeDenied(keys) => {
+                let listed: Vec<String> = keys
+                    .iter()
+                    .map(|key| format!("write to '{key}'"))
+                    .collect();
+                write!(
+                    f,
+                    "{} rejected: refused by the configured write scope",
+                    listed.join(", ")
+                )
+            }
         }
     }
 }
@@ -485,6 +502,24 @@ impl ValidatingTransaction {
         Ok(run.reports)
     }
 
+    /// The touched keys `[transactions]`'s `deny`/`allow` lists on the
+    /// resolved configuration refuse — empty when every touched key is
+    /// permitted. Delegates to t1's [`write_permitted`] per key; no
+    /// pattern logic of its own.
+    fn scope_denied(&self, touched: &[Key]) -> Vec<Key> {
+        touched
+            .iter()
+            .filter(|key| {
+                !write_permitted(
+                    &self.config.transactions.deny,
+                    &self.config.transactions.allow,
+                    key,
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Refuses the final state if it violates anything the current state
     /// does not. A violation that already stands on disk — someone else's
     /// debt, or a rule that tightened after the document was written — is
@@ -622,6 +657,12 @@ impl ValidatingTransaction {
         }
 
         let touched = self.touched_keys();
+
+        let denied = self.scope_denied(&touched);
+        if !denied.is_empty() {
+            return Err(ValidationFailure::WriteScopeDenied(denied));
+        }
+
         self.validate_final_state(&touched)?;
 
         // Fencing check, immediately before the irreversible step (the
@@ -769,6 +810,20 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    /// [`config_with`] plus `[transactions]`'s `deny`/`allow` lists —
+    /// t3's fixture on top of t1's schema fixture, no change to
+    /// `config_with` itself.
+    fn config_with_transactions(
+        entries: &[(&str, &str)],
+        deny: &[&str],
+        allow: &[&str],
+    ) -> Configuration {
+        let mut config = config_with(entries);
+        config.transactions.deny = deny.iter().map(|s| s.to_string()).collect();
+        config.transactions.allow = allow.iter().map(|s| s.to_string()).collect();
+        config
     }
 
     fn transaction_for(temp: &TempDir, config: Configuration) -> AffectedSetTransaction {
@@ -1352,5 +1407,148 @@ print(json.dumps(out))'"#
              disk content must be identical before and after the refused attempt"
         );
         assert_eq!(after, "# A\n", "the pre-existing content must survive unmodified");
+    }
+
+    /// t3, test (a): `[transactions].deny = ["mind/**"]` refuses a commit
+    /// touching a matching key with `WriteScopeDenied` naming that key,
+    /// leaves the file untouched on disk, and does not affect a commit to
+    /// a non-matching key in the same config.
+    #[test]
+    fn write_scope_deny_blocks_matching_key_leaves_disk_unchanged_permits_others() {
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join("mind")).unwrap();
+        create_dir_all(temp.path().join("notes")).unwrap();
+        write(temp.path().join("mind/private.md"), "# Private\n").unwrap();
+
+        let config = config_with_transactions(&[], &["mind/**"], &[]);
+
+        let mut tx = transaction_for(&temp, config.clone());
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("mind/private"),
+            "# Changed\n".to_string(),
+        ))
+        .unwrap();
+        let result = tx.commit();
+        match &result {
+            Err(CommitError::Other(ValidationFailure::WriteScopeDenied(keys))) => {
+                assert!(keys.contains(&Key::name("mind/private")));
+            }
+            other => panic!("expected WriteScopeDenied, got {other:?}"),
+        }
+        assert_eq!(
+            read_to_string(temp.path().join("mind/private.md")).unwrap(),
+            "# Private\n",
+            "a denied commit must not modify the file on disk"
+        );
+
+        // Same deny config, a non-matching key: commit succeeds as normal.
+        let mut tx2 = transaction_for(&temp, config);
+        tx2.begin().unwrap();
+        tx2.write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
+            .unwrap();
+        let result2 = tx2.commit();
+        assert!(
+            result2.is_ok(),
+            "commit to a non-denied key must succeed: {result2:?}"
+        );
+        assert_eq!(
+            read_to_string(temp.path().join("notes/a.md")).unwrap(),
+            "# A\n"
+        );
+    }
+
+    /// t3, test (d): the schema-default `[transactions]` (`deny = []`,
+    /// `allow = []`) permits every key, `mind/...` included — the scope
+    /// check is a no-op unless configured, exactly as before this change.
+    #[test]
+    fn write_scope_default_permits_every_key_including_mind() {
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join("mind")).unwrap();
+
+        let config = config_with(&[]);
+        assert_eq!(config.transactions.deny, Vec::<String>::new());
+        assert_eq!(config.transactions.allow, Vec::<String>::new());
+
+        let mut tx = transaction_for(&temp, config);
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("mind/anything"),
+            "# Anything\n".to_string(),
+        ))
+        .unwrap();
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "default (empty) deny/allow must permit every key: {result:?}"
+        );
+        assert_eq!(
+            read_to_string(temp.path().join("mind/anything.md")).unwrap(),
+            "# Anything\n"
+        );
+    }
+
+    /// t3, test (b), commit-level half: `[transactions].allow =
+    /// ["mind/**"]` permits a commit touching only `mind/...` keys and
+    /// refuses one touching a key outside the allowlist with
+    /// `WriteScopeDenied` naming that key.
+    #[test]
+    fn write_scope_allow_permits_matching_keys_denies_others() {
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join("mind")).unwrap();
+        create_dir_all(temp.path().join("notes")).unwrap();
+
+        let config = config_with_transactions(&[], &[], &["mind/**"]);
+
+        let mut tx = transaction_for(&temp, config.clone());
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("mind/a"), "# A\n".to_string()))
+            .unwrap();
+        let result = tx.commit();
+        assert!(
+            result.is_ok(),
+            "commit touching only allowed keys must succeed: {result:?}"
+        );
+        assert_eq!(
+            read_to_string(temp.path().join("mind/a.md")).unwrap(),
+            "# A\n"
+        );
+
+        let mut tx2 = transaction_for(&temp, config);
+        tx2.begin().unwrap();
+        tx2.write(Write::Put(
+            Key::name("notes/outside"),
+            "# Outside\n".to_string(),
+        ))
+        .unwrap();
+        let result2 = tx2.commit();
+        match &result2 {
+            Err(CommitError::Other(ValidationFailure::WriteScopeDenied(keys))) => {
+                assert!(keys.contains(&Key::name("notes/outside")));
+            }
+            other => panic!("expected WriteScopeDenied, got {other:?}"),
+        }
+        assert!(
+            !temp.path().join("notes/outside.md").exists(),
+            "a denied commit must not create the file on disk"
+        );
+    }
+
+    /// The `Display` message for `WriteScopeDenied` names the denied key
+    /// (`"write to '<key>'"`) and says the commit was `"rejected"` —
+    /// tests assert on these substrings, never on full string equality
+    /// (the shared surface).
+    #[test]
+    fn write_scope_denied_display_contains_required_substrings() {
+        let error = ValidationFailure::WriteScopeDenied(vec![Key::name("mind/x")]);
+        let message = error.to_string();
+        assert!(
+            message.contains("write to 'mind/x'"),
+            "message should name the denied key: {message}"
+        );
+        assert!(
+            message.contains("rejected"),
+            "message should say the write was rejected: {message}"
+        );
     }
 }
