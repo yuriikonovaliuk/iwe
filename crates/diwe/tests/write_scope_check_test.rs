@@ -423,6 +423,94 @@ fn for_config_with_allow_only_config_constructs_a_backend_with_none_scope() {
     assert_eq!(backend.scope(), diwe::config::ValidationScope::None);
 }
 
+/// Symmetric to the deny-only enforcement test below: the allow-only
+/// path also goes end-to-end through `for_config` -- a commit outside
+/// the allow-list is refused by the scope check, a commit inside it
+/// lands, and schema validation is genuinely skipped at `scope ==
+/// None`. The construction-only test above
+/// (`for_config_with_allow_only_config_constructs_a_backend_with_none_scope`)
+/// checks the gate builds a backend and leaves `scope` at `None`; it
+/// never exercises `commit()`, so it does not by itself confirm the
+/// allow-list is actually enforced. This test closes that gap.
+#[test]
+fn for_config_allow_only_backend_enforces_scope_and_skips_schema_validation() {
+    let temp = TempDir::new().unwrap();
+    ensure_dot_iwe(&temp);
+
+    // Same "would-fail-schema" fixture as the deny-only test: a note
+    // with no links would trigger `Violations` at scope `AffectedSet`.
+    // Used here to prove validation is skipped at `scope == None`.
+    fs::write(
+        temp.path().join(".iwe/schemas/note.yaml"),
+        "links:\n  - min: 1\n",
+    )
+    .expect("write schema");
+
+    let config = config_with_scope(&[], &["mind/**"]);
+    let mut backend = backend_for_config(&temp, config).expect("for_config");
+
+    // Denied commit: key outside the allow-list, content that would
+    // also violate the schema -- the scope check must fire first with
+    // WriteScopeDenied, not Violations.
+    backend.begin().unwrap();
+    backend
+        .write(Write::Put(
+            key("other/b"),
+            "# B\n\nno links here\n".to_string(),
+        ))
+        .unwrap();
+    let denied = backend.commit();
+    assert!(
+        matches!(
+            &denied,
+            Err(CommitError::Other(ValidationFailure::WriteScopeDenied(keys)))
+                if keys.contains(&key("other/b"))
+        ),
+        "commit outside the allow-list must be refused with WriteScopeDenied naming the key: \
+         {denied:?}"
+    );
+    assert!(
+        !matches!(
+            &denied,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ),
+        "the schema-validation cost must be skipped at scope None -- the refusal must come \
+         from the scope check, not from a schema Violations run"
+    );
+    assert!(on_disk(temp.path(), "other/b").is_none());
+
+    // Permitted commit: key inside the allow-list, content that WOULD
+    // violate the schema -- schema validation is skipped at scope
+    // None, so the commit must land, never be refused with Violations.
+    let mut backend2 = backend_for_config(&temp, config_with_scope(&[], &["mind/**"]))
+        .expect("for_config for second commit");
+    backend2.begin().unwrap();
+    backend2
+        .write(Write::Put(
+            key("mind/a"),
+            "# A\n\nno links here\n".to_string(),
+        ))
+        .unwrap();
+    let permitted = backend2.commit();
+    assert!(
+        matches!(&permitted, Ok(())),
+        "a permitted commit must succeed at scope None -- schema validation is skipped: \
+         {permitted:?}"
+    );
+    assert!(
+        !matches!(
+            &permitted,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ),
+        "permitted commit must not be refused with Violations at scope None: {permitted:?}"
+    );
+    assert_eq!(
+        on_disk(temp.path(), "mind/a").as_deref(),
+        Some("# A\n\nno links here\n"),
+        "permitted commit content must land on disk -- schema validation cost was skipped"
+    );
+}
+
 /// The deny/allow-only path goes end-to-end: a denied commit is
 /// refused by the scope check (the reason for the construction gate),
 /// a permitted commit lands — and the schema-validation cost is
