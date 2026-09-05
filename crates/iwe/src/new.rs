@@ -306,8 +306,8 @@ pub fn write_document(
     let result = match validating_backend(configuration) {
         None => {
             let guard = acquire_cli_commit_lock()?;
-            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
-            let result = write_document_with(configuration, prepared, NoopTransaction::new);
+            let result =
+                write_document_with(configuration, prepared, Some(&guard), NoopTransaction::new);
             drop(guard);
             result
         }
@@ -445,9 +445,19 @@ fn write_document_validated(
 /// once it already has. This is a no-op change in observable behavior
 /// under `NoopTransaction` (whose `commit` never fails), and matters only
 /// once a real backend is wired in.
+///
+/// `lock_guard`: `Some(guard)` when this write lands under
+/// `acquire_cli_commit_lock`'s hold (`write_document`'s `NoopTransaction`
+/// branch) — [`liwe::write_lock::CommitLockGuard::check_fencing`] is
+/// re-checked against it immediately before the actual filesystem write
+/// below, closing 5-iwe-t3's reclaim window on this path the same way
+/// `ValidatingTransaction::commit_locked` already closes it on its own.
+/// `None` for every other caller (T6's tests, driving a stub `Transaction`
+/// that never went through that lock at all).
 pub fn write_document_with<TX: Transaction>(
     configuration: &Configuration,
     prepared: &PreparedDocument,
+    lock_guard: Option<&liwe::write_lock::CommitLockGuard>,
     mut new_tx: impl FnMut() -> TX,
 ) -> Result<CreatedDocument, String> {
     if let Some(parent) = prepared.path.parent() {
@@ -502,6 +512,14 @@ pub fn write_document_with<TX: Transaction>(
     if tx.commit().is_err() {
         let _ = tx.abort();
         return Err("write rejected: transaction backend refused to commit".to_string());
+    }
+
+    // Fencing check, immediately before the irreversible step (the actual
+    // filesystem write below) — see this function's own doc comment.
+    if let Some(guard) = lock_guard {
+        guard
+            .check_fencing()
+            .map_err(|e| format!("write refused: {e}"))?;
     }
 
     if let Err(e) = std::fs::write(&prepared.path, &prepared.content) {
@@ -626,7 +644,7 @@ mod transaction_tests {
         let log = TransactionLog::new();
 
         let result =
-            write_document_with(&config, &prepared, || RecordingTransaction::new(log.clone()));
+            write_document_with(&config, &prepared, None, || RecordingTransaction::new(log.clone()));
 
         assert!(result.is_ok(), "{:?}", result.err());
         assert_eq!(log.begin_count(), 1);
@@ -647,7 +665,7 @@ mod transaction_tests {
         let prepared = prepared_document(dir.path(), "note", "# Note\n");
         let log = TransactionLog::new();
 
-        let result = write_document_with(&config, &prepared, || {
+        let result = write_document_with(&config, &prepared, None, || {
             RecordingTransaction::refusing_commit(log.clone())
         });
 
@@ -674,7 +692,7 @@ mod transaction_tests {
         let prepared = prepared_document(dir.path(), "note", "# Note\n");
         let log = TransactionLog::new();
 
-        let result = write_document_with(&config, &prepared, || {
+        let result = write_document_with(&config, &prepared, None, || {
             RecordingTransaction::rejecting_next_write(log.clone())
         });
 

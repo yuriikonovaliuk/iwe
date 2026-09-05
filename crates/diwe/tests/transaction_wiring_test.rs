@@ -44,7 +44,7 @@ fn apply_changes_with_is_reachable_and_drivable_from_outside_the_crate() {
     let changes = Changes::new().create(Key::name("note"), "# Note\n".to_string());
     let log = TransactionLog::new();
 
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });

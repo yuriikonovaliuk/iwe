@@ -29,7 +29,7 @@ fn write_document_with_is_reachable_and_drivable_from_outside_the_crate() {
     };
     let log = TransactionLog::new();
 
-    let result = write_document_with(&config, &prepared, {
+    let result = write_document_with(&config, &prepared, None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });

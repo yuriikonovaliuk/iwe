@@ -2861,6 +2861,11 @@ impl IweServer {
                         ),
                     }
                 },
+                // The MCP server's own commit lock (if any) is not this
+                // task's concern — this call site never held the CLI's
+                // `acquire_cli_commit_lock` guard `apply_changes_with`'s
+                // fencing check re-validates, so there is nothing to pass.
+                None,
                 new_tx,
             );
             // One journal record for this whole batch (every key

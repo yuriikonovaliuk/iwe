@@ -11,6 +11,7 @@ use liwe::model::config::Format;
 use liwe::model::{Content, Key, State};
 use liwe::operations::Changes;
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
+use liwe::write_lock::CommitLockGuard;
 
 use crate::journal::{self, Effect, KeyEffect};
 use crate::permissions::{WriteOperation, WritePermissionError};
@@ -372,8 +373,9 @@ pub fn apply_changes(
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
     journal_path: Option<&Path>,
+    lock_guard: Option<&CommitLockGuard>,
 ) -> std::io::Result<()> {
-    apply_changes_with(changes, base_path, format, check, NoopTransaction::new)?;
+    apply_changes_with(changes, base_path, format, check, lock_guard, NoopTransaction::new)?;
     journal::record_commit(journal_path, journal_effects_for(changes));
     Ok(())
 }
@@ -433,6 +435,7 @@ pub fn apply_changes_with<TX: Transaction>(
     base_path: &Path,
     format: Format,
     check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
+    lock_guard: Option<&CommitLockGuard>,
     mut new_tx: impl FnMut() -> TX,
 ) -> std::io::Result<()> {
     let extension = format.extension();
@@ -466,6 +469,16 @@ pub fn apply_changes_with<TX: Transaction>(
             if tx.commit().is_err() {
                 let _ = tx.abort();
                 return Err(transaction_backend_failed(key));
+            }
+            // Fencing check, immediately before the irreversible step (the
+            // actual filesystem removal below): mirrors the check already
+            // run immediately before `ValidatingTransaction`'s own apply
+            // (`ValidatingTransaction::commit_locked`) — a `NoopTransaction`
+            // write never goes through that `commit`, so this is this
+            // path's own equivalent guard against a slow holder's write
+            // landing after its lock was reclaimed (5-iwe-t3 / design-5).
+            if let Some(guard) = lock_guard {
+                guard.check_fencing().map_err(fencing_refused)?;
             }
             if let Err(e) = fs::remove_file(&file_path) {
                 return Err(e);
@@ -501,6 +514,11 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
+        // Fencing check immediately before the write lands — see the
+        // removal branch above for why.
+        if let Some(guard) = lock_guard {
+            guard.check_fencing().map_err(fencing_refused)?;
+        }
         if let Err(e) = fs::write(&file_path, markdown) {
             return Err(e);
         }
@@ -528,12 +546,26 @@ pub fn apply_changes_with<TX: Transaction>(
             let _ = tx.abort();
             return Err(transaction_backend_failed(key));
         }
+        // Fencing check immediately before the write lands — see the
+        // removal branch above for why.
+        if let Some(guard) = lock_guard {
+            guard.check_fencing().map_err(fencing_refused)?;
+        }
         if let Err(e) = fs::write(&file_path, markdown) {
             return Err(e);
         }
     }
 
     Ok(())
+}
+
+/// Turns a [`liwe::write_lock::CommitLockError`] from `check_fencing()`
+/// into the [`std::io::Error`] `apply_changes_with` returns, preserving the
+/// same "write refused: ..." wording every other `check_fencing()` call
+/// site in this codebase already surfaces (see `iwe::new::write_document_with`,
+/// `write_single_document_with`).
+fn fencing_refused(e: liwe::write_lock::CommitLockError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, format!("write refused: {e}"))
 }
 
 fn prune_empty_dirs(start: Option<&Path>, base_path: &Path) {
@@ -709,7 +741,7 @@ mod tests {
             let changes = Changes::new().remove(Key::name("a"));
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -753,6 +785,7 @@ mod tests {
                         Ok(())
                     }
                 },
+                None,
                 NoopTransaction::new,
             );
 
@@ -783,7 +816,7 @@ mod tests {
                 .create(Key::name("new"), "# Old\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -806,7 +839,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("extracted"), "# Extracted\n".into());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -829,7 +862,7 @@ mod tests {
             let changes = Changes::new().update(Key::name("host"), "# Host\n\ninlined\n".into());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             });
@@ -874,7 +907,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::refusing_commit(log.clone())
             });
@@ -902,7 +935,7 @@ mod tests {
             let changes = Changes::new().create(Key::name("a"), "# A\n".to_string());
             let log = TransactionLog::new();
 
-            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, {
+            let result = apply_changes_with(&changes, dir.path(), Format::Markdown, allow4, None, {
                 let log = log.clone();
                 move || RecordingTransaction::rejecting_next_write(log.clone())
             });

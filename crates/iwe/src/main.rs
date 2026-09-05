@@ -2908,13 +2908,13 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
     let result = match validating_backend(configuration) {
         None => (|| -> Result<(), String> {
             let guard = acquire_cli_commit_lock()?;
-            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
             let result = diwe::fs::apply_changes(
                 changes,
                 &get_library_path(configuration),
                 configuration.format,
                 check,
                 get_journal_path(configuration).as_deref(),
+                Some(&guard),
             )
             .map_err(|e| e.to_string());
             drop(guard);
@@ -4050,11 +4050,21 @@ fn update_command(args: Update) {
 // the failed-state contract on `Transaction::write` (a rejected write
 // must make `commit` refuse) is what this call site actually observes,
 // not merely assumes.
+//
+// `lock_guard`: `Some(guard)` when this write lands under
+// `acquire_cli_commit_lock`'s hold (`write_single_document`'s
+// `NoopTransaction` branch) — `check_fencing` is re-checked against it
+// immediately before the actual filesystem write below, closing
+// 5-iwe-t3's reclaim window on this path the same way
+// `ValidatingTransaction::commit_locked` already closes it on its own.
+// `None` for every other caller (T6's tests, driving a stub `Transaction`
+// that never went through that lock at all).
 fn write_single_document_with<TX: Transaction>(
     key: &Key,
     content: &str,
     path: &std::path::Path,
     check: impl Fn(&Key, &str, Option<&str>) -> Result<(), diwe::permissions::WritePermissionError>,
+    lock_guard: Option<&liwe::write_lock::CommitLockGuard>,
     mut new_tx: impl FnMut() -> TX,
 ) -> Result<(), String> {
     // Read the target's on-disk content, if any, *before* this write lands
@@ -4097,6 +4107,14 @@ fn write_single_document_with<TX: Transaction>(
         ));
     }
 
+    // Fencing check, immediately before the irreversible step (the actual
+    // filesystem write below) — see this function's own doc comment.
+    if let Some(guard) = lock_guard {
+        guard
+            .check_fencing()
+            .map_err(|e| format!("write refused: {e}"))?;
+    }
+
     std::fs::write(path, content)
         .map_err(|e| format!("Failed to write document file for '{key}': {e}"))
 }
@@ -4121,8 +4139,14 @@ fn write_single_document(
     match validating_backend(configuration) {
         None => {
             let guard = acquire_cli_commit_lock()?;
-            guard.check_fencing().map_err(|e| format!("write refused: {e}"))?;
-            let result = write_single_document_with(key, content, path, check, NoopTransaction::new);
+            let result = write_single_document_with(
+                key,
+                content,
+                path,
+                check,
+                Some(&guard),
+                NoopTransaction::new,
+            );
             drop(guard);
             result?
         }
@@ -4785,7 +4809,7 @@ mod transaction_tests {
         let path = dir.path().join("note.md");
         let log = TransactionLog::new();
 
-        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, None, {
             let log = log.clone();
             move || RecordingTransaction::new(log.clone())
         });
@@ -4805,7 +4829,7 @@ mod transaction_tests {
         let path = dir.path().join("note.md");
         let log = TransactionLog::new();
 
-        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, None, {
             let log = log.clone();
             move || RecordingTransaction::refusing_commit(log.clone())
         });
@@ -4832,7 +4856,7 @@ mod transaction_tests {
         let path = dir.path().join("note.md");
         let log = TransactionLog::new();
 
-        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, {
+        let result = write_single_document_with(&Key::name("note"), "# Note\n", &path, allow, None, {
             let log = log.clone();
             move || RecordingTransaction::rejecting_next_write(log.clone())
         });

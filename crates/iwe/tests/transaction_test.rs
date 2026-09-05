@@ -49,7 +49,7 @@ fn write_document_begins_and_commits_on_the_stub() {
     let doc = prepared(dir.path(), "note", "# Note\n");
     let log = TransactionLog::new();
 
-    let result = write_document_with(&config, &doc, {
+    let result = write_document_with(&config, &doc, None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -76,7 +76,7 @@ fn write_document_commit_refusal_surfaces_as_an_error_not_swallowed() {
     let doc = prepared(dir.path(), "note", "# Note\n");
     let log = TransactionLog::new();
 
-    let result = write_document_with(&config, &doc, {
+    let result = write_document_with(&config, &doc, None, {
         let log = log.clone();
         move || RecordingTransaction::refusing_commit(log.clone())
     });
@@ -120,7 +120,7 @@ fn wp04_update_body_bracket_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
 
     let changes = Changes::new().update(key.clone(), "updated body\n".to_string());
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -146,7 +146,7 @@ fn wp05_write_changed_documents_bracket_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
 
     let changes = Changes::new().update(key.clone(), "mutated\n".to_string());
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -172,7 +172,7 @@ fn wp10_attach_command_bracket_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
 
     let changes = Changes::new().update(key.clone(), "- [Note]\n".to_string());
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -198,7 +198,7 @@ fn wp11_normalize_per_key_bracket_begins_and_commits_on_the_stub() {
     let log = TransactionLog::new();
 
     let changes = Changes::new().update(key.clone(), "# Normalized\n".to_string());
-    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), {
+    let result = apply_changes_with(&changes, dir.path(), Format::Markdown, |_, _, _, _| Ok(()), None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
