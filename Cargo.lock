@@ -1712,6 +1712,7 @@ dependencies = [
  "env_logger",
  "indoc",
  "itertools 0.15.0",
+ "iwe-lock",
  "jotdown",
  "log",
  "minijinja",

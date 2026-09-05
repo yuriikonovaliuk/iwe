@@ -11,3 +11,4 @@ pub mod query;
 pub mod schema;
 pub mod state;
 pub mod transaction;
+pub mod write_lock;
