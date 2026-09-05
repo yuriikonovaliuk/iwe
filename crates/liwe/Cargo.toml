@@ -54,6 +54,15 @@ required-features = ["djot"]
 name = "body_property_addressing"
 path = "tests/body_property_addressing_test.rs"
 
+# 5-iwe-t2-write-lock-wrapper (M6-b, knowledge-compositor): contract-only
+# tests for liwe::write_lock, written by Test-builder without reading
+# Developer's implementation. Own test target (not folded into
+# tests/main.rs) so it runs under plain `cargo test` without requiring the
+# `djot` feature.
+[[test]]
+name = "write_lock"
+path = "tests/write_lock_test.rs"
+
 [dev-dependencies]
 env_logger.workspace = true
 pretty_assertions.workspace = true
