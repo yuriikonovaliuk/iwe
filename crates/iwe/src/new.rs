@@ -332,8 +332,9 @@ pub fn write_document(
 
 /// Acquires the store-wide commit lock for a CLI write that will land
 /// through [`NoopTransaction`] rather than [`ValidatingTransaction`] —
-/// i.e. every write whose store has no `[transactions] validate` backend
-/// configured (`validating_backend` returns `None`).
+/// i.e. every write whose store has no `[transactions]` backend
+/// configured: `validate` left at its default `none` AND `deny`/`allow`
+/// both empty (`validating_backend` returns `None`).
 ///
 /// [`ValidatingTransaction::commit`] already acquires this same lock
 /// (`liwe::write_lock::acquire_commit_lock`) for its own commit-attempt
@@ -388,10 +389,14 @@ fn widen_fencing_window_for_test() {
 
 /// The store the CLI writes — `library.path` under the working directory,
 /// which is also the project root `.iwe/` lives in — and the validating
-/// backend `[transactions] validate` asks for over it, or `None` at the
-/// section's default. Every CLI write path asks this before falling back
-/// to `NoopTransaction`, so a store gated for the MCP server is gated for
-/// `iwe create`/`update`/`rename`/… identically.
+/// backend `[transactions]` asks for over it: either `[transactions]
+/// validate` set to a non-`None` scope, or `[transactions] deny`/`allow`
+/// non-empty (the write-scope enforcement gate). `None` only when the
+/// section is fully at its default (`validate = none`, `deny = []`,
+/// `allow = []`) — the caller then stays on [`NoopTransaction`]. Every
+/// CLI write path asks this before falling back to `NoopTransaction`, so
+/// a store gated for the MCP server is gated for `iwe create`/`update`/
+/// `rename`/… identically.
 pub fn validating_backend(configuration: &Configuration) -> Option<ValidatingTransaction> {
     let root = std::env::current_dir().ok()?;
     let base_path = if configuration.library.path.is_empty() {
