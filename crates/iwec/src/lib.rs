@@ -1919,6 +1919,64 @@ impl IweServer {
             }
             Err(message) => {
                 drop(graph);
+                // The store-wide commit lock's whole acquire/fencing/apply
+                // window is owned by `ValidatingTransaction::commit`
+                // itself (5-iwe-t3) — the one backend construction both
+                // the CLI and this server's agent transactions share — so
+                // a lock timeout or a fencing failure surfaces here as
+                // this `commit_or_abort()` call's own refusal message,
+                // not as a separate acquire/check this method makes
+                // itself. Unlike every other refusal (a schema violation,
+                // a staged key changed on disk), a lock-related refusal
+                // means the commit attempt never got a fair try at
+                // validating or applying this transaction's state at
+                // all — so, alone among refusals, it must not discard the
+                // transaction: put it back so a caller can retry
+                // `iwe_tx_commit` once the lock is free. Matched on the
+                // backend's `ValidationFailure::LockTimeout` /
+                // `LockStale` wording (`crates/diwe/src/
+                // validating_transaction.rs`) since `commit_or_abort`
+                // only returns a rendered `String`, not the failure enum.
+                let lock_related = message
+                    .contains("timed out waiting to acquire the store's commit lock")
+                    || message.contains("commit lock hold was superseded");
+                if lock_related {
+                    // `commit_or_abort()`'s own failure handling already
+                    // called the backend's `abort()`, clearing its
+                    // pending writes (needed to leave the backend
+                    // reusable) — so a bare reinsert would hand a retry a
+                    // transaction with nothing left to commit. Re-stage
+                    // every collapsed effect from this transaction's own
+                    // graph (its record of the final per-key state this
+                    // transaction stages) so the backend has the same
+                    // pending writes to try again.
+                    {
+                        let tx_graph = tx.graph.lock().await;
+                        for effect in collapse_effects(&tx.effects) {
+                            let effect_key = Key::name(&effect.key);
+                            let write = match effect.effect {
+                                diwe::journal::Effect::Delete => TxWrite::Remove(effect_key),
+                                diwe::journal::Effect::Create | diwe::journal::Effect::Update => {
+                                    match tx_graph.export_key(&effect_key) {
+                                        Some(content) => TxWrite::Put(effect_key, content),
+                                        None => continue,
+                                    }
+                                }
+                            };
+                            let _ = tx.backend.write(write);
+                        }
+                    }
+                    self.open_txs
+                        .lock()
+                        .expect("open transaction lock")
+                        .insert(key, tx);
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "transaction commit refused: {message}; nothing was written and the transaction remains open for retry"
+                        ),
+                        None,
+                    ));
+                }
                 // The default handle's staged writes live on the shared
                 // graph, so discarding them means reloading the whole
                 // graph from disk — exactly today's behavior. An

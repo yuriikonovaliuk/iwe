@@ -241,6 +241,123 @@ async fn a_staged_key_changed_on_disk_underneath_the_transaction_refuses_the_com
 }
 
 #[tokio::test]
+async fn a_concurrent_external_holder_of_the_commit_lock_times_out_the_commit_and_applies_nothing()
+{
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    f.call_tool("iwe_tx_begin", json!({})).await;
+    let clean = "---\ntype: note\n---\n# New\n\nSee [Hub](hub).\n";
+    f.call_tool("iwe_create", json!({"key": "notes/new", "content": clean}))
+        .await;
+
+    // Another process holds the store-wide commit lock for the whole
+    // window this commit attempt will try to acquire it in.
+    let root = dir.path().canonicalize().unwrap();
+    let holder_root = root.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let guard =
+            liwe::write_lock::acquire_commit_lock(&holder_root).expect("external holder acquires");
+        ready_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        drop(guard);
+    });
+    ready_rx.recv().unwrap();
+
+    let message = f
+        .try_call_tool("iwe_tx_commit", json!({}))
+        .await
+        .expect_err("the lock is held elsewhere; the commit must refuse rather than block")
+        .to_string();
+    assert!(message.contains("timed out"), "{message}");
+    assert!(message.contains("remains open"), "{message}");
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+
+    // Nothing landed while refused.
+    assert!(!dir.path().join("notes/new.md").exists());
+    assert!(journal_records(&dir).is_empty());
+
+    // The transaction is still open: once the lock frees up, a retry
+    // commits it.
+    let committed = f.call_tool("iwe_tx_commit", json!({})).await;
+    assert!(!committed.is_error.unwrap_or(false), "{committed:?}");
+    assert!(dir.path().join("notes/new.md").exists());
+}
+
+#[tokio::test]
+async fn a_commit_lock_reclaimed_before_apply_is_caught_by_fencing_and_the_transaction_stays_open()
+{
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    f.call_tool("iwe_tx_begin", json!({})).await;
+    let clean = "---\ntype: note\n---\n# New\n\nSee [Hub](hub).\n";
+    f.call_tool("iwe_create", json!({"key": "notes/new", "content": clean}))
+        .await;
+
+    let root = dir.path().canonicalize().unwrap();
+    let lock_path = root.join(liwe::write_lock::DEFAULT_LOCK_PATH);
+
+    // A real commit's gap between acquiring the store commit lock and
+    // checking its fencing is otherwise microseconds wide — too narrow
+    // for an external test to land a reclaim inside deterministically.
+    // `ValidatingTransaction::commit` (the backend both the CLI and this
+    // server's agent transactions share, 5-iwe-t3) reads
+    // `IWE_TEST_LOCK_FENCING_DELAY_MS` for exactly this: widening that
+    // gap so a test can land inside it.
+    // SAFETY: no other thread reads/writes the process environment while
+    // this test runs (removed again before this function returns).
+    unsafe { std::env::set_var("IWE_TEST_LOCK_FENCING_DELAY_MS", "150") };
+
+    // An aggressive external reclaimer: waits just long enough for the
+    // in-flight commit's own acquire to land (a plain in-process file
+    // lock acquire, far faster than the MCP round trip below), then
+    // steals the lock — a `stale_after` far tighter than the production
+    // heartbeat cadence — bumping its generation and releasing it again,
+    // comfortably inside the widened window above, before the commit
+    // reaches its own fencing check.
+    let reclaimer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let lock = iwe_lock::FileLock::new(iwe_lock::LockConfig {
+            path: lock_path,
+            heartbeat_interval: std::time::Duration::from_millis(1),
+            stale_after: std::time::Duration::from_millis(5),
+            acquire_timeout: std::time::Duration::from_secs(2),
+        });
+        let stolen = lock
+            .acquire()
+            .expect("the aggressive reclaimer supersedes the live hold");
+        stolen.release();
+    });
+
+    let message = f
+        .try_call_tool("iwe_tx_commit", json!({}))
+        .await
+        .expect_err("the lock was reclaimed before the irreversible apply step")
+        .to_string();
+    reclaimer.join().unwrap();
+    // SAFETY: see the comment at the matching `set_var` above.
+    unsafe { std::env::remove_var("IWE_TEST_LOCK_FENCING_DELAY_MS") };
+
+    assert!(message.contains("superseded"), "{message}");
+    assert!(message.contains("remains open"), "{message}");
+
+    // Nothing landed, and the staged write was not discarded either.
+    assert!(!dir.path().join("notes/new.md").exists());
+    assert!(journal_records(&dir).is_empty());
+
+    // The transaction is still open: a retry, once the lock is free
+    // again, commits it.
+    let committed = f.call_tool("iwe_tx_commit", json!({})).await;
+    assert!(!committed.is_error.unwrap_or(false), "{committed:?}");
+    assert!(dir.path().join("notes/new.md").exists());
+}
+
+#[tokio::test]
 async fn a_rename_inside_a_transaction_stages_its_whole_change_set() {
     let dir = store();
     let f = fixture(&dir, ValidationScope::Full).await;
