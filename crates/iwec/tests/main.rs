@@ -3,6 +3,7 @@ mod fixture;
 mod agent_transaction_test;
 mod attach_test;
 mod concurrent_handles_test;
+mod cli_mcp_write_scope_parity_test;
 mod expire_suppressions_mcp_test;
 mod extract_test;
 mod find_test;

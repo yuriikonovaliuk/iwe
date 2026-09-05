@@ -10,7 +10,9 @@ use toml_edit::{value, DocumentMut, Item};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schema::patterns_match_raw;
 use crate::search::{parse_language, Language};
+use liwe::model::Key;
 pub use liwe::model::config::{
     DjotOptions, Format, FormatOptions, FormattingOptions, InlineType, LineBreakStyle, LinkType,
     MarkdownOptions, Operation, RefsPath, RefsText, TargetType, WikiLinkPath,
@@ -98,6 +100,16 @@ pub enum ValidationScope {
 pub struct TransactionOptions {
     #[serde(default)]
     pub validate: ValidationScope,
+    /// Keys a write may not touch, in [`SchemaBinding::r#match`] glob
+    /// syntax. Left empty (the default), nothing is denied on this basis.
+    #[serde(default)]
+    pub deny: Vec<String>,
+    /// Keys a write may touch, in the same glob syntax. Non-empty, this is
+    /// an allowlist: only matching keys are permitted and `deny` is not
+    /// consulted. Left empty (the default), nothing is restricted on this
+    /// basis.
+    #[serde(default)]
+    pub allow: Vec<String>,
 }
 
 impl Default for LibraryOptions {
@@ -561,6 +573,32 @@ pub fn journal_path_in(project_root: &Path, configuration: &Configuration) -> Op
     })
 }
 
+/// Whether a write to `key` is permitted under `[transactions]`'s
+/// `deny`/`allow` lists. `allow`, if non-empty, is an allowlist: the write
+/// is permitted iff `key` matches at least one `allow` pattern, and `deny`
+/// is not consulted. Otherwise, `deny`, if non-empty, is a denylist: the
+/// write is permitted iff `key` matches none of its patterns. With both
+/// empty, every write is permitted — today's unrestricted behavior.
+/// Pattern syntax matches [`SchemaBinding::r#match`]'s glob semantics.
+pub fn write_permitted(deny: &[String], allow: &[String], key: &Key) -> bool {
+    let key = key.as_str();
+    if !allow.is_empty() {
+        return patterns_match_raw(allow, key);
+    }
+    if !deny.is_empty() {
+        return !patterns_match_raw(deny, key);
+    }
+    true
+}
+
+/// Env var name for [`TransactionOptions::deny`], read by [`load_config`]
+/// after the TOML file is parsed. See [`apply_transactions_env_overlay`]
+/// for the override-entirely semantics.
+pub const ENV_TRANSACTIONS_DENY: &str = "IWE_TRANSACTIONS_DENY";
+/// Env var name for [`TransactionOptions::allow`]. See
+/// [`ENV_TRANSACTIONS_DENY`].
+pub const ENV_TRANSACTIONS_ALLOW: &str = "IWE_TRANSACTIONS_ALLOW";
+
 pub fn load_config() -> Result<Configuration, String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
@@ -568,7 +606,7 @@ pub fn load_config() -> Result<Configuration, String> {
     config_path.push(IWE_MARKER);
     config_path.push(CONFIG_FILE_NAME);
 
-    if config_path.exists() {
+    let mut config = if config_path.exists() {
         debug!("reading config from path: {:?}", config_path);
 
         let raw = read_to_string(&config_path).map_err(|e| {
@@ -588,11 +626,77 @@ pub fn load_config() -> Result<Configuration, String> {
             )
         })?;
         config.markdown.formatting = config.markdown.formatting.validated();
-        Ok(config)
+        config
     } else {
         debug!("using default configuration");
-        Ok(Configuration::template())
+        Configuration::template()
+    };
+
+    apply_transactions_env_overlay(&mut config.transactions)?;
+
+    Ok(config)
+}
+
+/// Splits a raw `IWE_TRANSACTIONS_DENY`/`IWE_TRANSACTIONS_ALLOW` value on
+/// `,`, trimming whitespace around each entry and dropping any entry that
+/// is empty after trimming (e.g. from a trailing comma).
+fn parse_env_pattern_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// Applies the `IWE_TRANSACTIONS_DENY`/`IWE_TRANSACTIONS_ALLOW` process-env
+/// overlay to a parsed [`TransactionOptions`], then fails fast if the
+/// *final resolved* deny and allow are both non-empty.
+///
+/// Override-entirely semantics: if either env var is set to a non-empty
+/// string, the resolved deny/allow pair comes entirely from the
+/// environment — the file's `deny`/`allow` are both discarded (not
+/// merged), and whichever of the two env vars is absent resolves to an
+/// empty list. If neither env var is set, the file's parsed deny/allow
+/// apply unchanged.
+///
+/// Fail-fast: this task's fail-fast is on the *final resolved* deny/allow
+/// pair, evaluated unconditionally after the overlay is applied — not
+/// gated on whether an env override actually happened. A config file that
+/// already carries non-empty `deny` and `allow` with neither env var set
+/// fails fast exactly the same as an env override that resolves to both
+/// non-empty; the source of the conflicting values does not matter, only
+/// the final state. `load_config` returns `Err` — this is the existing
+/// `Result<Configuration, String>` error type, not a new error type.
+/// There is no error enum on this path: the error is a `String` message
+/// beginning with `"conflicting transactions override:"`, which
+/// callers/tests can match on with `starts_with`.
+fn apply_transactions_env_overlay(transactions: &mut TransactionOptions) -> Result<(), String> {
+    let deny_env = env::var(ENV_TRANSACTIONS_DENY)
+        .ok()
+        .filter(|v| !v.is_empty());
+    let allow_env = env::var(ENV_TRANSACTIONS_ALLOW)
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let override_applied = deny_env.is_some() || allow_env.is_some();
+    if override_applied {
+        transactions.deny = deny_env
+            .as_deref()
+            .map(parse_env_pattern_list)
+            .unwrap_or_default();
+        transactions.allow = allow_env
+            .as_deref()
+            .map(parse_env_pattern_list)
+            .unwrap_or_default();
     }
+
+    if !transactions.deny.is_empty() && !transactions.allow.is_empty() {
+        return Err(format!(
+            "conflicting transactions override: resolved deny ({:?}) and allow ({:?}) are both non-empty; set only one of {} / {}",
+            transactions.deny, transactions.allow, ENV_TRANSACTIONS_DENY, ENV_TRANSACTIONS_ALLOW
+        ));
+    }
+
+    Ok(())
 }
 
 fn migrate(config: &str) -> Result<String, String> {
@@ -892,5 +996,39 @@ mod tests {
     fn template_configuration_round_trips() {
         let rendered = toml::to_string(&Configuration::template()).expect("serializes");
         toml::from_str::<Configuration>(&rendered).expect("parses");
+    }
+
+    #[test]
+    fn write_permitted_with_no_deny_or_allow_is_unrestricted() {
+        let key = Key::name("mind/anything");
+        assert!(write_permitted(&[], &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_denies_a_matching_deny_pattern() {
+        let deny = vec!["mind/**".to_string()];
+        let key = Key::name("mind/notes");
+        assert!(!write_permitted(&deny, &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_allows_a_non_matching_deny_pattern() {
+        let deny = vec!["mind/**".to_string()];
+        let key = Key::name("world/notes");
+        assert!(write_permitted(&deny, &[], &key));
+    }
+
+    #[test]
+    fn write_permitted_allows_a_matching_allow_pattern() {
+        let allow = vec!["mind/**".to_string()];
+        let key = Key::name("mind/notes");
+        assert!(write_permitted(&[], &allow, &key));
+    }
+
+    #[test]
+    fn write_permitted_denies_a_non_matching_allow_pattern() {
+        let allow = vec!["mind/**".to_string()];
+        let key = Key::name("world/notes");
+        assert!(!write_permitted(&[], &allow, &key));
     }
 }

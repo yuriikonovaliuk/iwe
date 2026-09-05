@@ -51,6 +51,7 @@ async fn store_and_fixture(suppress_lines: &[&str]) -> (TempDir, Fixture) {
     let config = Configuration {
         transactions: TransactionOptions {
             validate: ValidationScope::Full,
+            ..Default::default()
         },
         ..Default::default()
     };

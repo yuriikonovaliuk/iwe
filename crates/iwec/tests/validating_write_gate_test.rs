@@ -47,7 +47,10 @@ fn config(scope: ValidationScope) -> Configuration {
     );
     Configuration {
         schemas,
-        transactions: TransactionOptions { validate: scope },
+        transactions: TransactionOptions {
+            validate: scope,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

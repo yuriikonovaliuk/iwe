@@ -69,7 +69,10 @@ fn store(scope: ValidationScope, suppress_lines: &[&str]) -> TempDir {
     create_dir_all(base.join(".iwe")).unwrap();
 
     let config = Configuration {
-        transactions: TransactionOptions { validate: scope },
+        transactions: TransactionOptions {
+            validate: scope,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut toml_text = toml::to_string(&config).unwrap();

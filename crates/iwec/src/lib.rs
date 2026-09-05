@@ -1816,7 +1816,10 @@ impl IweServer {
         }
         let Some(mut backend) = self.validating_backend() else {
             return Err(McpError::invalid_params(
-                "transactions are not enabled for this store: set `[transactions] validate = \"affected-set\"` or `\"full\"` in .iwe/config.toml".to_string(),
+                "transactions are not enabled for this store: set `[transactions] validate` to \
+                 \"affected-set\" or \"full\", or set `[transactions] deny`/`allow` \
+                 (write-scope enforcement also constructs a validating backend)"
+                    .to_string(),
                 None,
             ));
         };
@@ -2644,9 +2647,12 @@ impl IweServer {
         }
     }
 
-    /// The validating backend `[transactions] validate` asks for over this
-    /// server's store, or `None` when it is left at its default (`none`)
-    /// or this server has no store on disk to validate against.
+    /// The validating backend `[transactions]` asks for over this server's
+    /// store: either `[transactions] validate` set to a non-`None` scope,
+    /// or `[transactions] deny`/`allow` non-empty (the write-scope
+    /// enforcement gate). `None` only when the section is fully at its
+    /// default (`validate = none`, `deny = []`, `allow = []`), or this
+    /// server has no store on disk to validate against.
     fn validating_backend(&self) -> Option<ValidatingTransaction> {
         let base_path = self.base_path.as_ref()?;
         let root = self.project_path.as_ref().unwrap_or(base_path);
