@@ -235,9 +235,11 @@ impl ValidatingTransaction {
         }
     }
 
-    /// The scope validated at commit. [`ValidationScope::None`] is treated
-    /// as the affected set — a backend that validates nothing is
-    /// [`liwe::transaction::NoopTransaction`], not this one.
+    /// The scope validated at commit. [`ValidationScope::None`] is
+    /// honored literally — no schema validation runs at `commit()` time,
+    /// so a backend constructed only for write-scope enforcement
+    /// (`deny`/`allow` non-empty, `validate = none`) can keep `scope`
+    /// `None` and skip schema-validation cost entirely.
     pub fn with_scope(mut self, scope: ValidationScope) -> Self {
         self.scope = scope;
         self
@@ -255,16 +257,27 @@ impl ValidatingTransaction {
         self.scope
     }
 
-    /// The backend `[transactions] validate` asks for over the store at
+    /// The backend `[transactions]` asks for over the store at
     /// `base_path` inside the project at `root` (where `.iwe/` lives), or
-    /// `None` when the section is left at its default (`none`) — the
-    /// caller then stays on [`liwe::transaction::NoopTransaction`]. Built
-    /// fresh per write: the backend is cheap, and its conflict baseline
-    /// must start empty. The one construction both binaries share, so a
-    /// store gated for the MCP server is gated for the CLI too.
+    /// `None` when the section is fully left at its default (`validate =
+    /// none`, `deny = []`, `allow = []`) — the caller then stays on
+    /// [`liwe::transaction::NoopTransaction`]. A backend is built when
+    /// EITHER `[transactions] validate` is set to a non-`None` scope OR
+    /// `[transactions] deny`/`allow` is non-empty: the write-scope check
+    /// needs this backend's `commit()` to enforce `deny`/`allow` even
+    /// when no schema validation is configured. When the only trigger is
+    /// non-empty `deny`/`allow` (validate left at its default `None`), the
+    /// constructed backend's internal `scope` stays `None` so the schema
+    /// validation cost is skipped at `commit()` (the scope check alone is
+    /// what runs). Built fresh per write: the backend is cheap, and its
+    /// conflict baseline must start empty. The one construction both
+    /// binaries share, so a store gated for the MCP server is gated for
+    /// the CLI too.
     pub fn for_config(config: &Configuration, base_path: &Path, root: &Path) -> Option<Self> {
         let scope = config.transactions.validate;
-        if scope == ValidationScope::None {
+        let has_scope_list =
+            !config.transactions.deny.is_empty() || !config.transactions.allow.is_empty();
+        if scope == ValidationScope::None && !has_scope_list {
             return None;
         }
         Some(
@@ -484,7 +497,14 @@ impl ValidatingTransaction {
     }
 
     /// The reports validation produces for `state`, to this transaction's
-    /// scope.
+    /// scope. `ValidationScope::None` is honored literally — no validation
+    /// runs at `commit()` time for a backend built only for write-scope
+    /// enforcement, so this returns an empty report list rather than
+    /// falling through to the affected-set branch. The
+    /// [`Self::commit_locked`] gate in front of [`Self::validate_final_state`]
+    /// is the primary guarantee; this method stays consistent so the
+    /// "no validation at None" invariant holds even if the gate is ever
+    /// bypassed.
     fn reports_for(&self, state: &State, touched: &[Key]) -> Result<Vec<KeyReport>, Vec<String>> {
         let graph = Graph::from_state(
             state,
@@ -494,10 +514,13 @@ impl ValidatingTransaction {
         );
         let run = match self.scope {
             ValidationScope::Full => validate_store_at(&self.schemas_dir, &self.config, &graph)?,
-            ValidationScope::AffectedSet | ValidationScope::None => {
-                validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
-                    .map(|(run, _affected)| run)?
-            }
+            ValidationScope::AffectedSet => validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
+                .map(|(run, _affected)| run)?,
+            ValidationScope::None => ValidationRun {
+                documents: 0,
+                schemas: 0,
+                reports: Vec::new(),
+            },
         };
         Ok(run.reports)
     }
@@ -663,7 +686,15 @@ impl ValidatingTransaction {
             return Err(ValidationFailure::WriteScopeDenied(denied));
         }
 
-        self.validate_final_state(&touched)?;
+        // Schema validation is scoped: a backend constructed only for
+        // write-scope enforcement (`deny`/`allow` non-empty, `validate =
+        // none`) keeps `scope` at `None` and skips `validate_final_state`
+        // entirely — the scope check above is what gates the commit, and
+        // schema cost is not paid. At `AffectedSet` / `Full` the
+        // validation runs as before.
+        if self.scope != ValidationScope::None {
+            self.validate_final_state(&touched)?;
+        }
 
         // Fencing check, immediately before the irreversible step (the
         // on-disk apply below): if this hold has been superseded by a
