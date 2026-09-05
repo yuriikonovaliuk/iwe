@@ -82,7 +82,7 @@ fn config(scope: ValidationScope) -> Configuration {
     );
     Configuration {
         schemas,
-        transactions: TransactionOptions { validate: scope },
+        transactions: TransactionOptions { validate: scope, ..Default::default() },
         journal: JournalOptions {
             path: Some(".iwe/journal.ndjson".to_string()),
         },
