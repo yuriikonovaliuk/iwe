@@ -6,6 +6,7 @@ mod cli_filter_test;
 mod cli_lock_wiring_test;
 mod cli_mcp_write_scope_parity_test;
 mod cli_write_gate_test;
+mod commit_trigger_test;
 mod completions_test;
 mod create_test;
 mod d4_delete_mutability_test;

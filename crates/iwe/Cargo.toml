@@ -16,9 +16,23 @@ rust-version.workspace = true
 name = "iwe"
 path = "src/main.rs"
 
+# Probe-only fixture for the [commit] trigger e2e tests (6-t1):
+# a [[bin]] (not an example) so `CARGO_BIN_EXE_iwe_commit_probe` is
+# guaranteed available to this crate's integration tests. Never part of
+# any product surface; the iwe binary itself does not use it.
+[[bin]]
+name = "iwe_commit_probe"
+path = "tests/support/iwe_commit_probe.rs"
+
 [dependencies]
 liwe.workspace = true
 diwe.workspace = true
+# The probe fixture is a [[bin]] of this package and as such links only
+# regular dependencies, never dev-dependencies — so iwe-lock (which the
+# probe's in-window observables call) must be listed here, not in
+# [dev-dependencies]. The product binaries themselves do not use it
+# directly.
+iwe-lock.workspace = true
 indoc.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
@@ -62,5 +76,4 @@ pretty_assertions.workspace = true
 jsonschema.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
-iwe-lock.workspace = true
 criterion = { version = "0.7", features = ["html_reports"] }
