@@ -2,6 +2,7 @@ mod fixture;
 
 mod agent_transaction_test;
 mod attach_test;
+mod check_test;
 mod concurrent_handles_test;
 mod cli_mcp_write_scope_parity_test;
 mod commit_trigger_test;

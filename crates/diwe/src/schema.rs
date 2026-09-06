@@ -1859,7 +1859,7 @@ pub fn validate_store_at(
     Ok(run)
 }
 
-fn validate_documents_in(
+pub fn validate_documents_in(
     dir: &Path,
     config: &Configuration,
     graph: &Graph,

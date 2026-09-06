@@ -14,7 +14,7 @@ use diwe::find::{DocumentFinder, FindOptions, FindOutput};
 use diwe::fs::{new_for_path, new_from_hashmap};
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
-    pending_from_changes, render_reports_text, validate_pending_documents,
+    pending_from_changes, render_reports_text, validate_documents_in, validate_pending_documents,
     validate_pending_documents_in, KeyReport,
 };
 use diwe::search::Bm25Index;
@@ -440,6 +440,14 @@ pub struct ArgueParams {
         description = "Diagnose instead of list: the root cycles behind every undecided node with the moves that break them, the claims downstream of each root, the defeated claims with their reinstatement moves, and the hypotheses whose dispute waits on an observation"
     )]
     pub explain: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckParams {
+    #[schemars(
+        description = "One or more document keys to validate against their configured schema. Scoped to exactly these documents — no whole-store checkers, no cross-document invariants, no output about anything else in the graph."
+    )]
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1116,6 +1124,42 @@ impl IweServer {
             argument.warnings.retain(|w| selected.contains(&w.key));
         }
         to_json_result(&argument)
+    }
+
+    #[tool(
+        description = "Validate one or more documents by key against their configured schema — per-document rules only (frontmatter shape, link-target types, token budget, required sections), the same as `iwe schema validate -k KEY -f json`, run only against exactly the keys given here. Fast, no whole-store scan. Does NOT run whole-store-only checkers or cross-document invariants (e.g. a parent stage's state relative to its children's) — those need the unscoped CLI `iwe schema validate` (which the pre-commit hook already runs before every commit). Use this after writing or editing a document to check just that write, instead of a whole-store validate pass. Returns one {key, ok, violations} object per requested key, in order; a key matching no document also reports ok: true — this checks 'no violations found', not 'the document exists'."
+    )]
+    async fn iwe_check(
+        &self,
+        Parameters(params): Parameters<CheckParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let graph = self.graph.lock().await;
+        let requested: Vec<Key> = params.keys.iter().map(|k| Key::name(k)).collect();
+        let base_path = self.base_path.as_deref().ok_or_else(|| {
+            McpError::internal_error("this server has no store on disk to validate against", None)
+        })?;
+        // A key that doesn't exist in the graph is skipped before it ever
+        // reaches validate_documents_in: a schema's `match` glob (often
+        // "**") can select it by name alone, and the document-building
+        // path below that assumes an existing node hangs rather than
+        // erroring on one that isn't there. Trivially "no violations" —
+        // there's nothing to violate — and reported as such below.
+        let schemas_dir = schemas_dir_in(base_path);
+        let existing: Vec<Key> = requested.iter().filter(|k| graph.has_key(k)).cloned().collect();
+        let run = validate_documents_in(&schemas_dir, &self.config, &graph, &existing, true)
+            .map_err(|errors| McpError::internal_error(errors.join("; "), None))?;
+        let results: Vec<serde_json::Value> = requested
+            .iter()
+            .map(|key| match run.reports.iter().find(|r| &r.key == key) {
+                Some(report) => serde_json::json!({
+                    "key": key.to_string(),
+                    "ok": false,
+                    "violations": report.violations,
+                }),
+                None => serde_json::json!({ "key": key.to_string(), "ok": true }),
+            })
+            .collect();
+        to_json_result(&results)
     }
 
     #[tool(
@@ -2191,7 +2235,7 @@ impl ServerHandler for IweServer {
         )
         .with_server_info(Implementation::new("iwe", env!("CARGO_PKG_VERSION")))
         .with_instructions(
-            "IWE knowledge graph server. Tools: iwe_find, iwe_retrieve, iwe_tree, iwe_stats, iwe_squash, iwe_create, iwe_update, iwe_delete, iwe_query, iwe_rename, iwe_extract, iwe_inline, iwe_normalize, iwe_attach, iwe_argue. Prompts: explore, review, refactor. Resources: iwe://documents/{key}, iwe://tree, iwe://stats, iwe://config."
+            "IWE knowledge graph server. Tools: iwe_find, iwe_retrieve, iwe_tree, iwe_stats, iwe_squash, iwe_create, iwe_update, iwe_delete, iwe_query, iwe_rename, iwe_extract, iwe_inline, iwe_normalize, iwe_attach, iwe_argue, iwe_check. Prompts: explore, review, refactor. Resources: iwe://documents/{key}, iwe://tree, iwe://stats, iwe://config."
                 .to_string(),
         )
     }
