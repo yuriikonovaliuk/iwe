@@ -15,9 +15,23 @@ rust-version.workspace = true
 name = "iwec"
 path = "src/main.rs"
 
+# Probe-only fixture for the [commit] trigger e2e tests (6-t1), sharing
+# its single source file with the CLI crate's identical fixture (a [[bin]]
+# of this package so `CARGO_BIN_EXE_iwe_commit_probe` is guaranteed
+# available to this crate's integration tests).
+[[bin]]
+name = "iwe_commit_probe"
+path = "../iwe/tests/support/iwe_commit_probe.rs"
+
 [dependencies]
 liwe.workspace = true
 diwe.workspace = true
+# The probe fixture is a [[bin]] of this package and as such links only
+# regular dependencies, never dev-dependencies — so iwe-lock (which the
+# probe's in-window observables call) must be listed here, not in
+# [dev-dependencies]. The product binaries themselves do not use it
+# directly.
+iwe-lock.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -42,7 +56,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 liwe.workspace = true
 diwe.workspace = true
-iwe-lock.workspace = true
 indoc.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "test-util", "net", "time"] }
 rmcp = { version = "3", features = ["server", "client", "macros", "transport-io", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "schemars"] }
