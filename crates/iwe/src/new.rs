@@ -303,30 +303,49 @@ pub fn write_document(
     // genuine `iwe new`/`iwe create` is almost always a create, but
     // `IfExists`-driven overwrite modes can target an existing path.
     let existed = prepared.path.exists();
+    let effect = if existed {
+        diwe::journal::Effect::Update
+    } else {
+        diwe::journal::Effect::Create
+    };
+    // The store root and the journal path both resolve from the working
+    // directory (mirroring `acquire_cli_commit_lock`); neither resolvable,
+    // the journal record and its `[commit]` trigger are skipped — the exact
+    // pre-existing behavior of the journal itself on an unreachable cwd.
+    let cwd = std::env::current_dir().ok();
+    let journal_path = cwd
+        .as_deref()
+        .and_then(|root| diwe::config::journal_path_in(root, configuration));
+    let trigger = cwd.as_deref().map(|root| diwe::commit_trigger::CommitTriggerContext {
+        options: &configuration.commit,
+        store_root: root,
+    });
+    let record = |hold: Option<&liwe::write_lock::CommitLockGuard>| {
+        diwe::commit_trigger::record_commit_and_trigger(
+            journal_path.as_deref(),
+            vec![diwe::journal::KeyEffect::new(&prepared.key, effect)],
+            trigger,
+            hold,
+        );
+    };
     let result = match validating_backend(configuration) {
         None => {
             let guard = acquire_cli_commit_lock()?;
-            let result =
-                write_document_with(configuration, prepared, Some(&guard), NoopTransaction::new);
+            let result = (|| {
+                let created =
+                    write_document_with(configuration, prepared, Some(&guard), NoopTransaction::new)?;
+                record(Some(&guard));
+                Ok(created)
+            })();
             drop(guard);
             result
         }
-        Some(tx) => write_document_validated(configuration, prepared, tx),
+        Some(tx) => {
+            let created = write_document_validated(configuration, prepared, tx)?;
+            record(None);
+            Ok(created)
+        }
     };
-    if result.is_ok() {
-        let effect = if existed {
-            diwe::journal::Effect::Update
-        } else {
-            diwe::journal::Effect::Create
-        };
-        let journal_path = std::env::current_dir()
-            .ok()
-            .and_then(|root| diwe::config::journal_path_in(&root, configuration));
-        diwe::journal::record_commit(
-            journal_path.as_deref(),
-            vec![diwe::journal::KeyEffect::new(&prepared.key, effect)],
-        );
-    }
     result
 }
 

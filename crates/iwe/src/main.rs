@@ -2852,6 +2852,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
             std::process::exit(1);
         }
     };
+    let root = std::env::current_dir().expect("to get current dir");
     diwe::fs::write_store_at_path(
         &graph.export(),
         &get_library_path(configuration),
@@ -2867,6 +2868,10 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
         },
         get_journal_path(configuration).as_deref(),
         Some(&guard),
+        Some(diwe::commit_trigger::CommitTriggerContext {
+            options: &configuration.commit,
+            store_root: &root,
+        }),
     )
     .expect("Failed to write graph");
     drop(guard);
@@ -2909,6 +2914,7 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
             operation,
         )
     };
+    let root = std::env::current_dir().expect("to get current dir");
     let result = match validating_backend(configuration) {
         None => (|| -> Result<(), String> {
             let guard = acquire_cli_commit_lock()?;
@@ -2919,6 +2925,10 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
                 check,
                 get_journal_path(configuration).as_deref(),
                 Some(&guard),
+                Some(diwe::commit_trigger::CommitTriggerContext {
+                    options: &configuration.commit,
+                    store_root: &root,
+                }),
             )
             .map_err(|e| e.to_string());
             drop(guard);
@@ -2929,9 +2939,17 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
                 check(key, content, prior_content, operation).map_err(|rejected| rejected.to_string())
             })
             .map(|()| {
-                diwe::journal::record_commit(
+                // The validating backend took and released its own commit-lock
+                // hold inside `commit()`; the trigger acquires a fresh one for
+                // its own window (`hold = None`).
+                diwe::commit_trigger::record_commit_and_trigger(
                     get_journal_path(configuration).as_deref(),
                     diwe::fs::journal_effects_for(changes),
+                    Some(diwe::commit_trigger::CommitTriggerContext {
+                        options: &configuration.commit,
+                        store_root: &root,
+                    }),
+                    None,
                 )
             }),
     };
@@ -4140,35 +4158,52 @@ fn write_single_document(
     configuration: &Configuration,
 ) -> Result<(), String> {
     let existed = path.exists();
-    match validating_backend(configuration) {
-        None => {
-            let guard = acquire_cli_commit_lock()?;
-            let result = write_single_document_with(
-                key,
-                content,
-                path,
-                check,
-                Some(&guard),
-                NoopTransaction::new,
-            );
-            drop(guard);
-            result?
-        }
-        // The backend lands the write itself at `commit()`, under its
-        // lock; `check` runs inside the bracket just as above.
-        Some(tx) => tx.put_one(key, content, |prior| {
-            check(key, content, prior).map_err(|rejected| rejected.to_string())
-        })?,
-    }
     let effect = if existed {
         diwe::journal::Effect::Update
     } else {
         diwe::journal::Effect::Create
     };
-    diwe::journal::record_commit(
-        get_journal_path(configuration).as_deref(),
-        vec![diwe::journal::KeyEffect::new(key, effect)],
-    );
+    let root = std::env::current_dir().expect("to get current dir");
+    let trigger = diwe::commit_trigger::CommitTriggerContext {
+        options: &configuration.commit,
+        store_root: &root,
+    };
+    let record = |hold: Option<&liwe::write_lock::CommitLockGuard>| {
+        diwe::commit_trigger::record_commit_and_trigger(
+            get_journal_path(configuration).as_deref(),
+            vec![diwe::journal::KeyEffect::new(key, effect)],
+            Some(trigger),
+            hold,
+        );
+    };
+    match validating_backend(configuration) {
+None => {
+            let guard = acquire_cli_commit_lock()?;
+            let result = (|| -> Result<(), String> {
+                write_single_document_with(
+                    key,
+                    content,
+                    path,
+                    check,
+                    Some(&guard),
+                    NoopTransaction::new,
+                )?;
+                record(Some(&guard));
+                Ok(())
+            })();
+            drop(guard);
+            result?;
+        }
+        // The backend lands the write itself at `commit()`, under its
+        // lock, then releases it; `check` runs inside the bracket just as
+        // above. The trigger runs under a fresh hold of its own.
+        Some(tx) => {
+            tx.put_one(key, content, |prior| {
+                check(key, content, prior).map_err(|rejected| rejected.to_string())
+            })?;
+            record(None);
+        }
+    }
     Ok(())
 }
 

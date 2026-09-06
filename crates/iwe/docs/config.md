@@ -360,6 +360,32 @@ documents, with `invariants` as the keyword and `/invariants/<name>` as the
 schema path; the run exits 1. A malformed invariant is a configuration error
 (exit 2).
 
+## `[commit]`
+
+A command IWE runs after every successful commit whose journal append
+produced a record (a `journal.path` configured, non-empty effects, and the
+record actually written): one invocation per journal record,
+out-of-process, while the store's commit lock is held.
+
+```toml
+[commit]
+command = "python3 scripts/after-commit.py"
+timeout_seconds = 30
+```
+
+- `command` — the shell command, run through `sh -c` with the store root as
+  its working directory and the parent environment plus two variables:
+  `IWE_STORE_ROOT` (the absolute store path) and
+  `IWE_COMMIT_LOCK_GENERATION` (the decimal generation of the commit-lock
+  hold the commit ran under). Absent, the trigger is disabled.
+- `timeout_seconds` — how long IWE waits for the command before giving up
+  (default `30`).
+
+The trigger is best-effort and fail-open: a command that cannot start, exits
+non-zero, or outlives `timeout_seconds` never touches the already-landed
+write or its journal record, never changes the commit's result or the
+caller's exit code, and prints at most one line to stderr.
+
 ## Date format patterns
 
 Date and time formats use chrono strftime specifiers: `%Y` (2024), `%y`
