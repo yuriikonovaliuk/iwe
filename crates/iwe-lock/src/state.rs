@@ -13,8 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Size in bytes of the persisted record: an 8-byte little-endian
 /// generation followed by a 16-byte little-endian heartbeat timestamp
-/// (milliseconds since the Unix epoch).
-const RECORD_LEN: usize = 8 + 16;
+/// (milliseconds since the Unix epoch). Public to the crate so the
+/// read-only observation API (`current_generation`) can distinguish a
+/// truncated state file from a full one.
+pub(crate) const RECORD_LEN: usize = 8 + 16;
 
 /// A heartbeat of `0` means "never held, or explicitly released" — the
 /// lock is free regardless of `stale_after`.

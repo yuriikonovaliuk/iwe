@@ -35,7 +35,9 @@
 mod heartbeat;
 mod state;
 
-use std::path::PathBuf;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use heartbeat::Heartbeat;
@@ -244,4 +246,173 @@ fn mark_free_if_current(path: &std::path::Path, generation: u64) -> std::io::Res
     })();
     let _ = file.unlock();
     result
+}
+
+/// Reads the generation currently recorded on disk at `path` — the
+/// generation the lock's current holder was granted when it acquired the
+/// lock.
+///
+/// `Ok(None)` exactly when there is no readable lock state: the file is
+/// missing, or it holds fewer than the 24 bytes a full record occupies (a
+/// freshly-created or truncated state file). A released — but otherwise
+/// well-formed — lock still records its generation (with a zeroed
+/// heartbeat), so `current_generation` reports `Some` after release, the
+/// same generation the released hold was granted: the counter only ever
+/// moves forward.
+///
+/// Read-only observation: never creates the file, and shares the state
+/// file's OS lock only long enough for one consistent read.
+pub fn current_generation(path: &Path) -> io::Result<Option<Generation>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if file.metadata()?.len() < state::RECORD_LEN as u64 {
+        return Ok(None);
+    }
+    file.lock_shared()?;
+    let result = read_state(&mut file);
+    let _ = file.unlock();
+    Ok(Some(Generation(result?.generation)))
+}
+
+/// Whether the lock at `path` is held right now: its recorded heartbeat
+/// is fresh enough that no acquirer would consider it reclaimable —
+/// younger than `stale_after` from now.
+///
+/// `false` when the file is missing, when the record is truncated (a
+/// never-held lock), when the lock has been explicitly released (a zeroed
+/// heartbeat), or when the recorded heartbeat is older than
+/// `stale_after` (a stale holder — reclaimable, so not "held").
+///
+/// Read-only observation, like [`current_generation`]; the caller picks
+/// `stale_after` to match the `LockConfig` of the lock it is observing.
+pub fn is_held_now(path: &Path, stale_after: Duration) -> io::Result<bool> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    file.lock_shared()?;
+    let result = read_state(&mut file);
+    let _ = file.unlock();
+    let state = result?;
+    Ok(!state.is_free(now_millis(), stale_after.as_millis()))
+}
+
+#[cfg(test)]
+mod read_api_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_path(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "iwe-lock-read-api-{}-{}-{}.lock",
+            std::process::id(),
+            tag,
+            n
+        ))
+    }
+
+    fn live_config(path: PathBuf) -> LockConfig {
+        LockConfig {
+            path,
+            heartbeat_interval: Duration::from_millis(20),
+            stale_after: Duration::from_secs(3600),
+            acquire_timeout: Duration::from_millis(200),
+        }
+    }
+
+    #[test]
+    fn current_generation_matches_the_live_guard_and_survives_release() {
+        let path = unique_path("gen");
+        assert_eq!(
+            current_generation(&path).unwrap(),
+            None,
+            "a missing lock file must read as no generation"
+        );
+
+        let guard = FileLock::new(live_config(path.clone()))
+            .acquire()
+            .expect("free lock must acquire");
+        assert_eq!(
+            current_generation(&path).unwrap(),
+            Some(guard.generation()),
+            "after acquire the recorded generation must be the guard's own"
+        );
+        assert!(
+            is_held_now(&path, Duration::from_secs(3600)).unwrap(),
+            "a live, freshly-acquired lock must be held"
+        );
+
+        let generation = guard.generation();
+        guard.release();
+        assert_eq!(
+            current_generation(&path).unwrap(),
+            Some(generation),
+            "a released lock must still record the generation it was held under"
+        );
+        assert!(
+            !is_held_now(&path, Duration::from_secs(3600)).unwrap(),
+            "a released lock must not be held"
+        );
+    }
+
+    #[test]
+    fn missing_and_truncated_state_files_read_as_no_generation() {
+        let missing = unique_path("missing");
+        assert_eq!(current_generation(&missing).unwrap(), None);
+        assert!(!is_held_now(&missing, Duration::from_secs(1)).unwrap());
+
+        let truncated = unique_path("truncated");
+        fs::write(&truncated, b"too short for a record").unwrap();
+        assert_eq!(
+            current_generation(&truncated).unwrap(),
+            None,
+            "a state file shorter than 24 bytes must read as no generation"
+        );
+        assert!(
+            !is_held_now(&truncated, Duration::from_secs(1)).unwrap(),
+            "a truncated state file must not read as held"
+        );
+    }
+
+    #[test]
+    fn stale_heartbeat_reads_as_not_held() {
+        let path = unique_path("stale");
+        // A holder that heartbeats once (at spawn) and then goes quiet:
+        // with a short stale_after, its recorded heartbeat ages past the
+        // threshold and the lock reads as not held — a hung-but-not-crashed
+        // holder.
+        let guard = FileLock::new(LockConfig {
+            path: path.clone(),
+            heartbeat_interval: Duration::from_secs(3600),
+            stale_after: Duration::from_millis(50),
+            acquire_timeout: Duration::from_millis(200),
+        })
+        .acquire()
+        .expect("free lock must acquire");
+        assert!(
+            is_held_now(&path, Duration::from_secs(3600)).unwrap(),
+            "immediately after acquire the heartbeat is fresh"
+        );
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !is_held_now(&path, Duration::from_millis(50)).unwrap(),
+            "a holder whose heartbeat has gone stale must not read as held"
+        );
+        // A longer stale_after window still considers the same heartbeat
+        // fresh — the bound is the caller's, not the file's.
+        assert!(
+            is_held_now(&path, Duration::from_secs(3600)).unwrap(),
+            "the same stale-by-one-clock read is fresh by a longer one"
+        );
+
+        let _ = guard;
+    }
 }
