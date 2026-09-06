@@ -109,6 +109,13 @@ impl CommitLockGuard {
             Err(error) => Err(CommitLockError::Io(error)),
         }
     }
+
+    /// The generation this hold was granted on acquire — the value a
+    /// `[commit]` trigger must present as its `IWE_COMMIT_LOCK_GENERATION`
+    /// env var (the decimal of this `Generation`'s `.0`). Read-only, free.
+    pub fn generation(&self) -> iwe_lock::Generation {
+        self.inner.generation()
+    }
 }
 
 /// Acquires the store-wide commit lock at `repo_root`/[`DEFAULT_LOCK_PATH`],
