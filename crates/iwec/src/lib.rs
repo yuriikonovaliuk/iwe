@@ -40,6 +40,7 @@ use liwe::query::{
     OperationKind, Outcome, ProjectionBase,
 };
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
+use liwe::write_lock::CommitLockGuard;
 use minijinja::{context, Environment};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -1908,7 +1909,7 @@ impl IweServer {
                         }
                     }
                 }
-                self.record_journal_commit(collapse_effects(&tx.effects));
+                self.record_journal_commit(collapse_effects(&tx.effects), None);
                 drop(graph);
                 #[derive(Serialize)]
                 struct TxCommitted {
@@ -2541,11 +2542,46 @@ impl IweServer {
             }
         }
         match self.validating_backend() {
-            None => self.write_file_with(key, content, NoopTransaction::new)?,
-            Some(tx) => self.write_file_validated(key, content, tx)?,
+            // 6-t1: a `NoopTransaction` write never goes through a
+            // validating backend's lock, so — mirroring the CLI's
+            // `acquire_cli_commit_lock` branch — it takes the store-wide
+            // commit lock for the whole commit attempt itself: acquired
+            // at the start, fenced immediately before the filesystem
+            // write inside `write_file_with`, held through the journal
+            // record and the `[commit]` trigger, released on every exit
+            // (the `drop(guard)` below runs regardless of which arm the
+            // closure took). This is what presents those journal records
+            // to the trigger inside a commit-lock window.
+            None => match self.project_path.clone() {
+                Some(root) => {
+                    let guard = liwe::write_lock::acquire_commit_lock(&root)
+                        .map_err(|error| format!("write refused: {error}"))?;
+                    let result = (|| {
+                        self.write_file_with(key, content, Some(&guard), NoopTransaction::new)?;
+                        self.record_journal_commit(
+                            vec![diwe::journal::KeyEffect::new(key, effect)],
+                            Some(&guard),
+                        );
+                        Ok(())
+                    })();
+                    drop(guard);
+                    result
+                }
+                None => {
+                    self.write_file_with(key, content, None, NoopTransaction::new)?;
+                    self.record_journal_commit(
+                        vec![diwe::journal::KeyEffect::new(key, effect)],
+                        None,
+                    );
+                    Ok(())
+                }
+            },
+            Some(tx) => {
+                self.write_file_validated(key, content, tx)?;
+                self.record_journal_commit(vec![diwe::journal::KeyEffect::new(key, effect)], None);
+                Ok(())
+            }
         }
-        self.record_journal_commit(vec![diwe::journal::KeyEffect::new(key, effect)]);
-        Ok(())
     }
 
     /// Stages the whole of `changes` on the open transaction named by
@@ -2719,9 +2755,29 @@ impl IweServer {
     /// configured — the single call every write path (`write_file`,
     /// `write_changes_with`) makes after its own writes have all
     /// succeeded, so a rejected or aborted write never reaches this call
-    /// at all.
-    fn record_journal_commit(&self, effects: Vec<diwe::journal::KeyEffect>) {
-        diwe::journal::record_commit(self.journal_path().as_deref(), effects);
+    /// at all — and runs the `[commit]` trigger exactly when that append
+    /// produced a record. `hold` is the commit-lock guard currently live
+    /// at this call site: `Some` from `write_file`/`write_changes`'s
+    /// `NoopTransaction` branches (which hold the store's commit lock
+    /// across the write and the record), `None` from the validated
+    /// branches, whose backend took and released its own hold inside
+    /// `commit()` — the trigger then acquires a fresh hold for its own
+    /// window.
+    fn record_journal_commit(
+        &self,
+        effects: Vec<diwe::journal::KeyEffect>,
+        hold: Option<&CommitLockGuard>,
+    ) {
+        let root = self.project_path.as_deref();
+        diwe::commit_trigger::record_commit_and_trigger(
+            self.journal_path().as_deref(),
+            effects,
+            root.map(|root| diwe::commit_trigger::CommitTriggerContext {
+                options: &self.config.commit,
+                store_root: root,
+            }),
+            hold,
+        );
     }
 
     /// Generic core of [`Self::write_file`], parameterized over the
@@ -2746,10 +2802,19 @@ impl IweServer {
     /// (`liwe::transaction::RecordingTransaction`), to prove this MCP call
     /// site actually drives `begin`/`write`/`commit`/`abort`, rather than
     /// merely compiling against the trait.
+    ///
+    /// `lock_guard`: `Some(guard)` when this write lands under
+    /// `write_file`'s own commit-lock hold (its `NoopTransaction`
+    /// branch) — `check_fencing` is re-checked against it immediately
+    /// before the actual filesystem write below, the same 5-iwe-t4 idiom
+    /// `diwe::fs::apply_changes_with` / `write_store_at_path_with`
+    /// follow. `None` for every other caller (T6's tests, driving a stub
+    /// `Transaction` that never went through that lock at all).
     pub fn write_file_with<TX: Transaction>(
         &self,
         key: &Key,
         content: &str,
+        lock_guard: Option<&CommitLockGuard>,
         mut new_tx: impl FnMut() -> TX,
     ) -> Result<(), String> {
         let Some(file_path) = self.document_path(key) else {
@@ -2779,6 +2844,18 @@ impl IweServer {
             return Err(format!(
                 "write rejected: transaction backend refused to commit for '{key}'"
             ));
+        }
+        // Fencing check, immediately before the irreversible step (the
+        // actual filesystem write below) — mirrors the checks
+        // `diwe::fs::apply_changes_with` runs before each of its on-disk
+        // steps: a `NoopTransaction` write never goes through
+        // `ValidatingTransaction`'s own `commit_locked` fence, so it needs
+        // its own guard against a slow holder's write landing after its
+        // lock was reclaimed.
+        if let Some(guard) = lock_guard {
+            guard
+                .check_fencing()
+                .map_err(|e| format!("write refused: {e}"))?;
         }
         match std::fs::write(&file_path, content) {
             Ok(()) => Ok(()),
@@ -2815,10 +2892,25 @@ impl IweServer {
             ));
         }
         match self.validating_backend() {
-            None => self.write_changes_with(changes, NoopTransaction::new),
+            // 6-t1: commit-lock coverage for the `NoopTransaction` write
+            // path, exactly as `write_file` takes it (see there): the
+            // write and the journal record + `[commit]` trigger all land
+            // inside one held commit-lock window, fenced per on-disk step
+            // by `diwe::fs::apply_changes_with`, released on every exit.
+            None => match self.project_path.clone() {
+                Some(root) => {
+                    let guard = liwe::write_lock::acquire_commit_lock(&root)
+                        .map_err(|error| format!("write refused: {error}"))?;
+                    let result =
+                        self.write_changes_with(changes, Some(&guard), NoopTransaction::new);
+                    drop(guard);
+                    result
+                }
+                None => self.write_changes_with(changes, None, NoopTransaction::new),
+            },
             Some(tx) => {
                 self.write_changes_validated(changes, tx)?;
-                self.record_journal_commit(diwe::fs::journal_effects_for(changes));
+                self.record_journal_commit(diwe::fs::journal_effects_for(changes), None);
                 Ok(())
             }
         }
@@ -2827,9 +2919,16 @@ impl IweServer {
     /// Generic core of [`Self::write_changes`], parameterized over the
     /// transaction backend the same way [`Self::write_file_with`] is —
     /// `pub` for the same reason; see that method's doc comment.
+    ///
+    /// `lock_guard` is threaded straight through to
+    /// `diwe::fs::apply_changes_with` (whose per-on-disk-step fencing
+    /// checks it re-validates) and to the journal record + `[commit]`
+    /// trigger at the end — `Some(&guard)` from `write_changes`'s
+    /// `NoopTransaction` branch, `None` for every other caller.
     pub fn write_changes_with<TX: Transaction>(
         &self,
         changes: &Changes,
+        lock_guard: Option<&CommitLockGuard>,
         new_tx: impl FnMut() -> TX,
     ) -> Result<(), String> {
         let Some(base_path) = &self.base_path else {
@@ -2867,11 +2966,12 @@ impl IweServer {
                         ),
                     }
                 },
-                // The MCP server's own commit lock (if any) is not this
-                // task's concern — this call site never held the CLI's
-                // `acquire_cli_commit_lock` guard `apply_changes_with`'s
-                // fencing check re-validates, so there is nothing to pass.
-                None,
+                // The commit-lock guard `write_changes`'s `NoopTransaction`
+                // branch holds (if any): passed through so
+                // `apply_changes_with`'s per-write fencing checks and this
+                // call site's journal record + `[commit]` trigger all land
+                // inside the same held commit-lock window.
+                lock_guard,
                 new_tx,
             );
             // One journal record for this whole batch (every key
@@ -2883,7 +2983,10 @@ impl IweServer {
             // `apply_changes_with` returned an error partway through.
             match result {
                 Ok(()) => {
-                    self.record_journal_commit(diwe::fs::journal_effects_for(changes));
+                    self.record_journal_commit(
+                        diwe::fs::journal_effects_for(changes),
+                        lock_guard,
+                    );
                     Ok(())
                 }
                 Err(error) => Err(error.to_string()),
@@ -2966,7 +3069,7 @@ mod transaction_tests {
         let server = server_over(dir.path());
         let log = TransactionLog::new();
 
-        let result = server.write_file_with(&Key::name("note"), "# Note\n", {
+        let result = server.write_file_with(&Key::name("note"), "# Note\n", None, {
             let log = log.clone();
             move || RecordingTransaction::new(log.clone())
         });
@@ -2991,7 +3094,7 @@ mod transaction_tests {
         let log = TransactionLog::new();
 
         server
-            .write_changes_with(&changes, {
+            .write_changes_with(&changes, None, {
                 let log = log.clone();
                 move || RecordingTransaction::new(log.clone())
             })

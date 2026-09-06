@@ -31,7 +31,7 @@ fn write_file_with_is_reachable_and_drivable_from_outside_the_crate() {
     let server = server_over(dir.path());
     let log = TransactionLog::new();
 
-    let result = server.write_file_with(&Key::name("note"), "# Note\n", {
+    let result = server.write_file_with(&Key::name("note"), "# Note\n", None, {
         let log = log.clone();
         move || RecordingTransaction::new(log.clone())
     });
@@ -53,7 +53,7 @@ fn write_changes_with_is_reachable_and_drivable_from_outside_the_crate() {
     let log = TransactionLog::new();
 
     server
-        .write_changes_with(&changes, {
+        .write_changes_with(&changes, None, {
             let log = log.clone();
             move || RecordingTransaction::new(log.clone())
         })

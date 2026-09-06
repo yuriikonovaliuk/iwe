@@ -132,7 +132,10 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                notice(format!("'{command}' did not finish within {}s", timeout.as_secs()));
+                notice(format!(
+                    "'{command}' did not finish within {}s",
+                    timeout.as_secs()
+                ));
                 return;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
