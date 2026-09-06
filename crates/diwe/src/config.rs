@@ -74,6 +74,30 @@ pub struct JournalOptions {
     pub path: Option<String>,
 }
 
+/// `[commit]`: an out-of-process command IWE runs after every successful
+/// commit whose journal append produced a record (see [`crate::journal`]
+/// and [`crate::commit_trigger`]). The command runs through the shell
+/// (`sh -c`), with the store root as its working directory and two extra
+/// environment variables: `IWE_STORE_ROOT` (the absolute store path) and
+/// `IWE_COMMIT_LOCK_GENERATION` (the decimal generation of the commit-lock
+/// hold the commit ran under). Best-effort and fail-open: a trigger that
+/// cannot start, exits non-zero, or outlives its timeout never touches
+/// the write or its journal record, never changes the commit's result or
+/// exit code, and prints at most one line to stderr. Absent entirely, IWE
+/// behaves exactly as it does without this section.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommitOptions {
+    /// The shell command to run after a journal-recorded commit, or absent
+    /// ([`None`], the default) to disable the trigger entirely.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// How long IWE waits for the command before giving up (failure is
+    /// ignored either way). Defaults to `30` seconds when absent.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+}
+
 /// How far a write's transaction looks before it lets the write land.
 /// `none` (the default) keeps AB9's no-op passthrough: the pending
 /// documents are shape-checked on their own and nothing else stands
@@ -145,6 +169,8 @@ pub struct Configuration {
     pub journal: JournalOptions,
     #[serde(default)]
     pub transactions: TransactionOptions,
+    #[serde(default)]
+    pub commit: CommitOptions,
     #[serde(default)]
     pub commands: HashMap<String, Command>,
     #[serde(default)]
@@ -320,6 +346,7 @@ impl Default for Configuration {
             search: Default::default(),
             journal: Default::default(),
             transactions: Default::default(),
+            commit: Default::default(),
             commands: Default::default(),
             actions: Default::default(),
             templates: Default::default(),
@@ -955,7 +982,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `transactions`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `transactions`, `commit`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
             "#}
         );
     }

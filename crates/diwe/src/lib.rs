@@ -1,4 +1,5 @@
 pub mod checkers;
+pub mod commit_trigger;
 pub mod config;
 pub mod file;
 pub mod find;

@@ -30,6 +30,7 @@ fn writes_dj_extension() {
         |_key, _content, _prior_content| Ok(()),
         None,
         None,
+        None,
     )
     .unwrap();
 

@@ -84,7 +84,10 @@ pub struct Record {
 /// Does nothing when `path` is `None` (no `journal.path` configured, the
 /// default) or `effects` is empty, so every caller can invoke this
 /// unconditionally after a successful commit without checking
-/// configuration itself.
+/// configuration itself. Returns whether a record was actually appended
+/// (`true` only when `path` was configured, `effects` was non-empty, and
+/// the append succeeded) — the `[commit]` trigger (see
+/// [`crate::commit_trigger`]) fires on exactly these calls.
 ///
 /// This function never returns an error, because nothing about a caller's
 /// already-successful commit should be undone or blocked by the journal
@@ -100,17 +103,18 @@ pub struct Record {
 /// immediately-following failure at that same `path` stays quiet, until a
 /// successful write to that `path` clears the state, at which point the
 /// next failure prints again. See [`failure_marker_path`].
-pub fn record_commit(path: Option<&Path>, effects: Vec<KeyEffect>) {
+pub fn record_commit(path: Option<&Path>, effects: Vec<KeyEffect>) -> bool {
     let Some(path) = path else {
-        return;
+        return false;
     };
     if effects.is_empty() {
-        return;
+        return false;
     }
     let marker = failure_marker_path(path);
     match append(path, effects) {
         Ok(()) => {
             let _ = std::fs::remove_file(&marker);
+            true
         }
         Err(error) => {
             // The marker not existing means this is the first failure
@@ -127,6 +131,7 @@ pub fn record_commit(path: Option<&Path>, effects: Vec<KeyEffect>) {
                 );
             }
             let _ = std::fs::write(&marker, b"");
+            false
         }
     }
 }

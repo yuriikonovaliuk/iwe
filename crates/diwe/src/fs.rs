@@ -13,7 +13,7 @@ use liwe::operations::Changes;
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 use liwe::write_lock::CommitLockGuard;
 
-use crate::journal::{self, Effect, KeyEffect};
+use crate::journal::{Effect, KeyEffect};
 use crate::permissions::{WriteOperation, WritePermissionError};
 
 pub fn write_file(
@@ -192,6 +192,11 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
 /// function returns an error partway through, or if `journal_path` is
 /// `None` (the default).
 ///
+/// `trigger`, if configured (see [`crate::commit_trigger`]), runs the
+/// `[commit]` command exactly when that journal record is actually
+/// appended — still inside the `lock_guard` hold, before this call
+/// returns.
+///
 /// `lock_guard`: `Some(guard)` when this whole-store rewrite lands under
 /// `acquire_cli_commit_lock`'s hold (`crates/iwe/src/main.rs`'s
 /// `write_graph`, `iwe normalize`'s bare `--key` branch) — `check_fencing`
@@ -202,7 +207,8 @@ pub fn new_from_hashmap(map: HashMap<String, String>) -> State {
 /// `ValidatingTransaction`'s `commit_locked` fence, so each write needs its
 /// own guard against landing after its lock was reclaimed. `None` for every
 /// other caller (T6's tests, driving a stub `Transaction` that never went
-/// through that lock in the first place).
+/// through that lock in the first place). The same guard doubles as the
+/// trigger's generation source when it is live.
 pub fn write_store_at_path(
     store: &State,
     to: &Path,
@@ -210,6 +216,7 @@ pub fn write_store_at_path(
     check: impl Fn(&Key, &str, Option<&str>) -> Result<(), WritePermissionError>,
     journal_path: Option<&Path>,
     lock_guard: Option<&CommitLockGuard>,
+    trigger: Option<crate::commit_trigger::CommitTriggerContext<'_>>,
 ) -> std::io::Result<()> {
     // Snapshotted before the writes land, since every key in `store` will
     // exist on disk by the time `write_store_at_path_with` returns —
@@ -235,7 +242,12 @@ pub fn write_store_at_path(
             KeyEffect::new(&doc_key, effect)
         })
         .collect();
-    journal::record_commit(journal_path, effects);
+    crate::commit_trigger::record_commit_and_trigger(
+        journal_path,
+        effects,
+        trigger,
+        lock_guard,
+    );
 
     Ok(())
 }
@@ -399,6 +411,11 @@ fn transaction_backend_failed(key: &Key) -> std::io::Error {
 /// record, for example), not one record per document. Nothing is appended
 /// if this function returns an error partway through, or if `journal_path`
 /// is `None` (the default).
+///
+/// `trigger`, if configured (see [`crate::commit_trigger`]), runs the
+/// `[commit]` command exactly when that journal record is actually
+/// appended — still inside the `lock_guard` hold, before this call
+/// returns.
 pub fn apply_changes(
     changes: &Changes,
     base_path: &Path,
@@ -406,9 +423,15 @@ pub fn apply_changes(
     check: impl Fn(&Key, &str, Option<&str>, WriteOperation) -> Result<(), WritePermissionError>,
     journal_path: Option<&Path>,
     lock_guard: Option<&CommitLockGuard>,
+    trigger: Option<crate::commit_trigger::CommitTriggerContext<'_>>,
 ) -> std::io::Result<()> {
     apply_changes_with(changes, base_path, format, check, lock_guard, NoopTransaction::new)?;
-    journal::record_commit(journal_path, journal_effects_for(changes));
+    crate::commit_trigger::record_commit_and_trigger(
+        journal_path,
+        journal_effects_for(changes),
+        trigger,
+        lock_guard,
+    );
     Ok(())
 }
 
