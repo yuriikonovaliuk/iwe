@@ -11,6 +11,7 @@ mod extract_test;
 mod find_test;
 mod freeze_dominates_mutability_test;
 mod freeze_multi_property_write_test;
+mod handle_keyed_open_txs_test;
 mod http_transport_test;
 mod inline_test;
 mod mutability_test;
