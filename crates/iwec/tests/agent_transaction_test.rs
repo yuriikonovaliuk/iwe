@@ -435,3 +435,76 @@ async fn without_the_transactions_section_begin_is_refused() {
         .to_string();
     assert!(message.contains("[transactions] validate"), "{message}");
 }
+
+#[tokio::test]
+async fn a_second_explicit_begin_is_refused_while_a_different_explicit_one_is_open() {
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    // Three explicit handles open at once — multiplicity is not refused;
+    // only a *second* begin naming an already-occupied key is. `h3`'s own
+    // handle string is literally "default", the reserved slot an omitted
+    // `handle` resolves to — an explicit handle can occupy that slot too,
+    // and once it does, an omitted-handle begin finds it occupied exactly
+    // like any other explicit collision.
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "h1"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    f.call_tool(
+        "iwe_create",
+        json!({
+            "handle": "h1",
+            "key": "notes/h1",
+            "content": "---\ntype: note\n---\n# H1\n\nSee [Hub](hub).\n",
+        }),
+    )
+    .await;
+
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "h2"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    f.call_tool(
+        "iwe_create",
+        json!({
+            "handle": "h2",
+            "key": "notes/h2",
+            "content": "---\ntype: note\n---\n# H2\n\nSee [Hub](hub).\n",
+        }),
+    )
+    .await;
+
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "default"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    f.call_tool(
+        "iwe_create",
+        json!({
+            "handle": "default",
+            "key": "notes/h3",
+            "content": "---\ntype: note\n---\n# H3\n\nSee [Hub](hub).\n",
+        }),
+    )
+    .await;
+
+    // A fourth begin naming any of the three occupied keys — explicit
+    // `h1`, explicit `h2`, or the default key (occupied by `h3`, above) —
+    // is refused, and each refusal names the conflicting transaction's
+    // staged keys, same pattern as `a_second_begin_is_refused_while_one_is_open`.
+    let message = f
+        .try_call_tool("iwe_tx_begin", json!({"handle": "h1"}))
+        .await
+        .expect_err("h1 is already open")
+        .to_string();
+    assert!(message.contains("already open") && message.contains("notes/h1"), "{message}");
+
+    let message = f
+        .try_call_tool("iwe_tx_begin", json!({"handle": "h2"}))
+        .await
+        .expect_err("h2 is already open")
+        .to_string();
+    assert!(message.contains("already open") && message.contains("notes/h2"), "{message}");
+
+    let message = f
+        .try_call_tool("iwe_tx_begin", json!({}))
+        .await
+        .expect_err("the default key is already open, occupied by the explicit h3 begin")
+        .to_string();
+    assert!(message.contains("already open") && message.contains("notes/h3"), "{message}");
+}
