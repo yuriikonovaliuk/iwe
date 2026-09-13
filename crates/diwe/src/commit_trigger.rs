@@ -101,10 +101,24 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
     // both env vars carry the absolute form of it.
     let store_root = std::path::absolute(store_root).unwrap_or_else(|_| store_root.to_path_buf());
 
+    // The trigger's `kc` lives beside this binary (both installed into the
+    // owner's bin directory); a caller's PATH may not reach it — sudo
+    // resets PATH when the store's owner runs iwe — so this binary's own
+    // directory goes first.
+    let path = {
+        let own_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let current = std::env::var("PATH").unwrap_or_default();
+        match own_dir {
+            Some(dir) => format!("{}:{current}", dir.display()),
+            None => current,
+        }
+    };
+
     let mut child = match Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(&store_root)
+        .env("PATH", path)
         .env(ENV_STORE_ROOT, &store_root)
         .env(ENV_LOCK_GENERATION, generation.to_string())
         .stdout(Stdio::null())
