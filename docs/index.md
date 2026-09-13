@@ -44,6 +44,8 @@
 
 ## Concepts
 
+[How IWE Compares](comparison.md)
+
 [Inclusion Links](inclusion-links.md)
 
 [Keys and Cross-References](keys.md)
@@ -57,6 +59,8 @@
 [Transactions](transactions.md)
 
 ## Features
+
+[Feature Overview](feature-overview.md)
 
 [Notes Search](feature-search.md)
 

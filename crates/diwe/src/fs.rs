@@ -22,10 +22,19 @@ pub fn write_file(
     to: &Path,
     format: Format,
 ) -> std::io::Result<()> {
-    fs::write(
-        to.join(format!("{}.{}", key, format.extension())),
+    write_file_if_changed(
+        &to.join(format!("{}.{}", key, format.extension())),
         content.as_str(),
     )
+    .map(|_| ())
+}
+
+pub fn write_file_if_changed(path: &Path, content: &str) -> std::io::Result<bool> {
+    if fs::read_to_string(path).is_ok_and(|current| current == content) {
+        return Ok(false);
+    }
+    fs::write(path, content)?;
+    Ok(true)
 }
 
 pub fn new_for_path(base_path: &PathBuf, format: Format) -> State {
@@ -574,9 +583,7 @@ pub fn apply_changes_with<TX: Transaction>(
         if let Some(guard) = lock_guard {
             guard.check_fencing().map_err(fencing_refused)?;
         }
-        if let Err(e) = fs::write(&file_path, markdown) {
-            return Err(e);
-        }
+        write_file_if_changed(&file_path, markdown)?;
     }
 
     for (key, markdown) in &changes.updates {
@@ -606,9 +613,7 @@ pub fn apply_changes_with<TX: Transaction>(
         if let Some(guard) = lock_guard {
             guard.check_fencing().map_err(fencing_refused)?;
         }
-        if let Err(e) = fs::write(&file_path, markdown) {
-            return Err(e);
-        }
+        write_file_if_changed(&file_path, markdown)?;
     }
 
     Ok(())
@@ -653,6 +658,72 @@ mod tests {
     #[test]
     fn sanitize_content_strips_crlf() {
         assert_eq!("a\nb\nc\n", sanitize_content("a\r\nb\r\nc\r\n".into()));
+    }
+
+    fn modified_at(path: &Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn backdate(path: &Path) -> std::time::SystemTime {
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        modified_at(path)
+    }
+
+    #[test]
+    fn identical_content_is_not_rewritten() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        std::fs::write(&path, "# note\n").unwrap();
+        let stamp = backdate(&path);
+
+        let wrote = write_file_if_changed(&path, "# note\n").unwrap();
+
+        assert!(!wrote);
+        assert_eq!(modified_at(&path), stamp);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# note\n");
+    }
+
+    #[test]
+    fn different_content_is_written() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        std::fs::write(&path, "# note\n").unwrap();
+        let stamp = backdate(&path);
+
+        let wrote = write_file_if_changed(&path, "# other\n").unwrap();
+
+        assert!(wrote);
+        assert_ne!(modified_at(&path), stamp);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# other\n");
+    }
+
+    #[test]
+    fn a_missing_file_is_written() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+
+        let wrote = write_file_if_changed(&path, "# note\n").unwrap();
+
+        assert!(wrote);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# note\n");
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_written() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("note.md");
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+
+        let wrote = write_file_if_changed(&path, "# note\n").unwrap();
+
+        assert!(wrote);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# note\n");
     }
 
     fn workspace_with_gitignore(ignore_body: &str) -> tempfile::TempDir {

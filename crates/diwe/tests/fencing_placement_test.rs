@@ -136,13 +136,13 @@ fn apply_changes_with_check_fencing_runs_immediately_before_each_write() {
     );
     assert_check_fencing_guards_this_write(
         &body,
-        "fs::write(&file_path, markdown)",
+        "write_file_if_changed(&file_path, markdown)",
         0,
         "crates/diwe/src/fs.rs::apply_changes_with (create)",
     );
     assert_check_fencing_guards_this_write(
         &body,
-        "fs::write(&file_path, markdown)",
+        "write_file_if_changed(&file_path, markdown)",
         1,
         "crates/diwe/src/fs.rs::apply_changes_with (update)",
     );

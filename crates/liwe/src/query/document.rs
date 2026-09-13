@@ -227,6 +227,7 @@ pub enum KeyOp {
     Ne(Key),
     In(Vec<Key>),
     Nin(Vec<Key>),
+    StartsWith(Key),
 }
 
 impl KeyOp {
@@ -241,6 +242,9 @@ impl KeyOp {
     }
     pub fn nin(keys: &[&str]) -> Self {
         KeyOp::Nin(keys.iter().map(|s| Key::name(s)).collect())
+    }
+    pub fn starts_with(prefix: impl Into<String>) -> Self {
+        KeyOp::StartsWith(Key::name(&prefix.into()))
     }
 }
 

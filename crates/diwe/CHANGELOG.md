@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `[invariants]` in `config.toml` (`Invariant { filter, expect, description }`) and `check_invariants`: graph-wide count checks with `$today`/`$today±Nd` date substitution, reported under `invariants/<name>`.
 - `links` rules in schema files — an IWE extension stripped before the document validator runs: per rule a `within` scope, `min`/`max` on distinct link targets, `target` (every target must satisfy a document filter), `some` (at least one must), `reach` (scoped links must transitively reach a key), and a `description` hint. Graph-dependent checks are skipped for partial-graph (pending buffer) validation.
 
+- `write_file_if_changed` writes a file only when its content differs from what is on disk, and returns whether it wrote. `write_file` and `apply_changes` now go through it, so no document is replaced with the bytes it already holds.
+
+## [0.24.0](https://github.com/iwe-org/iwe/compare/diwe-v0.23.2...diwe-v0.24.0) - 2026-09-08
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.23.2](https://github.com/iwe-org/iwe/compare/diwe-v0.23.1...diwe-v0.23.2) - 2026-09-08
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.23.1](https://github.com/iwe-org/iwe/compare/diwe-v0.23.0...diwe-v0.23.1) - 2026-09-06
+
+Workspace version bump — no user-visible changes in this crate.
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/diwe-v0.22.0...diwe-v0.23.0) - 2026-08-30
 
 Workspace version bump — no user-visible changes in this crate.

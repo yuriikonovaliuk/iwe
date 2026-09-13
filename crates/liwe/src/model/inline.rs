@@ -309,14 +309,14 @@ impl Inline {
     }
 }
 
-trait MarkdownSink {
+pub(crate) trait TextSink {
     fn push(&mut self, s: &str);
     fn space(&mut self);
     fn soft_break(&mut self);
     fn line_break(&mut self, marker: &str);
 }
 
-impl MarkdownSink for String {
+impl TextSink for String {
     fn push(&mut self, s: &str) {
         self.push_str(s);
     }
@@ -333,11 +333,11 @@ impl MarkdownSink for String {
 
 enum WrapToken {
     Word(String),
-    Break,
+    Break(String),
 }
 
 #[derive(Default)]
-struct TokenStream {
+pub(crate) struct TokenStream {
     tokens: Vec<WrapToken>,
     current: String,
 }
@@ -354,9 +354,35 @@ impl TokenStream {
         self.flush();
         self.tokens
     }
+
+    #[cfg(feature = "djot")]
+    pub(crate) fn wrap(self, width: usize) -> String {
+        self.wrap_lines(width, false)
+    }
+
+    pub(crate) fn wrap_escaping_markers(self, width: usize) -> String {
+        self.wrap_lines(width, true)
+    }
+
+    fn wrap_lines(self, width: usize, escape_markers: bool) -> String {
+        let mut wrapped = String::new();
+        let mut buf: Vec<String> = Vec::new();
+        for token in self.finish() {
+            match token {
+                WrapToken::Word(s) => buf.push(s),
+                WrapToken::Break(separator) => {
+                    wrapped.push_str(&greedy_wrap(&buf, width, escape_markers));
+                    wrapped.push_str(&separator);
+                    buf.clear();
+                }
+            }
+        }
+        wrapped.push_str(&greedy_wrap(&buf, width, escape_markers));
+        wrapped
+    }
 }
 
-impl MarkdownSink for TokenStream {
+impl TextSink for TokenStream {
     fn push(&mut self, s: &str) {
         self.current.push_str(s);
     }
@@ -365,10 +391,11 @@ impl MarkdownSink for TokenStream {
     }
     fn soft_break(&mut self) {
         self.flush();
+        self.tokens.push(WrapToken::Break("\n".to_string()));
     }
-    fn line_break(&mut self, _marker: &str) {
+    fn line_break(&mut self, marker: &str) {
         self.flush();
-        self.tokens.push(WrapToken::Break);
+        self.tokens.push(WrapToken::Break(marker.to_string()));
     }
 }
 
@@ -392,7 +419,7 @@ enum RenderCtx {
     Block { top_level: bool },
 }
 
-fn render_inlines<S: MarkdownSink>(
+fn render_inlines<S: TextSink>(
     inlines: &Inlines,
     options: &MarkdownOptions,
     out: &mut S,
@@ -436,7 +463,7 @@ fn render_inlines<S: MarkdownSink>(
     }
 }
 
-fn render_inline<S: MarkdownSink>(
+fn render_inline<S: TextSink>(
     inline: &Inline,
     options: &MarkdownOptions,
     out: &mut S,
@@ -569,7 +596,7 @@ fn render_inline<S: MarkdownSink>(
     }
 }
 
-fn render_code_span<S: MarkdownSink>(body: &str, out: &mut S) {
+fn render_code_span<S: TextSink>(body: &str, out: &mut S) {
     let mut max_run = 0;
     let mut run = 0;
     for ch in body.chars() {
@@ -595,7 +622,7 @@ fn render_code_span<S: MarkdownSink>(body: &str, out: &mut S) {
     out.push(&fence);
 }
 
-fn escape_str<S: MarkdownSink>(text: &str, pos: LinePos, ctx: EscapeCtx, out: &mut S) {
+fn escape_str<S: TextSink>(text: &str, pos: LinePos, ctx: EscapeCtx, out: &mut S) {
     let line_start = pos == LinePos::Start;
     let block_start = ctx.top_level && line_start;
     let lead = text.as_bytes().first().copied();
@@ -682,7 +709,7 @@ fn is_thematic_break(inlines: &Inlines) -> bool {
     dashes >= 3 && iter.all(|inline| matches!(inline, Inline::Space))
 }
 
-fn emit_link<S: MarkdownSink>(
+fn emit_link<S: TextSink>(
     url: &str,
     link_type: LinkType,
     inlines: &Inlines,
@@ -718,7 +745,7 @@ fn emit_link<S: MarkdownSink>(
     }
 }
 
-fn text_to_inlines(text: &str) -> Vec<Inline> {
+pub(crate) fn text_to_inlines(text: &str) -> Vec<Inline> {
     let mut out = Vec::new();
     split_text_words(text, &mut out);
     out
@@ -732,7 +759,6 @@ pub(crate) fn wrap_inlines(inlines: &Inlines, options: &MarkdownOptions, indent:
         return out;
     };
     let effective = width.saturating_sub(indent).max(20);
-    let marker = options.formatting.line_break_marker();
     let mut stream = TokenStream::default();
     render_inlines(
         inlines,
@@ -740,40 +766,116 @@ pub(crate) fn wrap_inlines(inlines: &Inlines, options: &MarkdownOptions, indent:
         &mut stream,
         RenderCtx::Block { top_level },
     );
-
-    let mut segments: Vec<String> = Vec::new();
-    let mut buf: Vec<String> = Vec::new();
-    for token in stream.finish() {
-        match token {
-            WrapToken::Word(s) => buf.push(s),
-            WrapToken::Break => {
-                segments.push(greedy_wrap(&buf, effective));
-                buf.clear();
-            }
-        }
-    }
-    segments.push(greedy_wrap(&buf, effective));
-    segments.join(marker)
+    stream.wrap_escaping_markers(effective)
 }
 
-fn greedy_wrap(tokens: &[String], width: usize) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
+fn greedy_wrap(tokens: &[String], width: usize, escape_markers: bool) -> String {
+    let mut lines: Vec<Vec<&str>> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut current_width = 0;
     for token in tokens {
+        let token_width = token.chars().count();
         if current.is_empty() {
-            current.push_str(token);
-        } else if current.chars().count() + 1 + token.chars().count() <= width {
-            current.push(' ');
-            current.push_str(token);
+            current.push(token);
+            current_width = token_width;
+        } else if current_width + 1 + token_width <= width {
+            current.push(token);
+            current_width += 1 + token_width;
         } else {
             lines.push(std::mem::take(&mut current));
-            current.push_str(token);
+            current.push(token);
+            current_width = token_width;
         }
     }
     if !current.is_empty() {
         lines.push(current);
     }
-    lines.join("\n")
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if escape_markers && index > 0 {
+                join_escaping_line_start(line)
+            } else {
+                line.join(" ")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn join_escaping_line_start(line: &[&str]) -> String {
+    let mut out = escaped_line_start(line).unwrap_or_else(|| line[0].to_string());
+    for token in &line[1..] {
+        out.push(' ');
+        out.push_str(token);
+    }
+    out
+}
+
+fn escaped_line_start(line: &[&str]) -> Option<String> {
+    let token = line[0];
+    let bytes = token.as_bytes();
+    let first = *bytes.first()?;
+    let bullet = matches!(bytes, [b'-'] | [b'+'] | [b'*']);
+    let quote = first == b'>';
+    let heading = bytes.len() <= 6 && bytes.iter().all(|b| *b == b'#');
+    let underline =
+        line.len() == 1 && (bytes.iter().all(|b| *b == b'-') || bytes.iter().all(|b| *b == b'='));
+    if bullet || quote || heading || underline || starts_html_block(token) {
+        return Some(format!("\\{token}"));
+    }
+    if let Some(run) = code_fence_run(line) {
+        let (fence, rest) = token.split_at(run);
+        let escaped = fence.chars().flat_map(|c| ['\\', c]).collect::<String>();
+        return Some(format!("{escaped}{rest}"));
+    }
+    if let Some((marker, digits)) = bytes.split_last() {
+        if matches!(marker, b'.' | b')')
+            && !digits.is_empty()
+            && digits.iter().all(u8::is_ascii_digit)
+        {
+            return Some(format!(
+                "{}\\{}",
+                &token[..token.len() - 1],
+                &token[token.len() - 1..]
+            ));
+        }
+    }
+    None
+}
+
+fn starts_html_block(token: &str) -> bool {
+    let Some(rest) = token.strip_prefix('<') else {
+        return false;
+    };
+    if rest.starts_with('!') || rest.starts_with('?') {
+        return true;
+    }
+    let name = rest.strip_prefix('/').unwrap_or(rest);
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let tail = name.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-');
+    tail.is_empty() || tail.starts_with(['>', '/']) || tail.starts_with(char::is_whitespace)
+}
+
+fn code_fence_run(line: &[&str]) -> Option<usize> {
+    let token = line[0];
+    let fence = *token.as_bytes().first()?;
+    if !matches!(fence, b'`' | b'~') {
+        return None;
+    }
+    let run = token.bytes().take_while(|b| *b == fence).count();
+    if run < 3 {
+        return None;
+    }
+    if fence == b'`'
+        && (token[run..].contains('`') || line[1..].iter().any(|rest| rest.contains('`')))
+    {
+        return None;
+    }
+    Some(run)
 }
 
 pub fn detect_and_strip_checkbox(inlines: &Inlines) -> (Option<bool>, Inlines) {

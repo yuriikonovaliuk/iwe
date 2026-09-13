@@ -11,7 +11,7 @@ use diwe::config::{
     MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
-use diwe::fs::{new_for_path, new_from_hashmap};
+use diwe::fs::{new_for_path, new_from_hashmap, write_file_if_changed};
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_documents_in, validate_pending_documents,
@@ -2901,8 +2901,8 @@ impl IweServer {
                 .check_fencing()
                 .map_err(|e| format!("write refused: {e}"))?;
         }
-        match std::fs::write(&file_path, content) {
-            Ok(()) => Ok(()),
+        match write_file_if_changed(&file_path, content) {
+            Ok(_) => Ok(()),
             Err(error) => Err(format!(
                 "Failed to write '{}': {}",
                 file_path.display(),

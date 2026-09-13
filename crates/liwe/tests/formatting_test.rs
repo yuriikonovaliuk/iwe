@@ -555,6 +555,71 @@ fn wrap_column_wraps_each_segment_between_preserved_breaks() {
 }
 
 #[test]
+fn wrap_column_wraps_each_preserved_newline_separately() {
+    compare(
+        indoc! {"
+        alpha beta gamma delta epsilon zeta
+        eta theta
+        iota kappa lambda mu nu xi omicron
+        pi rho
+        "},
+        indoc! {"
+        alpha beta gamma delta epsilon zeta eta theta
+        iota kappa lambda mu nu xi omicron pi rho
+        "},
+        FormattingOptions {
+            wrap_column: Some(35),
+            preserve_newlines: Some(true),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn wrap_column_keeps_preserved_newlines_in_short_lines() {
+    compare(
+        indoc! {"
+        first line
+        second line
+        "},
+        indoc! {"
+        first line
+        second line
+        "},
+        FormattingOptions {
+            wrap_column: Some(123),
+            preserve_newlines: Some(true),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
+fn wrap_column_keeps_preserved_newlines_and_line_breaks_apart() {
+    let expected = indoc! {"
+        alpha beta<SP><SP>
+        gamma delta
+        epsilon zeta
+    "}
+    .replace("<SP>", " ");
+    compare(
+        &expected,
+        indoc! {"
+        alpha beta\\
+        gamma delta
+        epsilon zeta
+        "},
+        FormattingOptions {
+            wrap_column: Some(40),
+            preserve_newlines: Some(true),
+            preserve_line_breaks: Some(true),
+            line_break_style: Some(LineBreakStyle::Spaces),
+            ..Default::default()
+        },
+    );
+}
+
+#[test]
 fn wrap_column_disabled_returns_input() {
     compare(
         "alpha beta gamma delta epsilon zeta\n",
@@ -576,6 +641,222 @@ fn wrap_column_wraps_link_text_keeps_url_atomic() {
             wrap_column: Some(20),
             ..Default::default()
         },
+    );
+}
+
+fn wrap_marker_at(width: usize, input: &str, expected: &str) {
+    let options = || FormattingOptions {
+        wrap_column: Some(width),
+        ..Default::default()
+    };
+    compare(expected, input, options());
+    assert_str_eq!(expected, normalize_with(expected, options()));
+}
+
+fn wrap_marker(input: &str, expected: &str) {
+    wrap_marker_at(20, input, expected);
+}
+
+#[test]
+fn wrap_column_escapes_a_bullet_dash_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd - eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\- eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_bullet_plus_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd + eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\+ eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_bullet_star_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd * eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\* eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_heading_hash_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd ## eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\## eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_quote_marker_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd > eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\> eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_an_ordered_marker_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd 1. eee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        1\\. eee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_paren_ordered_marker_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd 1) eee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        1\\) eee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_marker_moved_to_a_line_start_inside_a_list_item() {
+    wrap_marker_at(
+        30,
+        "- aaaa bbbb cccc dddd eeeeeeee - fff",
+        indoc! {"
+        - aaaa bbbb cccc dddd eeeeeeee
+          \\- fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_tilde_fence_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd ~~~rust eee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\~\\~\\~rust eee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_backtick_fence_moved_to_a_line_start_inside_a_list_item() {
+    wrap_marker_at(
+        30,
+        "- aaaa bbbb cccc dddd eeeeeeee ``` fff",
+        indoc! {"
+        - aaaa bbbb cccc dddd eeeeeeee
+          \\`\\`\\` fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_an_html_tag_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd <div> eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\<div> eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_closing_html_tag_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd </div> eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\</div> eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_an_html_comment_moved_to_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd <!-- eee --> fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\<!-- eee --> fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_a_dash_underline_left_alone_on_a_line() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd --- eeeeeeeeeeeeeeeeeeeeee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\---
+        eeeeeeeeeeeeeeeeeeeeee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_escapes_an_equals_underline_left_alone_on_a_line() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd === eeeeeeeeeeeeeeeeeeeeee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        \\===
+        eeeeeeeeeeeeeeeeeeeeee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_keeps_dashes_unescaped_when_the_line_continues() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd --- eee fff",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        --- eee fff
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_keeps_an_autolink_unescaped_at_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd <https://example.com> eee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        <https://example.com>
+        eee
+        "},
+    );
+}
+
+#[test]
+fn wrap_column_keeps_inline_code_unescaped_at_a_line_start() {
+    wrap_marker(
+        "aaaa bbbb cccc dddd `` `x` `` eee",
+        indoc! {"
+        aaaa bbbb cccc dddd
+        `` `x` `` eee
+        "},
     );
 }
 

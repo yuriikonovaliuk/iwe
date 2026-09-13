@@ -21,6 +21,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `query::argue`: computed acceptability of claims and objections — grounded semantics with deductive support over `Against`/`Undermines` attack edges and `Rests on` support edges, with per-node `because` chains, dispute summaries and warnings. Exported as `argue`, `Argument`, `ArgueStatus`, `render_argument_text`.
 - `via` on `$references` / `$referencedBy`: a block predicate (or a section name) that restricts which of a document's links count as reference edges, applied at every hop of the walk — `$references: { match: { $key: K }, via: Is a, maxDistance: 0 }` follows only the chain of "Is a" links. Rejected on inclusion operators. `BlockIndex::targets_within`, `ViaWalk`, `build_filter_value` are exported for callers.
 
+## [0.24.0](https://github.com/iwe-org/iwe/compare/liwe-v0.23.2...liwe-v0.24.0) - 2026-09-08
+
+### Added
+
+- `KeyOp::StartsWith` — `$key: { $startsWith: notes/ }` matches documents whose key begins with the given prefix. The operand is normalized as a key, so a trailing `.md` / `.dj` is stripped, and the test is a case-sensitive string prefix rather than a path-segment match. An empty prefix is a parse error.
+
+### Fixed
+
+- A malformed `$key` expression now reports the operators it accepts instead of the tautological "`$key` predicates are not allowed inside `$key`".
+
+## [0.23.2](https://github.com/iwe-org/iwe/compare/liwe-v0.23.1...liwe-v0.23.2) - 2026-09-08
+
+### Fixed
+- `wrap_column` escapes a block marker that wrapping moves to the start of a line — list, quote and heading markers, code fences, HTML tags and a `---` or `===` left alone on a line — so a reflowed paragraph is not silently turned into another block, or dropped, on the next read
+
+## [0.23.1](https://github.com/iwe-org/iwe/compare/liwe-v0.23.0...liwe-v0.23.1) - 2026-09-06
+
+### Fixed
+- `is_ref_url` treats any URL with a URI scheme (`tel:`, `ftp:`, `file:`, `obsidian:`, `zotero:`, …) as external instead of only `http:`, `https:` and `mailto:`, so those links no longer turn into document keys; a Windows drive letter such as `C:/notes/file.md` stays a path
+- Wikilink lookup ignores case, so `[[target]]` finds `Target.md`; an exact-case match still wins, keys stay case-preserving, and `iwe normalize` keeps the full path rather than shortening a link that two keys differing only by case would both answer to
+- `wrap_column` no longer discards preserved soft line breaks: with `preserve_newlines` on, each line is wrapped on its own instead of the whole paragraph being reflowed into one block
+- Djot honors `preserve_newlines`: soft line breaks in a `.dj` paragraph are kept instead of always being joined into one line
+- Djot honors `wrap_column`, wrapping paragraphs the same way markdown does — inline code, math and link URLs stay atomic, and list and blockquote indents are subtracted from the effective width
+- `[djot.formatting]` values are range-checked on load like `[markdown.formatting]`, so an out-of-range `wrap_column` falls back to the default instead of being used as written
+- Djot keeps escaped block markers escaped when writing, so a paragraph starting with `\- `, `\# `, `\> `, `1\. ` or `\|` is not silently turned into a list, heading, quote or table on the next normalize
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/liwe-v0.22.0...liwe-v0.23.0) - 2026-08-30
 
 ### Added

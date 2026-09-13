@@ -25,6 +25,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `requires` (conditional sections) and `$this` anchors in `links` filters are enforced by `iwe schema validate` (`iwe docs schema` §11–12); `[invariants]` from `config.toml` run on every whole-store validation (`iwe docs config`).
 - `iwe schema validate` enforces `links` rules from schema files (target typing, link counts, transitive reach along a section's links); the query language gains `via` on the reference operators. Documented in `iwe docs schema` §11 and `iwe docs query`.
 
+### Fixed
+
+- `normalize` no longer rewrites documents it does not change. Run over a whole library it wrote every file unconditionally, giving all of them the same modification time and losing the library's edit history; it now writes only the documents whose formatting actually moved. `normalize --key` already behaved this way. The same guard now covers `update`, `rename`, `attach`, `extract`, `inline` and `squash`, which wrote unconditionally when a change turned out to be a no-op.
+
+## [0.24.0](https://github.com/iwe-org/iwe/compare/iwe-v0.23.2...iwe-v0.24.0) - 2026-09-08
+
+### Added
+
+- `--filter '$key: { $startsWith: notes/ }'` selects documents by key prefix. The prefix is a case-sensitive string, not a path segment, so `notes` also matches the hub note `notes` and a sibling directory like `notes-archive/`; write the trailing separator to mean the directory alone.
+
+## [0.23.2](https://github.com/iwe-org/iwe/compare/iwe-v0.23.1...iwe-v0.23.2) - 2026-09-08
+
+### Fixed
+- `iwe normalize` no longer turns a wrapped paragraph into a list, quote, heading, code block or HTML when `wrap_column` moves a marker such as `-`, `#`, `>`, `1.`, ```` ``` ````, `~~~`, `<div>` or a lone `---` to the start of a line — those markers are escaped now, and the HTML case used to drop the rest of the paragraph
+
+## [0.23.1](https://github.com/iwe-org/iwe/compare/iwe-v0.23.0...iwe-v0.23.1) - 2026-09-06
+
+### Fixed
+- `iwe stats` no longer reports links with a URI scheme (`tel:`, `ftp:`, `file:`, …) as broken — they are external links, not document references
+- `[[target]]` resolves to `Target.md`, and `iwe normalize` rewrites and shortens such links to the document they point at
+- `iwe normalize` keeps existing line breaks when `wrap_column` and `preserve_newlines` are both set (the two options together used to collapse a paragraph into a single reflowed block)
+- `iwe normalize` applies `preserve_newlines` and `wrap_column` to djot documents, which previously ignored both
+- `iwe normalize` no longer turns an escaped block marker at the start of a djot paragraph (`\- `, `\# `, `\> `, `1\. `, `\|`) into a real list, heading, quote or table
+
 ## [0.23.0](https://github.com/iwe-org/iwe/compare/iwe-v0.22.0...iwe-v0.23.0) - 2026-08-30
 
 ### Added

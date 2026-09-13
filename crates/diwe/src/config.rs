@@ -653,6 +653,7 @@ pub fn load_config() -> Result<Configuration, String> {
             )
         })?;
         config.markdown.formatting = config.markdown.formatting.validated();
+        config.djot.formatting = config.djot.formatting.validated();
         config
     } else {
         debug!("using default configuration");
