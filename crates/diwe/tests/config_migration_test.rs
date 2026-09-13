@@ -151,9 +151,14 @@ fn test_config_with_extract_action_parses_correctly() {
 }
 
 #[test]
-fn test_default_configuration_has_version_1() {
+fn test_default_configuration_has_the_current_version() {
+    // A default-constructed configuration is already at the current
+    // version: serializing it into a fresh store must not leave a file the
+    // next CLI run rewrites through migration (that rewrite bypassed the
+    // commit lock and churned every fresh store's config.toml).
     let config = Configuration::default();
-    assert_eq!(config.version, Some(1));
+    assert_eq!(config.version, Some(3));
+    assert_eq!(config.version, Configuration::template().version);
 }
 
 #[test]

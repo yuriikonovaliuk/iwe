@@ -337,7 +337,7 @@ pub struct Checker {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            version: Some(1),
+            version: Some(3),
             format: Default::default(),
             markdown: Default::default(),
             djot: Default::default(),
