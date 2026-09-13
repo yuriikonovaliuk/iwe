@@ -510,6 +510,44 @@ async fn a_second_explicit_begin_is_refused_while_a_different_explicit_one_is_op
 }
 
 // ---------------------------------------------------------------------------
+// T3 resolved-handle echo test (design-7). Contract:
+//   `iwe_tx_begin` echoes the *resolved* map key, not the caller's raw
+//   input: an explicit `handle: "alpha"` echoes "alpha"; an omitted
+//   `handle` echoes the reserved default key, `DEFAULT_TX_HANDLE`
+//   ("default") — not, say, an empty string or some other placeholder for
+//   "no handle given". Two independent transactions, one per case, so a
+//   later assertion can't be satisfied by an earlier one's leftover state.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tx_begin_echoes_the_resolved_handle_key_not_the_raw_input() {
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    // Explicit handle: the echoed key is exactly the caller's string.
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "alpha"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    let text = Fixture::result_text(&begun);
+    assert!(
+        text.contains("alpha"),
+        "iwe_tx_begin with handle: \"alpha\" must echo \"alpha\" back, got: {text}"
+    );
+    f.call_tool("iwe_tx_abort", json!({"handle": "alpha"})).await;
+
+    // Omitted handle: the echoed key is the resolved map key
+    // (DEFAULT_TX_HANDLE), never the caller's absent input — there is no
+    // raw string to echo, so what comes back can only be the server's own
+    // resolution of "no handle given" to its reserved default slot.
+    let begun = f.call_tool("iwe_tx_begin", json!({})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    let text = Fixture::result_text(&begun);
+    assert!(
+        text.contains("default"),
+        "iwe_tx_begin with no handle must echo the resolved key \"default\", got: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T1 isolation + commit-separation tests (design-7). Contract:
 //   1. `two_explicit_handles_open_at_once_each_sees_its_own_staged_state`
 //      Two explicit transaction handles can be open at once in one iwec
