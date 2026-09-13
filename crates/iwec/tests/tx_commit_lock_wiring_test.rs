@@ -197,6 +197,8 @@ async fn open_uncommitted_transaction_never_holds_the_commit_lock() {
 /// frees up.
 #[tokio::test]
 async fn concurrent_external_lock_holder_times_out_commit_and_applies_nothing() {
+    // Observe the refusal in seconds, not the production default (120 s).
+    std::env::set_var("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3");
     let dir = store();
     let f = fixture(&dir, ValidationScope::Full).await;
     let repo_root = dir.path().canonicalize().unwrap();

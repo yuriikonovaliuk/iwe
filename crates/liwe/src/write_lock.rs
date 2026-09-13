@@ -42,7 +42,13 @@ const STALE_AFTER: Duration = Duration::from_secs(1);
 
 /// How long [`acquire_commit_lock`] will wait for a held, non-stale lock
 /// before giving up with [`CommitLockError::Timeout`].
-const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
+// A whole-store commit under `[transactions] validate = "full"` with the
+// external checkers holds the lock for tens of seconds on a 4k-document
+// store (36 s measured on the 2026-09-13 rehearsal), so a contender that
+// gives up after a few seconds turns every concurrent write into a
+// refusal. Wait long enough for a few queued writers to drain; the
+// heartbeat still reclaims a dead holder within `STALE_AFTER`.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Why acquiring or continuing to hold the commit lock failed.
 #[derive(Debug)]
@@ -124,7 +130,20 @@ impl CommitLockGuard {
 /// Never blocks indefinitely: returns [`CommitLockError::Timeout`] rather
 /// than waiting past the configured acquire timeout.
 pub fn acquire_commit_lock(repo_root: &Path) -> Result<CommitLockGuard, CommitLockError> {
-    acquire_with_config(repo_root, HEARTBEAT_INTERVAL, STALE_AFTER, ACQUIRE_TIMEOUT)
+    acquire_with_config(repo_root, HEARTBEAT_INTERVAL, STALE_AFTER, acquire_timeout())
+}
+
+/// `IWE_COMMIT_LOCK_TIMEOUT_SECS`, when set to a positive integer,
+/// overrides [`ACQUIRE_TIMEOUT`] — an operator knob for a store whose
+/// commits are unusually slow or fast, and what the lock-wiring tests use
+/// to observe a refusal without waiting out the production default.
+fn acquire_timeout() -> Duration {
+    std::env::var("IWE_COMMIT_LOCK_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(ACQUIRE_TIMEOUT)
 }
 
 /// Test-only knob: same as [`acquire_commit_lock`], but with the timing

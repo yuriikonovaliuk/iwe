@@ -47,6 +47,9 @@ fn spawn_iwe(work_dir: &Path, args: &[&str]) -> Child {
     Command::new(crate::common::get_iwe_binary_path())
         .args(args)
         .current_dir(work_dir)
+        // Observe a live holder's refusal in seconds, not the production
+        // default (120 s, sized for whole-store validation).
+        .env("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
