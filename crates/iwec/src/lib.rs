@@ -1415,7 +1415,27 @@ impl IweServer {
                 let Outcome::Find { matches } = outcome else {
                     unreachable!("find operation yields a find outcome")
                 };
-                let documents: Vec<_> = matches.into_iter().map(|m| m.document).collect();
+                // A `find` with no `project:` clause defaults to
+                // `ProjectionBase::Frontmatter` (raw frontmatter, no `key`
+                // pseudo-field) — the engine's documented default for the
+                // CLI, where the caller already knows which key it asked
+                // for. `iwe_query`'s `find` returns an array of matches to
+                // a filter the caller may not otherwise know the keys of,
+                // so each returned document must carry its own identity.
+                // Fill `key` from the match itself when the projection
+                // didn't already produce one (an explicit `project:` that
+                // requests `$key` under the `key` output name is left
+                // untouched — same value, no-op).
+                let documents: Vec<_> = matches
+                    .into_iter()
+                    .map(|m| {
+                        let mut document = m.document;
+                        document
+                            .entry(serde_yaml::Value::String("key".to_string()))
+                            .or_insert_with(|| serde_yaml::Value::String(m.key.to_string()));
+                        document
+                    })
+                    .collect();
                 let mut warnings = Vec::new();
                 if let Some(spec) = &find.search {
                     if index
