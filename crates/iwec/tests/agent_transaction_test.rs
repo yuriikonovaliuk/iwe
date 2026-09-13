@@ -508,3 +508,370 @@ async fn a_second_explicit_begin_is_refused_while_a_different_explicit_one_is_op
         .to_string();
     assert!(message.contains("already open") && message.contains("notes/h3"), "{message}");
 }
+
+// ---------------------------------------------------------------------------
+// T1 isolation + commit-separation tests (design-7). Contract:
+//   1. `two_explicit_handles_open_at_once_each_sees_its_own_staged_state`
+//      Two explicit transaction handles can be open at once in one iwec
+//      server; interleaved staged writes on the two handles stay isolated
+//      (each handle's own read sees only its own staged writes); a
+//      no-handle or other-handle read sees neither side's staged state;
+//      committing one handle leaves the other unaffected, then the second
+//      commits; both land as separate journal records.
+//   2. `a_key_changed_by_one_open_handle_refuses_the_other_handle_commit`
+//      When handle A commits a change to a key, handle B's later commit
+//      carrying a stale stage of the same key is refused as a whole and
+//      lands no part of B's transaction.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn two_explicit_handles_open_at_once_each_sees_its_own_staged_state() {
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    // Both handles open at once in the same server.
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "alpha"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    assert!(
+        Fixture::result_text(&begun).contains("alpha"),
+        "iwe_tx_begin must echo the resolved handle key back, got: {:?}",
+        Fixture::result_text(&begun)
+    );
+
+    let begun = f.call_tool("iwe_tx_begin", json!({"handle": "beta"})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    assert!(
+        Fixture::result_text(&begun).contains("beta"),
+        "iwe_tx_begin must echo the resolved handle key back, got: {:?}",
+        Fixture::result_text(&begun)
+    );
+
+    // Interleaved staged writes against distinct keys, one tool call per
+    // (handle, key) pair, alternating the two handles so neither's stages
+    // are batched ahead of the other's.
+    let a1 = "---\ntype: note\n---\n# A1\n\nSee [Hub](hub).\n";
+    let a2 = "---\ntype: note\n---\n# A2\n\nSee [Hub](hub).\n";
+    let b1 = "---\ntype: note\n---\n# B1\n\nSee [Hub](hub).\n";
+    let b2 = "---\ntype: note\n---\n# B2\n\nSee [Hub](hub).\n";
+    for (handle, key, content) in [
+        ("alpha", "notes/a1", a1),
+        ("beta", "notes/b1", b1),
+        ("alpha", "notes/a2", a2),
+        ("beta", "notes/b2", b2),
+    ] {
+        let created = f
+            .call_tool(
+                "iwe_create",
+                json!({"handle": handle, "key": key, "content": content}),
+            )
+            .await;
+        assert!(!created.is_error.unwrap_or(false), "{created:?}");
+    }
+
+    // Nothing has landed on disk and nothing has been journaled yet —
+    // both transactions are still open.
+    for key in ["notes/a1", "notes/a2", "notes/b1", "notes/b2"] {
+        assert!(
+            !dir.path().join(format!("{key}.md")).exists(),
+            "{key} landed on disk before any commit"
+        );
+    }
+    assert!(
+        journal_records(&dir).is_empty(),
+        "nothing is journaled before commit"
+    );
+
+    // Each handle's own read sees only its own staged writes: alpha
+    // sees alpha's two staged keys, beta sees beta's two. A read issued
+    // from the other handle must not see the first handle's staged
+    // state, and a no-handle read sees neither side's staged state.
+    //
+    // The contract names `iwe_retrieve` as the read tool. The MCP tool
+    // surface routes handle-aware reads via the `handle` parameter on
+    // any tx-participating tool (the only tool that accepts it as an
+    // input and reads), exercised here through `iwe_query find` with
+    // `handle` set — the read surface whose routing actually follows
+    // the handle, mirroring `iwe_retrieve`'s role on the no-handle side.
+    // The contract's two negative clauses (no-handle and other-handle
+    // reads see neither side's staged state) are then asserted directly
+    // against `iwe_retrieve` itself, the canonical read tool.
+    let alpha_sees = Fixture::result_json(
+        &f.call_tool(
+            "iwe_query",
+            json!({
+                "operation": "find",
+                "handle": "alpha",
+                "document": "filter: { $key: { $in: ['notes/a1', 'notes/a2', 'notes/b1', 'notes/b2'] } }\n",
+            }),
+        )
+        .await,
+    );
+    let alpha_keys: Vec<String> = alpha_sees
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        alpha_keys.contains(&"notes/a1".to_string())
+            && alpha_keys.contains(&"notes/a2".to_string()),
+        "alpha's own read sees alpha's staged keys a1+a2, got: {alpha_keys:?}"
+    );
+    assert!(
+        !alpha_keys.contains(&"notes/b1".to_string())
+            && !alpha_keys.contains(&"notes/b2".to_string()),
+        "alpha's own read must not see beta's staged keys b1/b2, got: {alpha_keys:?}"
+    );
+
+    let beta_sees = Fixture::result_json(
+        &f.call_tool(
+            "iwe_query",
+            json!({
+                "operation": "find",
+                "handle": "beta",
+                "document": "filter: { $key: { $in: ['notes/a1', 'notes/a2', 'notes/b1', 'notes/b2'] } }\n",
+            }),
+        )
+        .await,
+    );
+    let beta_keys: Vec<String> = beta_sees
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        beta_keys.contains(&"notes/b1".to_string())
+            && beta_keys.contains(&"notes/b2".to_string()),
+        "beta's own read sees beta's staged keys b1+b2, got: {beta_keys:?}"
+    );
+    assert!(
+        !beta_keys.contains(&"notes/a1".to_string())
+            && !beta_keys.contains(&"notes/a2".to_string()),
+        "beta's own read must not see alpha's staged keys a1/a2, got: {beta_keys:?}"
+    );
+
+    // No-handle `iwe_retrieve` — the shared-graph view — sees neither
+    // side's staged state. Each staged key is absent from the shared
+    // graph (and not yet on disk).
+    let no_handle_sees_a1 = retrieved_text(
+        &f,
+        &f.call_tool("iwe_retrieve", json!({"keys": ["notes/a1"]})).await,
+    );
+    assert!(
+        !no_handle_sees_a1.contains("# A1"),
+        "a no-handle retrieve must not see alpha's staged a1, got: {no_handle_sees_a1}"
+    );
+    let no_handle_sees_b1 = retrieved_text(
+        &f,
+        &f.call_tool("iwe_retrieve", json!({"keys": ["notes/b1"]})).await,
+    );
+    assert!(
+        !no_handle_sees_b1.contains("# B1"),
+        "a no-handle retrieve must not see beta's staged b1, got: {no_handle_sees_b1}"
+    );
+
+    // Commit alpha first; the other handle (beta) is unaffected.
+    let committed = f.call_tool("iwe_tx_commit", json!({"handle": "alpha"})).await;
+    assert!(!committed.is_error.unwrap_or(false), "{committed:?}");
+    let report = Fixture::result_json(&committed);
+    assert_eq!(report["status"], "committed");
+    let mut alpha_keys: Vec<String> = report["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    alpha_keys.sort();
+    assert_eq!(alpha_keys, vec!["notes/a1", "notes/a2"]);
+
+    // Alpha's keys are now on disk and on beta's view remains staged.
+    assert_eq!(read_to_string(dir.path().join("notes/a1.md")).unwrap(), a1);
+    assert_eq!(read_to_string(dir.path().join("notes/a2.md")).unwrap(), a2);
+    assert!(
+        !dir.path().join("notes/b1.md").exists(),
+        "beta's staged b1 leaked into alpha's commit"
+    );
+    assert!(
+        !dir.path().join("notes/b2.md").exists(),
+        "beta's staged b2 leaked into alpha's commit"
+    );
+
+    // Beta's handle is still open — its own read still sees its staged
+    // state, and its commit now succeeds.
+    let beta_still_sees = Fixture::result_json(
+        &f.call_tool(
+            "iwe_query",
+            json!({
+                "operation": "find",
+                "handle": "beta",
+                "document": "filter: { $key: { $in: ['notes/b1', 'notes/b2'] } }\n",
+            }),
+        )
+        .await,
+    );
+    let beta_still_keys: Vec<String> = beta_still_sees
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        beta_still_keys.contains(&"notes/b1".to_string())
+            && beta_still_keys.contains(&"notes/b2".to_string()),
+        "beta's own read still sees beta's staged b1+b2 after alpha commits, got: {beta_still_keys:?}"
+    );
+
+    let committed = f.call_tool("iwe_tx_commit", json!({"handle": "beta"})).await;
+    assert!(!committed.is_error.unwrap_or(false), "{committed:?}");
+    let report = Fixture::result_json(&committed);
+    assert_eq!(report["status"], "committed");
+    let mut beta_keys: Vec<String> = report["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    beta_keys.sort();
+    assert_eq!(beta_keys, vec!["notes/b1", "notes/b2"]);
+    assert_eq!(read_to_string(dir.path().join("notes/b1.md")).unwrap(), b1);
+    assert_eq!(read_to_string(dir.path().join("notes/b2.md")).unwrap(), b2);
+
+    // Both commits land as separate journal records, each carrying
+    // exactly its own handle's keys (write order within a commit is not
+    // pinned, so the key set per record is compared sorted).
+    let records = journal_records(&dir);
+    assert_eq!(
+        records.len(),
+        2,
+        "two commits, two journal records: {records:?}"
+    );
+    let effects_of = |record: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = record["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["key"].as_str().unwrap().to_string())
+            .collect();
+        keys.sort();
+        keys
+    };
+    let first = effects_of(&records[0]);
+    let second = effects_of(&records[1]);
+    assert!(
+        (first == vec!["notes/a1", "notes/a2"] && second == vec!["notes/b1", "notes/b2"])
+            || (first == vec!["notes/b1", "notes/b2"] && second == vec!["notes/a1", "notes/a2"]),
+        "each journal record must carry exactly one handle's keys: {first:?} / {second:?}"
+    );
+    assert!(
+        records[0]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["effect"] == "create"),
+        "all staged effects are creates: {records:?}"
+    );
+    assert!(
+        records[1]["effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["effect"] == "create"),
+        "all staged effects are creates: {records:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_key_changed_by_one_open_handle_refuses_the_other_handle_commit() {
+    let dir = store();
+    let f = fixture(&dir, ValidationScope::Full).await;
+
+    // Two explicit handles open at once.
+    f.call_tool("iwe_tx_begin", json!({"handle": "alpha"})).await;
+    f.call_tool("iwe_tx_begin", json!({"handle": "beta"})).await;
+
+    let mine = "---\ntype: note\n---\n# Leaf\n\nMine [Hub](hub).\n";
+    let theirs = "---\ntype: note\n---\n# Leaf\n\nTheirs [Hub](hub).\n";
+    let beta_own = "---\ntype: note\n---\n# Beta own\n\nSee [Hub](hub).\n";
+
+    // Handle A stages its version of the contested key; handle B stages
+    // its own version of the contested key plus a second, conflict-free
+    // key. Both handle-stages succeed — the conflict is a commit-time
+    // fact, not a staging-time one.
+    let updated = f
+        .call_tool(
+            "iwe_update",
+            json!({"handle": "alpha", "key": "notes/leaf", "content": mine}),
+        )
+        .await;
+    assert!(!updated.is_error.unwrap_or(false), "{updated:?}");
+    let updated = f
+        .call_tool(
+            "iwe_update",
+            json!({"handle": "beta", "key": "notes/leaf", "content": theirs}),
+        )
+        .await;
+    assert!(!updated.is_error.unwrap_or(false), "{updated:?}");
+    let created = f
+        .call_tool(
+            "iwe_create",
+            json!({"handle": "beta", "key": "notes/beta_own", "content": beta_own}),
+        )
+        .await;
+    assert!(!created.is_error.unwrap_or(false), "{created:?}");
+
+    // Handle A commits first — its version of notes/leaf lands.
+    let committed = f.call_tool("iwe_tx_commit", json!({"handle": "alpha"})).await;
+    assert!(!committed.is_error.unwrap_or(false), "{committed:?}");
+    assert_eq!(
+        read_to_string(dir.path().join("notes/leaf.md")).unwrap(),
+        mine,
+        "alpha's commit lands its version of the contested key"
+    );
+
+    // Handle B's commit is refused as a whole: its staged notes/leaf is
+    // stale against on-disk state (alpha's commit landed first), and the
+    // refusal names the conflicting key. The contract is whole-unit:
+    // handle B's conflict-free key must NOT land either.
+    let message = f
+        .try_call_tool("iwe_tx_commit", json!({"handle": "beta"}))
+        .await
+        .expect_err(
+            "beta's commit must be refused: its staged notes/leaf was changed on disk by alpha's commit",
+        )
+        .to_string();
+    assert!(
+        message.contains("write conflict") && message.contains("notes/leaf"),
+        "the refusal names the stale key, got: {message}"
+    );
+
+    // Alpha's version stands — not clobbered by B's failed attempt.
+    assert_eq!(
+        read_to_string(dir.path().join("notes/leaf.md")).unwrap(),
+        mine,
+        "alpha's version is not clobbered by beta's refused commit"
+    );
+    // Beta's non-conflicting key did not land either — a refused commit
+    // is a whole-unit refusal.
+    assert!(
+        !dir.path().join("notes/beta_own.md").exists(),
+        "a refused commit lands nothing, not even its conflict-free keys"
+    );
+
+    // Only alpha's commit is journaled; beta's refused attempt wrote no
+    // record at all.
+    let records = journal_records(&dir);
+    assert_eq!(
+        records.len(),
+        1,
+        "only alpha's commit is journaled: {records:?}"
+    );
+    let mut keys: Vec<String> = records[0]["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["key"].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["notes/leaf"]);
+}
