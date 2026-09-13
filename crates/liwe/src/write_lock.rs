@@ -56,6 +56,12 @@ pub enum CommitLockError {
     /// The lock was held (and not stale) for the entire acquire-timeout
     /// window.
     Timeout,
+    /// The store carries no `.iwe/store.toml` marker and the caller
+    /// required one (`IWE_REQUIRE_STORE_MARKER=1`): a directory that
+    /// does not identify itself is not written to.
+    Unidentified,
+    /// The store's marker is owned by another user: only the owner writes.
+    NotOwner { owner: u32, me: u32 },
     /// This guard's hold has been superseded — a later acquire (most
     /// likely a reclaim of a stale lock) has taken over. Reported by
     /// [`CommitLockGuard::check_fencing`], never by [`acquire_commit_lock`]
@@ -71,6 +77,14 @@ impl fmt::Display for CommitLockError {
             CommitLockError::Timeout => {
                 write!(f, "timed out waiting to acquire the commit lock")
             }
+            CommitLockError::Unidentified => write!(
+                f,
+                "this directory carries no .iwe/store.toml marker and IWE_REQUIRE_STORE_MARKER is set: not a store"
+            ),
+            CommitLockError::NotOwner { owner, me } => write!(
+                f,
+                "the store is owned by uid {owner}; this process runs as uid {me} — write through the owner's iwe"
+            ),
             CommitLockError::Stale => write!(
                 f,
                 "commit lock hold was superseded by a later acquire"
@@ -84,7 +98,10 @@ impl std::error::Error for CommitLockError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             CommitLockError::Io(error) => Some(error),
-            CommitLockError::Timeout | CommitLockError::Stale => None,
+            CommitLockError::Timeout
+            | CommitLockError::Stale
+            | CommitLockError::Unidentified
+            | CommitLockError::NotOwner { .. } => None,
         }
     }
 }
@@ -130,7 +147,42 @@ impl CommitLockGuard {
 /// Never blocks indefinitely: returns [`CommitLockError::Timeout`] rather
 /// than waiting past the configured acquire timeout.
 pub fn acquire_commit_lock(repo_root: &Path) -> Result<CommitLockGuard, CommitLockError> {
+    check_store_marker(repo_root)?;
     acquire_with_config(repo_root, HEARTBEAT_INTERVAL, STALE_AFTER, acquire_timeout())
+}
+
+/// The store's identity file, `.iwe/store.toml` (ruling 2026-09-13: a
+/// store identifies itself). Written by the operator or by `kc
+/// materialize`, owned by the store's owner, so it cannot be forged by
+/// a process that may not write the store.
+pub const STORE_MARKER_PATH: &str = ".iwe/store.toml";
+
+/// Refuses to commit into a directory that is not a store this process
+/// may write: with `IWE_REQUIRE_STORE_MARKER=1` (set by the protected
+/// wrappers) a missing marker is refused; a present marker owned by
+/// another uid is always refused. Runs before the lock is taken, on
+/// every CLI and MCP commit path.
+pub fn check_store_marker(repo_root: &Path) -> Result<(), CommitLockError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let marker = repo_root.join(STORE_MARKER_PATH);
+    match fs::metadata(&marker) {
+        Ok(meta) => {
+            let me = unsafe { libc::geteuid() };
+            if meta.uid() != me {
+                return Err(CommitLockError::NotOwner { owner: meta.uid(), me });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::env::var("IWE_REQUIRE_STORE_MARKER").map(|v| v == "1").unwrap_or(false) {
+                Err(CommitLockError::Unidentified)
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) => Err(CommitLockError::Io(error)),
+    }
 }
 
 /// `IWE_COMMIT_LOCK_TIMEOUT_SECS`, when set to a positive integer,
@@ -179,10 +231,28 @@ fn acquire_with_config(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_marker_owned_by_this_user_passes_and_a_missing_one_is_refused_only_when_required() {
+        let temp = tempfile::tempdir().unwrap();
+        // no marker, not required: fine (plain stores, fixtures)
+        std::env::remove_var("IWE_REQUIRE_STORE_MARKER");
+        assert!(check_store_marker(temp.path()).is_ok());
+        // no marker, required: refused
+        std::env::set_var("IWE_REQUIRE_STORE_MARKER", "1");
+        assert!(matches!(check_store_marker(temp.path()), Err(CommitLockError::Unidentified)));
+        // our own marker: fine
+        fs::create_dir_all(temp.path().join(".iwe")).unwrap();
+        fs::write(temp.path().join(STORE_MARKER_PATH), "kind = \"git\"\n").unwrap();
+        assert!(check_store_marker(temp.path()).is_ok());
+        std::env::remove_var("IWE_REQUIRE_STORE_MARKER");
+    }
     use std::thread;
 
     #[test]
     fn concurrent_acquire_commit_lock_times_out_rather_than_hanging() {
+        // Observe the refusal in seconds, not the production default (120 s).
+        std::env::set_var("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3");
         let dir = tempfile::tempdir().unwrap();
         let repo_root = dir.path().to_path_buf();
 
@@ -213,7 +283,8 @@ mod tests {
         );
         // Bounded: didn't hang past a small multiple of the configured
         // acquire timeout.
-        assert!(elapsed < ACQUIRE_TIMEOUT * 3, "took too long: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(15), "took too long: {elapsed:?}");
+        std::env::remove_var("IWE_COMMIT_LOCK_TIMEOUT_SECS");
     }
 
     #[test]

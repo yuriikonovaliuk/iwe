@@ -708,6 +708,12 @@ impl ValidatingTransaction {
                 Err(CommitLockError::Stale) => return Err(ValidationFailure::LockStale),
                 Err(CommitLockError::Timeout) => return Err(ValidationFailure::LockTimeout),
                 Err(CommitLockError::Io(error)) => return Err(ValidationFailure::Io(error)),
+                Err(refused @ (CommitLockError::Unidentified | CommitLockError::NotOwner { .. })) => {
+                    return Err(ValidationFailure::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        refused.to_string(),
+                    )))
+                }
             }
         }
 
@@ -781,6 +787,13 @@ impl Transaction for ValidatingTransaction {
                 }
                 Err(CommitLockError::Io(error)) => {
                     return Err(CommitError::Other(ValidationFailure::Io(error)));
+                }
+                Err(refused @ (CommitLockError::Unidentified | CommitLockError::NotOwner { .. })) => {
+                    // Not a store this process may write (ruling 2026-09-13).
+                    return Err(CommitError::Other(ValidationFailure::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        refused.to_string(),
+                    ))));
                 }
             },
             None => None,
@@ -1355,9 +1368,12 @@ print(json.dumps(out))'"#
         tx.write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
             .unwrap();
 
+        // Observe the refusal in seconds, not the production default (120 s).
+        std::env::set_var("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3");
         let start = std::time::Instant::now();
         let result = tx.commit();
         let elapsed = start.elapsed();
+        std::env::remove_var("IWE_COMMIT_LOCK_TIMEOUT_SECS");
 
         drop(holder);
 

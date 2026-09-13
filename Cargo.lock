@@ -1723,6 +1723,7 @@ dependencies = [
  "itertools 0.15.0",
  "iwe-lock",
  "jotdown",
+ "libc",
  "log",
  "minijinja",
  "percent-encoding",

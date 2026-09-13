@@ -19,6 +19,7 @@ path = "src/lib.rs"
 djot = ["dep:jotdown"]
 
 [dependencies]
+libc = "0.2"
 indoc.workspace = true
 serde.workspace = true
 itertools.workspace = true

@@ -240,6 +240,8 @@ enum SecondCallOutcome {
 /// loudly with a clear message rather than blocking the test run forever.
 #[test]
 fn second_concurrent_acquire_times_out_and_never_hangs() {
+    // Observe the refusal in seconds, not the production default (120 s).
+    std::env::set_var("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3");
     let repo = temp_repo_root();
     let repo_root: PathBuf = repo.path().to_path_buf();
 
