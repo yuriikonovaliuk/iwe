@@ -204,3 +204,62 @@ async fn daemon_commit_detects_stdio_moved_base_under_the_commit_lock() {
     assert!(final_content.contains("STDIO_BASE"), "stale daemon data overwrote the moved base: {final_content}");
     assert!(!final_content.contains("DAEMON_BASE"), "stale daemon data landed: {final_content}");
 }
+
+/// The literal reading of the contract's phrase ("a test that interleaves
+/// daemon-commit then stdio-commit against a moved base"): this time the
+/// *daemon* commits first, moving the base, and the independent stdio
+/// process — staged earlier, against the pre-move base — commits second.
+/// Same underlying mechanism as the test above
+/// (`ValidatingTransaction`'s disk-read baseline/`conflicts()` check,
+/// shared by both transports), exercised in the other role assignment, so
+/// this closes the evidence gap regardless of which of the two readings
+/// of the contract's sentence is intended.
+#[tokio::test]
+async fn stdio_commit_detects_daemon_moved_base_under_the_commit_lock() {
+    let store = store();
+    let port = free_port();
+    let _server = spawn_http(store.path(), port);
+    let daemon = http_client(&format!("127.0.0.1:{port}")).await;
+    let stdio = stdio_client(store.path()).await;
+
+    // stdio stages first -- its transaction backend captures the conflict
+    // baseline (on-disk state at first write, here: absent) now, before
+    // the daemon's commit lands anything.
+    let begun = call(&stdio, "iwe_tx_begin", json!({})).await;
+    assert!(!begun.is_error.unwrap_or(false), "{begun:?}");
+    let staged = call(
+        &stdio,
+        "iwe_create",
+        json!({"key": "moved-base-2", "content": "# Stdio version\n\nSTDIO_BASE2\n"}),
+    )
+    .await;
+    assert!(!staged.is_error.unwrap_or(false), "{staged:?}");
+
+    // The daemon, a wholly separate transaction, commits the same key
+    // first -- moving the base stdio staged against.
+    create_and_commit(&daemon, "moved-base-2", "# Daemon version\n\nDAEMON_BASE2\n").await;
+    daemon.cancel().await.expect("disconnect daemon client");
+
+    // stdio's own commit, against the now-moved base, must be refused --
+    // not silently applied on top of the daemon's landed write.
+    let refused = stdio
+        .call_tool(CallToolRequestParams::new("iwe_tx_commit"))
+        .await
+        .expect_err("stale base must be refused");
+    assert!(
+        refused.to_string().contains("changed on disk"),
+        "expected base-drift evidence: {refused:?}"
+    );
+    stdio.cancel().await.expect("disconnect stdio client");
+
+    let final_content =
+        read_to_string(store.path().join("moved-base-2.md")).expect("daemon document remains");
+    assert!(
+        final_content.contains("DAEMON_BASE2"),
+        "the daemon's committed data was overwritten: {final_content}"
+    );
+    assert!(
+        !final_content.contains("STDIO_BASE2"),
+        "stale stdio data landed on top of the daemon's commit: {final_content}"
+    );
+}
