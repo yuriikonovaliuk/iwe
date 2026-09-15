@@ -48,6 +48,7 @@ STORE_PORTS=(8765 8766)
 EXEC_BIN="/usr/local/lib/iwe-store/bin/iwec"
 RELEASE_IWE_BIN="/usr/local/lib/iwe-store/bin/iwe"
 REQUIRED_ENVIRONMENT="Environment=KC_IWE_BIN=${RELEASE_IWE_BIN} IWEC_IWE_BIN=${RELEASE_IWE_BIN} IWE_REQUIRE_STORE_MARKER=1 TMPDIR=/tmp"
+REQUIRED_JOURNAL_OUTPUT=("StandardOutput=journal" "StandardError=journal")
 
 echo "== AC5: systemd-analyze verify on committed unit(s) =="
 UNIT_FILES=()
@@ -157,6 +158,23 @@ if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
         else
             fail "commit-trigger environment ($name): missing exact Environment= line: $REQUIRED_ENVIRONMENT"
         fi
+    done
+fi
+
+echo "== Daemon log routing: stdout and stderr reach journald =="
+if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
+    for i in "${!STORE_NAMES[@]}"; do
+        name="${STORE_NAMES[$i]}"
+        expected_file="$SYSTEMD_DIR/user/iwec-${name}.service"
+        for directive in "${REQUIRED_JOURNAL_OUTPUT[@]}"; do
+            if [[ ! -f "$expected_file" ]]; then
+                fail "daemon log routing ($name): expected unit missing: ${expected_file#"$REPO_ROOT"/}"
+            elif grep -qFx "$directive" "$expected_file"; then
+                pass "daemon log routing ($name): $directive"
+            else
+                fail "daemon log routing ($name): missing $directive"
+            fi
+        done
     done
 fi
 
