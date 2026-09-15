@@ -46,6 +46,8 @@ STORE_NAMES=(iwe-memory mind)
 STORE_ROOTS=(/home/yurii/projects/iwe-memory /home/yurii/projects/mind)
 STORE_PORTS=(8765 8766)
 EXEC_BIN="/usr/local/lib/iwe-store/bin/iwec"
+RELEASE_IWE_BIN="/usr/local/lib/iwe-store/bin/iwe"
+REQUIRED_ENVIRONMENT="Environment=KC_IWE_BIN=${RELEASE_IWE_BIN} IWEC_IWE_BIN=${RELEASE_IWE_BIN} IWE_REQUIRE_STORE_MARKER=1 TMPDIR=/tmp"
 
 echo "== AC5: systemd-analyze verify on committed unit(s) =="
 UNIT_FILES=()
@@ -141,6 +143,21 @@ if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
     done
 else
     skip "AC1/AC2/AC3: no unit files to inspect"
+fi
+
+echo "== Commit-trigger environment: release iwe binary and store guard =="
+if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
+    for i in "${!STORE_NAMES[@]}"; do
+        name="${STORE_NAMES[$i]}"
+        expected_file="$SYSTEMD_DIR/user/iwec-${name}.service"
+        if [[ ! -f "$expected_file" ]]; then
+            fail "commit-trigger environment ($name): expected unit missing: ${expected_file#"$REPO_ROOT"/}"
+        elif grep -qFx "$REQUIRED_ENVIRONMENT" "$expected_file"; then
+            pass "commit-trigger environment ($name): release iwe binary, store marker, and TMPDIR are set"
+        else
+            fail "commit-trigger environment ($name): missing exact Environment= line: $REQUIRED_ENVIRONMENT"
+        fi
+    done
 fi
 
 echo "== Hardened: no privileged invocation in the committed unit files outside the sanctioned shape =="
