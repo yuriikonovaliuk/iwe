@@ -48,7 +48,7 @@ STORE_PORTS=(8765 8766)
 EXEC_BIN="/usr/local/lib/iwe-store/bin/iwec"
 RELEASE_IWE_BIN="/usr/local/lib/iwe-store/bin/iwe"
 REQUIRED_ENVIRONMENT="Environment=KC_IWE_BIN=${RELEASE_IWE_BIN} IWEC_IWE_BIN=${RELEASE_IWE_BIN} IWE_REQUIRE_STORE_MARKER=1 TMPDIR=/tmp"
-REQUIRED_JOURNAL_OUTPUT=("StandardOutput=journal" "StandardError=journal")
+LOG_STATE_DIR="%h/.local/state/iwec"
 
 echo "== AC5: systemd-analyze verify on committed unit(s) =="
 UNIT_FILES=()
@@ -161,21 +161,31 @@ if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
     done
 fi
 
-echo "== Daemon log routing: stdout and stderr reach journald =="
+echo "== Daemon log routing: user-owned append files =="
 if [[ ${#UNIT_FILES[@]} -gt 0 ]]; then
     for i in "${!STORE_NAMES[@]}"; do
         name="${STORE_NAMES[$i]}"
         expected_file="$SYSTEMD_DIR/user/iwec-${name}.service"
-        for directive in "${REQUIRED_JOURNAL_OUTPUT[@]}"; do
-            if [[ ! -f "$expected_file" ]]; then
-                fail "daemon log routing ($name): expected unit missing: ${expected_file#"$REPO_ROOT"/}"
-            elif grep -qFx "$directive" "$expected_file"; then
-                pass "daemon log routing ($name): $directive"
-            else
-                fail "daemon log routing ($name): missing $directive"
-            fi
-        done
+        required_output="StandardOutput=append:${LOG_STATE_DIR}/${name}.log"
+        if [[ ! -f "$expected_file" ]]; then
+            fail "daemon log routing ($name): expected unit missing: ${expected_file#"$REPO_ROOT"/}"
+        elif grep -qFx 'StandardOutput=journal' "$expected_file" || grep -qFx 'StandardError=journal' "$expected_file"; then
+            fail "daemon log routing ($name): still routes output to journal"
+        elif ! grep -qFx "$required_output" "$expected_file"; then
+            fail "daemon log routing ($name): missing $required_output"
+        elif ! grep -qFx 'StandardError=inherit' "$expected_file"; then
+            fail "daemon log routing ($name): missing StandardError=inherit"
+        else
+            pass "daemon log routing ($name): stdout appends to user-owned log and stderr inherits it"
+        fi
     done
+fi
+
+echo "== Daemon log directory: installer provisions it =="
+if grep -qE 'mkdir[[:space:]]+-p[[:space:]].*(\$HOME|~)/\.local/state/iwec' "$SCRIPTS_DIR/install-iwec-user-units.sh"; then
+    pass "daemon log directory: installer creates ~/.local/state/iwec"
+else
+    fail "daemon log directory: installer does not create ~/.local/state/iwec"
 fi
 
 echo "== Hardened: no privileged invocation in the committed unit files outside the sanctioned shape =="

@@ -8,6 +8,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 unit_source="$repo_root/systemd/user"
 unit_target="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+mkdir -p "$HOME/.local/state/iwec"
 install -d -m 0755 "$unit_target"
 install -m 0644 "$unit_source/iwec-iwe-memory.service" "$unit_target/iwec-iwe-memory.service"
 install -m 0644 "$unit_source/iwec-mind.service" "$unit_target/iwec-mind.service"
