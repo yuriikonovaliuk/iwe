@@ -16,6 +16,7 @@ mod http_transport_test;
 mod inline_test;
 mod mutability_test;
 mod normalize_test;
+mod per_session_tx_handle_test;
 mod prompt_test;
 mod query_test;
 mod resource_test;
