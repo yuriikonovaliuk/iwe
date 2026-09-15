@@ -42,6 +42,7 @@ clap.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "net", "signal"] }
 tokio-util = "0.7"
 axum = "0.8"
+http = "1"
 rmcp = { version = "3", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "schemars"] }
 schemars = "1.2"
 minijinja.workspace = true

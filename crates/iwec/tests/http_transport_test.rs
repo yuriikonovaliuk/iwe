@@ -2,11 +2,11 @@ use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, ClientCapabilities, ClientInfo, ContentBlock, Implementation,
 };
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ServiceExt;
 
 struct ServerProcess {
     child: Child,
@@ -157,4 +157,77 @@ async fn http_transport_binds_to_the_host_flag() {
             }
         ])
     );
+}
+
+#[tokio::test]
+async fn http_sessions_isolate_implicit_transactions() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join(".iwe")).expect("create config directory");
+    std::fs::write(
+        dir.path().join(".iwe/config.toml"),
+        "[transactions]\nvalidate = \"full\"\n",
+    )
+    .expect("write transaction config");
+
+    let port = free_port();
+    let _server = ServerProcess {
+        child: Command::new(env!("CARGO_BIN_EXE_iwec"))
+            .arg("--transport")
+            .arg("http")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--store")
+            .arg(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn iwec"),
+    };
+    let addr = format!("127.0.0.1:{port}");
+    wait_until_listening(&addr).await;
+
+    let make_client = || async {
+        ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::new("iwec-transaction-test-client", "0.0.1"),
+        )
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://{addr}/mcp"
+        )))
+        .await
+        .expect("client to connect")
+    };
+    let first = make_client().await;
+    let second = make_client().await;
+    for client in [&first, &second] {
+        client
+            .call_tool(CallToolRequestParams::new("iwe_tx_begin"))
+            .await
+            .expect("each HTTP session opens its own implicit transaction");
+    }
+    for (client, key) in [(&first, "first"), (&second, "second")] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("iwe_create").with_arguments(
+                    serde_json::json!({ "key": key, "content": format!("# {key}\n") })
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
+                ),
+            )
+            .await
+            .expect("stage document in its session transaction");
+    }
+    for client in [&first, &second] {
+        client
+            .call_tool(CallToolRequestParams::new("iwe_tx_commit"))
+            .await
+            .expect("commit its own session transaction");
+    }
+
+    first.cancel().await.expect("first client disconnect");
+    second.cancel().await.expect("second client disconnect");
+
+    assert!(dir.path().join("first.md").is_file());
+    assert!(dir.path().join("second.md").is_file());
 }

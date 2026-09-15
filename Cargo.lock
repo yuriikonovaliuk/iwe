@@ -1528,6 +1528,7 @@ dependencies = [
  "chrono",
  "clap",
  "diwe",
+ "http",
  "indoc",
  "iwe-lock",
  "libc",
