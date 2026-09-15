@@ -1,0 +1,15 @@
+[Unit]
+Description=IWE MCP HTTP daemon for mind
+
+[Service]
+Type=simple
+# The store account has no usable lingering user manager on this host, so this
+# user-manager service deliberately drops to it through the existing narrow
+# NOPASSWD sudo rule.  See docs/iwec-shared-daemon.md.
+ExecStart=/usr/bin/sudo -n -u iwe-store /usr/local/lib/iwe-store/bin/iwec --transport http --host 127.0.0.1 --port 8766 --store /home/yurii/projects/mind
+MemoryMax=1500M
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
