@@ -1,7 +1,7 @@
 pub mod watcher;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -55,6 +55,24 @@ fn to_json_result<T: Serialize>(output: &T) -> Result<CallToolResult, McpError> 
     let json =
         serde_json::to_string(output).map_err(|e| McpError::internal_error(e.to_string(), None))?;
     Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+}
+
+/// Resolves and verifies an explicitly selected IWE store root. Unlike the
+/// cwd-based default, an explicit path must already be an initialized store:
+/// accepting an arbitrary directory would make iwec silently serve it as an
+/// empty graph.
+pub fn explicit_store_root(path: &Path) -> Result<PathBuf, String> {
+    let display = path.display();
+    let root = path
+        .canonicalize()
+        .map_err(|error| format!("invalid IWE store '{}': {}", display, error))?;
+    if !root.is_dir() || !root.join(".iwe").is_dir() {
+        return Err(format!(
+            "invalid IWE store '{}': expected an initialized store containing .iwe",
+            display
+        ));
+    }
+    Ok(root)
 }
 
 #[derive(Serialize)]
@@ -2390,6 +2408,28 @@ impl IweServer {
             graph: Arc::new(Mutex::new(graph)),
             base_path: Some(library),
             project_path: Some(root),
+            config: configuration.clone(),
+            index: Arc::new(Mutex::new(None)),
+            seen: Arc::new(Mutex::new(HashSet::new())),
+            open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Builds a server for an already-resolved store root. This deliberately
+    /// does not apply `library.path`: `--store` names the store to serve, not
+    /// a project from which another library path should be discovered.
+    pub fn new_at_store(store_root: PathBuf, configuration: &Configuration) -> Self {
+        let state = new_for_path(&store_root, configuration.format);
+        let graph = Graph::from_state(
+            &state,
+            false,
+            configuration.format_options(),
+            configuration.library.frontmatter_document_title.clone(),
+        );
+        Self {
+            graph: Arc::new(Mutex::new(graph)),
+            base_path: Some(store_root.clone()),
+            project_path: Some(store_root),
             config: configuration.clone(),
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),

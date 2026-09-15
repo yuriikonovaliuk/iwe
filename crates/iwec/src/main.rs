@@ -1,9 +1,10 @@
 use std::env;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use diwe::config::load_config;
-use iwec::IweServer;
+use iwec::{explicit_store_root, IweServer};
 use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -28,6 +29,10 @@ struct Cli {
 
     #[arg(long, default_value_t = 8000)]
     port: u16,
+
+    /// Explicit initialized IWE store root, overriding cwd-based discovery.
+    #[arg(long, value_name = "PATH")]
+    store: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -73,14 +78,21 @@ async fn runtime_main() -> Result<()> {
 
     tracing::info!("starting IWE MCP server");
 
+    let current_dir = env::current_dir().expect("current dir");
     let configuration = load_config().unwrap_or_else(|e| {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     });
-
-    let current_dir = env::current_dir().expect("current dir");
-
-    let server = IweServer::new(&current_dir.to_string_lossy(), &configuration);
+    let server = match cli.store {
+        Some(store) => {
+            let store = explicit_store_root(&store).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
+            IweServer::new_at_store(store, &configuration)
+        }
+        None => IweServer::new(&current_dir.to_string_lossy(), &configuration),
+    };
     server.start_watching();
 
     match cli.transport {
