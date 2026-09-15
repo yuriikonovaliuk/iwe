@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use diwe::config::load_config;
+use diwe::config::{load_config, load_config_in, ValidationScope};
 use iwec::{explicit_store_root, IweServer};
 use rmcp::transport::stdio;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -79,19 +79,31 @@ async fn runtime_main() -> Result<()> {
     tracing::info!("starting IWE MCP server");
 
     let current_dir = env::current_dir().expect("current dir");
-    let configuration = load_config().unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
-    });
     let server = match cli.store {
         Some(store) => {
             let store = explicit_store_root(&store).unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             });
+            let mut configuration = load_config_in(&store).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            });
+            // An explicitly selected daemon store supports the staged-write
+            // protocol even when its otherwise-valid config has an empty
+            // `[transactions]` section.
+            if configuration.transactions.validate == ValidationScope::None {
+                configuration.transactions.validate = ValidationScope::Full;
+            }
             IweServer::new_at_store(store, &configuration)
         }
-        None => IweServer::new(&current_dir.to_string_lossy(), &configuration),
+        None => {
+            let configuration = load_config().unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            });
+            IweServer::new(&current_dir.to_string_lossy(), &configuration)
+        }
     };
     server.start_watching();
 

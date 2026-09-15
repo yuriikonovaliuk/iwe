@@ -629,7 +629,14 @@ pub const ENV_TRANSACTIONS_ALLOW: &str = "IWE_TRANSACTIONS_ALLOW";
 pub fn load_config() -> Result<Configuration, String> {
     let current_dir =
         env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-    let mut config_path = current_dir.clone();
+    load_config_in(&current_dir)
+}
+
+/// Loads a configuration rooted at `project_root`, rather than the process
+/// current directory. Services with an explicitly selected store must not
+/// change the process-wide cwd just to read that store's configuration.
+pub fn load_config_in(project_root: &Path) -> Result<Configuration, String> {
+    let mut config_path = project_root.to_path_buf();
     config_path.push(IWE_MARKER);
     config_path.push(CONFIG_FILE_NAME);
 
@@ -643,7 +650,7 @@ pub fn load_config() -> Result<Configuration, String> {
                 e
             )
         })?;
-        let configuration = migrate(&raw)?;
+        let configuration = migrate(&raw, project_root)?;
 
         let mut config = toml::from_str::<Configuration>(&configuration).map_err(|e| {
             format!(
@@ -727,7 +734,7 @@ fn apply_transactions_env_overlay(transactions: &mut TransactionOptions) -> Resu
     Ok(())
 }
 
-fn migrate(config: &str) -> Result<String, String> {
+fn migrate(config: &str, project_root: &Path) -> Result<String, String> {
     let doc = config
         .parse::<DocumentMut>()
         .map_err(|e| format!("Config file is not valid TOML: {}", e))?;
@@ -768,9 +775,7 @@ fn migrate(config: &str) -> Result<String, String> {
 
     if needs_update {
         debug!("configuration file migration applied");
-        let current_dir =
-            env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
-        let mut config_path = current_dir.clone();
+        let mut config_path = project_root.to_path_buf();
         config_path.push(IWE_MARKER);
         config_path.push(CONFIG_FILE_NAME);
 

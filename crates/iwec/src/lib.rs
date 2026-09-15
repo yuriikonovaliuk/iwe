@@ -66,9 +66,9 @@ pub fn explicit_store_root(path: &Path) -> Result<PathBuf, String> {
     let root = path
         .canonicalize()
         .map_err(|error| format!("invalid IWE store '{}': {}", display, error))?;
-    if !root.is_dir() || !root.join(".iwe").is_dir() {
+    if !root.is_dir() || !root.join(".iwe").join("config.toml").is_file() {
         return Err(format!(
-            "invalid IWE store '{}': expected an initialized store containing .iwe",
+            "invalid IWE store '{}': expected an initialized store containing .iwe/config.toml",
             display
         ));
     }
