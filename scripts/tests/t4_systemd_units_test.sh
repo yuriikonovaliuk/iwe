@@ -143,6 +143,42 @@ else
     skip "AC1/AC2/AC3: no unit files to inspect"
 fi
 
+echo "== Hardened: no privileged invocation in the committed unit files outside the sanctioned shape =="
+# Test-reviewer finding 1: the old AC4 checks pattern-matched three
+# fixed invocation strings, so any unenumerated 4th privileged-call
+# form would slip through. Unit files have simple, unambiguous syntax
+# (no quoting/heredoc games), so they can be scanned statically for
+# the privileged-command tokens themselves: any occurrence that is not
+# the one already-audited, contract-sanctioned fallback ExecStart
+# shape is a failure, regardless of exactly what form it takes.
+PRIV_RE='(^|[^A-Za-z0-9_])(sudo|pkexec|su|doas)([^A-Za-z0-9_]|$)'
+priv_violations=0
+for f in "${UNIT_FILES[@]}"; do
+    rel="${f#"$REPO_ROOT"/}"
+    while IFS= read -r line; do
+        [[ "$line" =~ $PRIV_RE ]] || continue
+        # systemd unit-file comments (# or ; at the start, per
+        # systemd.syntax(7)) are not invocations -- e.g. a comment
+        # documenting the NOPASSWD sudo rule the fallback ExecStart
+        # relies on.
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        [[ "$trimmed" == \#* || "$trimmed" == ";"* ]] && continue
+        allowed=0
+        for i in "${!STORE_PORTS[@]}"; do
+            port="${STORE_PORTS[$i]}"; root="${STORE_ROOTS[$i]}"
+            fb="^ExecStart=(/usr/bin/)?sudo -n -u iwe-store ${EXEC_BIN} --transport http --host 127\.0\.0\.1 --port ${port} --store ${root}\$"
+            if [[ "$line" =~ $fb ]]; then allowed=1; break; fi
+        done
+        if [[ "$allowed" -eq 0 ]]; then
+            fail "hardened: $rel -- privileged invocation outside the sanctioned fallback ExecStart shape: $line"
+            priv_violations=$((priv_violations + 1))
+        fi
+    done < "$f"
+done
+if [[ "$priv_violations" -eq 0 ]]; then
+    pass "hardened: no unit file contains a privileged (sudo/pkexec/su/doas) invocation outside the sanctioned fallback ExecStart shape"
+fi
+
 echo "== AC4: idempotent install script prints, never executes, the user-applied steps =="
 INSTALL_SCRIPT=""
 if [[ -d "$SCRIPTS_DIR" ]]; then
@@ -165,34 +201,94 @@ else
     # cannot do real, unrecoverable damage, while still letting us see
     # exactly what was invoked. Each mock logs its full argv and then
     # succeeds, so the script can proceed past any step it thinks is
-    # NOPASSWD-permitted.
+    # NOPASSWD-permitted. sudo/pkexec/su/doas are all mocked (not just
+    # sudo) so that whichever escalation binary a call actually reaches
+    # -- direct, or via some wrapper -- is intercepted the same way:
+    # this is a black-box, shape-agnostic net rather than a match
+    # against enumerated invocation strings (finding 1). The one
+    # acknowledged limit of PATH-shadowing: a call that hardcodes an
+    # absolute path (e.g. /usr/bin/sudo) instead of relying on PATH
+    # resolution would bypass it; that limit is inherent to this
+    # technique and predates this fix.
     SANDBOX="$(mktemp -d)"
     trap 'rm -rf "$SANDBOX"' EXIT
     MOCKBIN="$SANDBOX/bin"
     mkdir -p "$MOCKBIN"
-    CALL_LOG="$SANDBOX/calls.log"
+    CALL_LOG="$SANDBOX/calls.log"   # default target if IWEC_TEST_CALL_LOG is unset
     : > "$CALL_LOG"
-    for cmd in sudo loginctl install systemctl; do
+    for cmd in sudo pkexec su doas loginctl systemctl; do
         cat > "$MOCKBIN/$cmd" <<EOF
 #!/usr/bin/env bash
-echo "$cmd \$*" >> "$CALL_LOG"
+echo "$cmd \$*" >> "\${IWEC_TEST_CALL_LOG:-$CALL_LOG}"
 exit 0
 EOF
         chmod +x "$MOCKBIN/$cmd"
     done
+    # `install` is special: the script's only non-privileged,
+    # sanctioned use of it is copying the committed unit files into
+    # the caller's own (here: scratch) systemd/user dir, which must
+    # actually happen for real so run-1-vs-run-2 file state is
+    # comparable (finding 2). The one dangerous target -- the
+    # root-owned /usr/local/lib/iwe-store/bin/iwec path, which must
+    # never be written by this script directly -- is still logged and
+    # short-circuited rather than executed; every other invocation is
+    # passed through to the real `install` binary.
+    REAL_INSTALL="$(command -v install)"
+    cat > "$MOCKBIN/install" <<EOF
+#!/usr/bin/env bash
+echo "install \$*" >> "\${IWEC_TEST_CALL_LOG:-$CALL_LOG}"
+for a in "\$@"; do
+    if [[ "\$a" == "/usr/local/lib/iwe-store/bin/iwec" ]]; then
+        exit 0
+    fi
+done
+exec "$REAL_INSTALL" "\$@"
+EOF
+    chmod +x "$MOCKBIN/install"
 
     SCRATCH_HOME="$SANDBOX/home"
     mkdir -p "$SCRATCH_HOME"
 
     run_once() {
+        local n="$1" log="$2"
         PATH="$MOCKBIN:$PATH" HOME="$SCRATCH_HOME" \
             XDG_CONFIG_HOME="$SCRATCH_HOME/.config" \
-            bash "$INSTALL_SCRIPT" >"$SANDBOX/out.$1" 2>&1
+            IWEC_TEST_CALL_LOG="$log" \
+            bash "$INSTALL_SCRIPT" >"$SANDBOX/out.$n" 2>&1
         echo $?
     }
 
-    rc1="$(run_once 1)"
-    rc2="$(run_once 2)"
+    # Real, comparable state after each run (finding 2) -- not just
+    # exit code: the recursive content of the directory the script
+    # installs unit files into (name + mode + sha256 per file), which
+    # catches a duplicate unit, changed content, or a changed mode;
+    # and the sequence of systemctl invocations the script actually
+    # made. Mocked systemctl carries no real system state to inspect
+    # (systemd itself is never touched in this sandbox, by design --
+    # the units are meant to be enabled by the user, per AC4), so the
+    # invocation-argument sequence is the closest available, honest
+    # proxy for "systemctl --user output" here.
+    snapshot_units() {
+        local dir="$SCRATCH_HOME/.config/systemd/user"
+        [[ -d "$dir" ]] || return 0
+        while IFS= read -r -d '' f; do
+            printf '%s %s %s\n' "$(stat -c '%a' "$f")" "$(sha256sum "$f" | cut -d' ' -f1)" "${f#"$dir"/}"
+        done < <(find "$dir" -type f -print0 | sort -z)
+    }
+
+    CALL_LOG_1="$SANDBOX/calls.1.log"; : > "$CALL_LOG_1"
+    CALL_LOG_2="$SANDBOX/calls.2.log"; : > "$CALL_LOG_2"
+
+    rc1="$(run_once 1 "$CALL_LOG_1")"
+    snapshot_units > "$SANDBOX/units.1"
+    grep -E '^systemctl ' "$CALL_LOG_1" > "$SANDBOX/systemctl.1"
+
+    rc2="$(run_once 2 "$CALL_LOG_2")"
+    snapshot_units > "$SANDBOX/units.2"
+    grep -E '^systemctl ' "$CALL_LOG_2" > "$SANDBOX/systemctl.2"
+
+    CALL_LOG_BOTH="$SANDBOX/calls.both.log"
+    cat "$CALL_LOG_1" "$CALL_LOG_2" > "$CALL_LOG_BOTH"
 
     if [[ "$rc1" == "0" ]]; then
         pass "AC4: first run exits 0"
@@ -203,6 +299,24 @@ EOF
         pass "AC4: second run exits 0 (idempotent)"
     else
         fail "AC4: second run exited $rc2 -- $(cat "$SANDBOX/out.2")"
+    fi
+
+    if [[ -s "$SANDBOX/units.1" ]]; then
+        pass "AC4: first run installed unit file(s) into the scratch systemd/user dir (state snapshot non-empty, so the drift comparison below is meaningful)"
+    else
+        fail "AC4: first run installed no unit files into the scratch systemd/user dir -- the idempotency drift check below would be vacuous"
+    fi
+
+    if diff -u "$SANDBOX/units.1" "$SANDBOX/units.2" >"$SANDBOX/units.diff" 2>&1; then
+        pass "AC4: installed unit files identical (name, mode, content hash) after run 1 and run 2 -- no duplicate, no drift"
+    else
+        fail "AC4: installed unit file state differs between run 1 and run 2 (duplicate unit, changed content, or changed mode) -- $(cat "$SANDBOX/units.diff")"
+    fi
+
+    if diff -u "$SANDBOX/systemctl.1" "$SANDBOX/systemctl.2" >"$SANDBOX/systemctl.diff" 2>&1; then
+        pass "AC4: systemctl --user invocation sequence identical between run 1 and run 2 -- no drift in what the script asks systemctl to do"
+    else
+        fail "AC4: systemctl --user invocation sequence differs between run 1 and run 2 -- $(cat "$SANDBOX/systemctl.diff")"
     fi
 
     OUT="$SANDBOX/out.1"
@@ -221,33 +335,65 @@ EOF
         fail "AC4: does not print verbatim 'sudo install -m 0755 ~/.cargo/bin/iwec /usr/local/lib/iwe-store/bin/iwec'"
     fi
 
-    if grep -qiE 'iwe-store.*user manager|user manager.*iwe-store' "$OUT" \
-        || (grep -qi 'iwe-store' "$OUT" && grep -qiE 'enable|start' "$OUT"); then
-        pass "AC4: mentions enabling/starting the units in iwe-store's user manager"
+    # C4e (finding 3): the old check was `A || (B && C)` where the
+    # second disjunct only required "iwe-store" and "enable"/"start"
+    # to appear *anywhere at all* in the whole output -- trivially
+    # true here regardless, since both words already occur in the
+    # unrelated install-path and linger lines. Narrowed to require the
+    # real thing: on the primary (no-fallback) path, "iwe-store",
+    # "user manager" and "enable"/"start" together on one line; on the
+    # documented fallback path (where the contract's own fallback
+    # clause allows the step to be revised), a concrete printed
+    # systemctl --user enable/start instruction naming the iwec units,
+    # standing in for the revised step.
+    c4e_ok=0
+    if [[ "$FALLBACK_USED" -eq 1 ]]; then
+        if grep -qiE 'systemctl[[:space:]]+--user[[:space:]]+(enable|start).*iwec' "$OUT"; then
+            c4e_ok=1
+        fi
     else
-        fail "AC4: no mention of enabling/starting units in iwe-store's user manager"
+        while IFS= read -r line; do
+            if grep -qi 'iwe-store' <<<"$line" && grep -qi 'user manager' <<<"$line" && grep -qiE 'enable|start' <<<"$line"; then
+                c4e_ok=1
+                break
+            fi
+        done < "$OUT"
+    fi
+    if [[ "$c4e_ok" -eq 1 ]]; then
+        pass "AC4 (C4e): mentions enabling/starting the units, tied to the manager applicable to the shape in use"
+    else
+        fail "AC4 (C4e): no genuine mention of enabling/starting the units in the applicable manager (iwe-store's, or the documented fallback's revised systemctl --user step)"
     fi
 
-    # "never attempts": the three specific privileged steps must not
-    # show up as *invocations* in the call log, even though the mocks
-    # would have let them succeed harmlessly.
-    if grep -qE '^loginctl enable-linger iwe-store$' "$CALL_LOG"; then
-        fail "AC4: script actually invoked 'loginctl enable-linger iwe-store' instead of only printing it"
-    else
-        pass "AC4: 'loginctl enable-linger iwe-store' was not actually invoked"
-    fi
+    # "never attempts": none of the three specific privileged steps
+    # may show up as a real invocation, whether bare or prefixed by
+    # sudo/pkexec/su/doas -- these patterns are unanchored so a prefix
+    # of any shape in front of the operation text is still caught.
+    check_never_invoked() {
+        local desc="$1" pattern="$2"
+        if grep -qE -- "$pattern" "$CALL_LOG_BOTH"; then
+            fail "AC4: script actually invoked $desc instead of only printing it -- $(grep -E -- "$pattern" "$CALL_LOG_BOTH")"
+        else
+            pass "AC4: $desc was not actually invoked (checked bare and via sudo/pkexec/su/doas)"
+        fi
+    }
+    check_never_invoked "'loginctl enable-linger iwe-store'" 'loginctl[[:space:]]+enable-linger[[:space:]]+iwe-store'
+    check_never_invoked "the root-owned install of iwec" 'install[[:space:]].*-m[[:space:]]+0755.*/usr/local/lib/iwe-store/bin/iwec'
+    check_never_invoked "systemctl --user enable/start for iwec units" 'systemctl[[:space:]]+--user[[:space:]]+(enable|start).*iwec'
 
-    if grep -qE '^install .*-m 0755.*/usr/local/lib/iwe-store/bin/iwec$' "$CALL_LOG"; then
-        fail "AC4: script actually invoked the root-owned install of iwec instead of only printing it"
-    else
-        pass "AC4: root-owned install of iwec was not actually invoked"
-    fi
-
-    if grep -qE '^systemctl --user (enable|start).*iwec' "$CALL_LOG"; then
-        fail "AC4: script actually invoked systemctl --user enable/start for iwec units instead of only printing"
-    else
-        pass "AC4: systemctl --user enable/start for iwec units was not actually invoked"
-    fi
+    # Finding 1's dynamic half: rather than checking absence of three
+    # enumerated invocation strings, assert the escalation binaries
+    # themselves were never called at all, in any argument shape --
+    # this is what actually closes the gap, since the old checks never
+    # even looked at what a real `sudo <step>` invocation would have
+    # logged (it logs under "sudo ...", not under the bare command).
+    for esc in sudo pkexec su doas; do
+        if grep -qE "^${esc}([[:space:]]|\$)" "$CALL_LOG_BOTH"; then
+            fail "AC4: script actually invoked '$esc' -- $(grep -E "^${esc}([[:space:]]|\$)" "$CALL_LOG_BOTH")"
+        else
+            pass "AC4: '$esc' was never actually invoked, in any argument shape"
+        fi
+    done
 
     trap - EXIT
     rm -rf "$SANDBOX"
