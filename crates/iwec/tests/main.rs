@@ -24,6 +24,7 @@ mod schema_test;
 mod squash_test;
 mod stats_test;
 mod stats_warnings_test;
+mod store_flag_test;
 mod transaction_wiring_test;
 mod tx_commit_lock_wiring_test;
 mod validating_write_gate_test;
