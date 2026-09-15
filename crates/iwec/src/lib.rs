@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use diwe::config::{
@@ -890,6 +891,9 @@ struct OpenTransaction {
     /// into the one journal record at commit ([`collapse_effects`]).
     effects: Vec<diwe::journal::KeyEffect>,
     graph: Arc<Mutex<Graph>>,
+    /// Monotonic time of the most recent operation against this transaction.
+    /// Used only by the HTTP daemon's idle-transaction reaper.
+    last_touched: Instant,
 }
 
 impl OpenTransaction {
@@ -901,6 +905,10 @@ impl OpenTransaction {
             }
         }
         keys
+    }
+
+    fn touch(&mut self) {
+        self.last_touched = Instant::now();
     }
 }
 
@@ -1977,6 +1985,7 @@ impl IweServer {
                 backend,
                 effects: Vec::new(),
                 graph: tx_graph,
+                last_touched: Instant::now(),
             },
         );
         drop(open);
@@ -2494,6 +2503,48 @@ impl IweServer {
         Self::from_documents_with_config(documents, Configuration::default())
     }
 
+    /// Force-aborts transactions that have not been touched for `idle_timeout`.
+    /// The HTTP daemon calls this periodically; stdio deliberately never does.
+    /// Returns the number of transactions discarded in this sweep.
+    pub async fn reap_idle_transactions(&self, idle_timeout: Duration) -> usize {
+        let now = Instant::now();
+        let expired = {
+            let mut open = self.open_txs.lock().expect("open transaction lock");
+            let expired_keys: Vec<String> = open
+                .iter()
+                .filter_map(|(key, tx)| {
+                    (now.duration_since(tx.last_touched) > idle_timeout).then(|| key.clone())
+                })
+                .collect();
+            expired_keys
+                .into_iter()
+                .filter_map(|key| open.remove(&key).map(|tx| (key, tx)))
+                .collect::<Vec<_>>()
+        };
+
+        let reaped = expired.len();
+        for (key, mut tx) in expired {
+            let keys = tx.staged_keys();
+            let _ = tx.backend.abort();
+            // This matches explicit abort: only the historical shared default
+            // handle can have staged directly into the live graph.
+            if key == DEFAULT_TX_HANDLE {
+                self.reload_graph_from_disk().await;
+            }
+            tracing::info!(
+                handle = %key,
+                staged_writes = keys.len(),
+                "force-aborted idle transaction"
+            );
+        }
+        tracing::info!(
+            idle_timeout_secs = idle_timeout.as_secs_f64(),
+            force_aborted = reaped,
+            "completed idle transaction sweep"
+        );
+        reaped
+    }
+
     pub fn from_documents_with_config(documents: Vec<(&str, &str)>, config: Configuration) -> Self {
         let state = new_from_hashmap(
             documents
@@ -2680,6 +2731,7 @@ impl IweServer {
         if self.document_path(key).is_some() {
             let mut open = self.open_txs.lock().expect("open transaction lock");
             if let Some(tx) = open.get_mut(&tx_key) {
+                tx.touch();
                 // Staged, not committed: permission is judged now (a
                 // refused write leaves the transaction open and
                 // untouched), validation at `iwe_tx_commit`.
@@ -2758,6 +2810,7 @@ impl IweServer {
         let tx_key = resolve_tx_handle(handle);
         let mut open = self.open_txs.lock().expect("open transaction lock");
         let tx = open.get_mut(&tx_key)?;
+        tx.touch();
         let schemas_dir = schemas_dir_in(root);
         let check = |key: &Key, content: &str, operation: diwe::permissions::WriteOperation| {
             let prior = self
@@ -2837,9 +2890,12 @@ impl IweServer {
         implicit_handle: bool,
     ) -> Result<Arc<Mutex<Graph>>, McpError> {
         let key = resolve_tx_handle(handle);
-        let open = self.open_txs.lock().expect("open transaction lock");
-        match open.get(&key) {
-            Some(tx) => Ok(tx.graph.clone()),
+        let mut open = self.open_txs.lock().expect("open transaction lock");
+        match open.get_mut(&key) {
+            Some(tx) => {
+                tx.touch();
+                Ok(tx.graph.clone())
+            }
             None if implicit_handle => Ok(self.graph.clone()),
             None => Err(McpError::invalid_params(
                 format!("no transaction is open for handle '{key}'; call iwe_tx_begin first"),

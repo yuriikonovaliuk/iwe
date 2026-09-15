@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -33,6 +34,10 @@ struct Cli {
     /// Explicit initialized IWE store root, overriding cwd-based discovery.
     #[arg(long, value_name = "PATH")]
     store: Option<PathBuf>,
+
+    /// Force-abort HTTP transactions left untouched for this many seconds.
+    #[arg(long, default_value_t = 600, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
+    tx_idle_timeout_secs: u64,
 }
 
 fn main() -> Result<()> {
@@ -117,6 +122,20 @@ async fn runtime_main() -> Result<()> {
         Transport::Http => {
             let bind_address = format!("{}:{}", cli.host, cli.port);
             let cancellation = CancellationToken::new();
+            let reaper_cancellation = cancellation.child_token();
+            let reaper_server = server.clone();
+            let idle_timeout = Duration::from_secs(cli.tx_idle_timeout_secs);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(idle_timeout);
+                loop {
+                    tokio::select! {
+                        _ = reaper_cancellation.cancelled() => break,
+                        _ = interval.tick() => {
+                            reaper_server.reap_idle_transactions(idle_timeout).await;
+                        }
+                    }
+                }
+            });
             let service = StreamableHttpService::new(
                 move || Ok(server.clone()),
                 LocalSessionManager::default().into(),
