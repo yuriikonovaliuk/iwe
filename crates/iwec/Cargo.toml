@@ -46,6 +46,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-io", "transpo
 schemars = "1.2"
 minijinja.workspace = true
 chrono.workspace = true
+libc = "0.2"
 
 [[test]]
 name = "integration"

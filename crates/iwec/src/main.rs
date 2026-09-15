@@ -30,8 +30,29 @@ struct Cli {
     port: u16,
 }
 
+fn main() -> Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // glibc ignores MALLOC_ARENA_MAX when uid-switched (secure mode);
+        // use mallopt() directly. Env override: IWEC_MALLOC_ARENA_MAX
+        let arena_max = if let Ok(val) = std::env::var("IWEC_MALLOC_ARENA_MAX") {
+            if val == "0" {
+                return Ok(());
+            }
+            val.parse::<i32>().unwrap_or(2)
+        } else {
+            2
+        };
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, arena_max);
+        }
+    }
+
+    runtime_main()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn runtime_main() -> Result<()> {
     let cli = Cli::parse();
 
     if env::var("IWE_DEBUG").is_ok() {

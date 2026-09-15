@@ -1530,6 +1530,7 @@ dependencies = [
  "diwe",
  "indoc",
  "iwe-lock",
+ "libc",
  "liwe",
  "minijinja",
  "rmcp",
