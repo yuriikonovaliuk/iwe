@@ -48,3 +48,4 @@ mod write_permission_test;
 mod transaction_test;
 mod freeze_test;
 mod t11_mutability_independent_test;
+mod t5_claude_json_registration_test;
