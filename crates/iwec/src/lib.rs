@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
@@ -894,6 +895,30 @@ struct OpenTransaction {
     /// Monotonic time of the most recent operation against this transaction.
     /// Used only by the HTTP daemon's idle-transaction reaper.
     last_touched: Instant,
+    /// Requests which have resolved this transaction and have not yet
+    /// completed their staged operation. The reaper must not remove a live
+    /// transaction between its handle lookup and its staging write.
+    activity: Arc<TransactionActivity>,
+}
+
+#[derive(Default)]
+struct TransactionActivity {
+    in_flight: AtomicUsize,
+}
+
+struct TransactionLease(Arc<TransactionActivity>);
+
+impl TransactionLease {
+    fn acquire(activity: Arc<TransactionActivity>) -> Self {
+        activity.in_flight.fetch_add(1, Ordering::AcqRel);
+        Self(activity)
+    }
+}
+
+impl Drop for TransactionLease {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl OpenTransaction {
@@ -1296,7 +1321,7 @@ impl IweServer {
         };
 
         let key = Key::name(&key_name);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&key).is_some() || self.document_file_exists(&key) {
@@ -1353,7 +1378,7 @@ impl IweServer {
         let handle = Some(resolve_request_tx_handle(&params.handle, &context));
         let implicit_handle = params.handle.is_none();
         let key = Key::name(&params.key);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&key).is_none() {
@@ -1416,7 +1441,7 @@ impl IweServer {
         let handle = Some(resolve_request_tx_handle(&params.handle, &context));
         let implicit_handle = params.handle.is_none();
         let key = Key::name(&params.key);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
         let changes = op_delete(&graph, &key).map_err(op_error_to_mcp)?;
 
@@ -1459,7 +1484,7 @@ impl IweServer {
         }
 
         let dry_run = params.dry_run.unwrap_or(false);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         let index = match &op {
@@ -1583,7 +1608,7 @@ impl IweServer {
         let implicit_handle = params.handle.is_none();
         let old_key = Key::name(&params.old_key);
         let new_key = Key::name(&params.new_key);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
         let changes = op_rename(&graph, &old_key, &new_key).map_err(op_error_to_mcp)?;
 
@@ -1608,7 +1633,7 @@ impl IweServer {
         let handle = Some(resolve_request_tx_handle(&params.handle, &context));
         let implicit_handle = params.handle.is_none();
         let source_key = Key::name(&params.key);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&source_key).is_none() {
@@ -1700,7 +1725,7 @@ impl IweServer {
         let handle = Some(resolve_request_tx_handle(&params.handle, &context));
         let implicit_handle = params.handle.is_none();
         let source_key = Key::name(&params.key);
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         if (&*graph).get_node_id(&source_key).is_none() {
@@ -1795,7 +1820,7 @@ impl IweServer {
     ) -> Result<CallToolResult, McpError> {
         let handle = Some(resolve_request_tx_handle(&params.handle, &context));
         let implicit_handle = params.handle.is_none();
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let graph = graph_arc.lock().await;
         let state = graph.export();
         let original_count = state.len();
@@ -1863,7 +1888,7 @@ impl IweServer {
             McpError::invalid_params("'key' is required when not in list mode".to_string(), None)
         })?;
 
-        let graph_arc = self.tx_graph(&handle, implicit_handle)?;
+        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
 
         let source_key = Key::name(source_key_str);
@@ -1990,6 +2015,7 @@ impl IweServer {
                 effects: Vec::new(),
                 graph: tx_graph,
                 last_touched: Instant::now(),
+                activity: Arc::new(TransactionActivity::default()),
             },
         );
         drop(open);
@@ -2517,7 +2543,9 @@ impl IweServer {
             let expired_keys: Vec<String> = open
                 .iter()
                 .filter_map(|(key, tx)| {
-                    (now.duration_since(tx.last_touched) > idle_timeout).then(|| key.clone())
+                    (tx.activity.in_flight.load(Ordering::Acquire) == 0
+                        && now.duration_since(tx.last_touched) > idle_timeout)
+                        .then(|| key.clone())
                 })
                 .collect();
             expired_keys
@@ -2898,15 +2926,16 @@ impl IweServer {
         &self,
         handle: &Option<String>,
         implicit_handle: bool,
-    ) -> Result<Arc<Mutex<Graph>>, McpError> {
+    ) -> Result<(Arc<Mutex<Graph>>, Option<TransactionLease>), McpError> {
         let key = resolve_tx_handle(handle);
         let mut open = self.open_txs.lock().expect("open transaction lock");
         match open.get_mut(&key) {
             Some(tx) => {
                 tx.touch();
-                Ok(tx.graph.clone())
+                let lease = TransactionLease::acquire(tx.activity.clone());
+                Ok((tx.graph.clone(), Some(lease)))
             }
-            None if implicit_handle => Ok(self.graph.clone()),
+            None if implicit_handle => Ok((self.graph.clone(), None)),
             None => Err(McpError::invalid_params(
                 format!("no transaction is open for handle '{key}'; call iwe_tx_begin first"),
                 None,
