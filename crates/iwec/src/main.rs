@@ -33,18 +33,16 @@ struct Cli {
 fn main() -> Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        // glibc ignores MALLOC_ARENA_MAX when uid-switched (secure mode);
-        // use mallopt() directly. Env override: IWEC_MALLOC_ARENA_MAX
-        let arena_max = if let Ok(val) = std::env::var("IWEC_MALLOC_ARENA_MAX") {
-            if val == "0" {
-                return Ok(());
-            }
-            val.parse::<i32>().unwrap_or(2)
-        } else {
-            2
+        // The variable is erased from the setuid sudo process's environment by glibc before
+        // sudo builds the child's environment, so it never arrives at iwec. The in-binary
+        // mallopt bypasses this limitation.
+        let arena_max = match std::env::var("IWEC_MALLOC_ARENA_MAX") {
+            Ok(val) if val == "0" => None,
+            Ok(val) => val.parse::<i32>().ok(),
+            Err(_) => Some(2),
         };
-        unsafe {
-            libc::mallopt(libc::M_ARENA_MAX, arena_max);
+        if let Some(max) = arena_max {
+            unsafe { libc::mallopt(libc::M_ARENA_MAX, max) };
         }
     }
 
