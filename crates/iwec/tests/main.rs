@@ -30,6 +30,7 @@ mod transaction_wiring_test;
 mod tx_commit_lock_wiring_test;
 mod validating_write_gate_test;
 mod t13_enforcement_mode_matrix_test;
+mod t3_abandoned_tx_reaper_test;
 mod tree_test;
 mod watcher_test;
 mod write_permission_test;
