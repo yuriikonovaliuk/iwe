@@ -1946,7 +1946,11 @@ impl IweServer {
         let key = resolve_request_tx_handle(&params.handle, &context);
         let _graph = self.graph.lock().await;
         let mut open = self.open_txs.lock().expect("open transaction lock");
-        if let Some(tx) = open.get(&key) {
+        if let Some(tx) = open.get_mut(&key) {
+            // Even a duplicate begin is an operation against this existing
+            // handle; preserve the transaction while reporting the caller
+            // error and keep its idle lease alive.
+            tx.touch();
             return Err(McpError::invalid_params(
                 format!(
                     "a transaction is already open with {} staged write(s) ({}); commit or abort it first",
@@ -2744,6 +2748,9 @@ impl IweServer {
                     return Err(format!("write rejected by transaction backend for '{key}'"));
                 }
                 tx.effects.push(diwe::journal::KeyEffect::new(key, effect));
+                // The staging write itself is a transaction operation; stamp
+                // completion as well as the initial handle lookup above.
+                tx.touch();
                 return Ok(());
             }
             // An explicit handle that names no open transaction is a
@@ -2853,6 +2860,9 @@ impl IweServer {
             }
         }
         tx.effects.extend(diwe::fs::journal_effects_for(changes));
+        // A multi-document stage can spend material time checking every
+        // affected key, so refresh once its complete staged effect lands.
+        tx.touch();
         Some(Ok(()))
     }
 
