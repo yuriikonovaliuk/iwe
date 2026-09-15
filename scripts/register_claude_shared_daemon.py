@@ -5,6 +5,17 @@ This changes only ``mcpServers.iwe`` and ``mcpServers.mind`` in a Claude
 configuration. Run it only after both shared daemons are confirmed live: the
 later gated rollout task performs the live ``~/.claude.json`` flip. This
 script deliberately does not start daemons.
+
+T5 investigation flag (2026-09-15): crew-spawned Claude children do not read
+``~/.claude.json`` directly. ``crew_mcp.agent_spawn.mcp_config_for`` reads it
+when each spawn is prepared (``multi-agent-orchestration/packages/crew-mcp/
+src/crew_mcp/agent_spawn.py:203-220``), and ``_claude_scope_flags`` writes the
+role-pinned subset to that spawn's scratch ``mcp.json`` and launches with
+``--mcp-config`` plus ``--strict-mcp-config`` (lines 223-238). The production
+spawn evidence independently confirms this restricted scratch-config path at
+``multi-agent-orchestration/reports/mcp-role-pins-evidence.md:174-204``.
+Therefore no T5 scope widening into crew-mcp is needed: updating these two
+entries in ``~/.claude.json`` is picked up transitively by later crew spawns.
 """
 
 from __future__ import annotations
