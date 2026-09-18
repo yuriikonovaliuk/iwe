@@ -1511,6 +1511,68 @@ fn external_checkers_merge_their_reports_and_warn_mode_does_not_fail() {
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
+#[test]
+fn external_checkers_route_per_violation_level_over_the_configured_warn_flag() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    create_dir_all(temp_path.join(".iwe/schemas")).unwrap();
+    create_dir_all(temp_path.join("facts")).unwrap();
+    write(
+        temp_path.join(".iwe/schemas/fact.yaml"),
+        "frontmatter:\n  type: object\n",
+    )
+    .unwrap();
+    write(
+        temp_path.join("facts/a.md"),
+        "---\ntype: fact\n---\n\n# A\n",
+    )
+    .unwrap();
+    // One document, two violations from the same checker run: one tagged
+    // "error", one tagged "warn", and a third with no `level` field at
+    // all -- a merged checker (one process answering for what used to be
+    // two separate `[checkers.<name>]` entries) reporting both at once,
+    // per `RawViolation::level`'s own doc comment in `diwe::schema`.
+    write(
+        temp_path.join("checker.sh"),
+        "#!/bin/sh\ncat > in.json\necho '[{\"key\":\"facts/a\",\"violations\":[\
+            {\"message\":\"hard failure\",\"level\":\"error\"},\
+            {\"message\":\"soft warning\",\"level\":\"warn\"},\
+            {\"message\":\"unlabeled follows the configured flag\"}\
+        ]}]'\n",
+    )
+    .unwrap();
+    let mut checkers = HashMap::new();
+    // `warn: false` at the checker level -- if per-violation `level` were
+    // ignored, every violation (including the "warn"-tagged one) would
+    // route to failing. It must not: only "hard failure" and the
+    // unlabeled one (falling back to this checker's own `warn: false`)
+    // belong there; "soft warning" belongs in warnings despite the
+    // checker itself being configured as failing.
+    checkers.insert(
+        "mixed".to_string(),
+        diwe::config::Checker {
+            command: "sh checker.sh".to_string(),
+            warn: false,
+            always: true,
+            description: None,
+        },
+    );
+    write_config_with_checkers(temp_path, checkers);
+    let output = run_validate(&temp_dir, &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("facts/a: hard failure"), "{stdout}");
+    assert!(
+        stdout.contains("facts/a: unlabeled follows the configured flag"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("soft warning"), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("warning: facts/a: soft warning"), "{stderr}");
+    assert!(!stderr.contains("hard failure"), "{stderr}");
+    assert!(!stderr.contains("unlabeled"), "{stderr}");
+}
+
 // ---- covers: every value of a frontmatter list must be a satisfying link ----
 
 #[test]

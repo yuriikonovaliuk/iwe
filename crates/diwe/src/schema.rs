@@ -1682,6 +1682,16 @@ pub fn run_checkers(
         hint: Option<String>,
         #[serde(default)]
         pointer: Option<String>,
+        /// A checker that answers for more than one of its own levels in
+        /// a single process -- sharing one graph/model load across what
+        /// used to be separate `[checkers.<name>]`/`[checkers.<name>-warn]`
+        /// invocations -- tags each violation with which level it belongs
+        /// to, since one document can carry both kinds from one run.
+        /// `None` (a checker that only ever reports at its own single
+        /// configured level) keeps the old behavior: every violation
+        /// routes by `checker.warn`.
+        #[serde(default)]
+        level: Option<String>,
     }
     #[derive(serde::Deserialize)]
     struct RawReport {
@@ -1809,13 +1819,14 @@ pub fn run_checkers(
                 continue;
             }
         };
-        let target = if checker.warn {
-            &mut out.warnings
-        } else {
-            &mut out.failing
-        };
+        // Falls back for a whole-checker-execution failure (never reached
+        // parsed per-violation output at all) and for a violation that
+        // does not name its own level -- both cases the config's own
+        // `warn` flag has always governed.
+        let default_target_is_warn = checker.warn;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let target = if default_target_is_warn { &mut out.warnings } else { &mut out.failing };
             target.push(failure(format!(
                 "checker exited with {}: {}",
                 output.status,
@@ -1830,28 +1841,55 @@ pub fn run_checkers(
                     if report.violations.is_empty() {
                         continue;
                     }
-                    target.push(KeyReport {
-                        key: Key::name(&report.key),
-                        schema: format!("checker:{name}"),
-                        violations: report
-                            .violations
-                            .into_iter()
-                            .map(|v| Violation {
-                                breadcrumb: Vec::new(),
-                                message: v.message,
-                                hint: v.hint,
-                                schema_pointer: v
-                                    .pointer
-                                    .unwrap_or_else(|| format!("/checkers/{name}")),
-                                keyword: "checker".to_string(),
-                            })
-                            .collect(),
-                    });
+                    // A merged checker (see `RawViolation::level`'s own
+                    // doc comment) can report both levels for the same
+                    // document in one pass -- split per violation rather
+                    // than assuming the whole report shares one target.
+                    let mut failing_violations = Vec::new();
+                    let mut warning_violations = Vec::new();
+                    for v in report.violations {
+                        let goes_to_warnings = match v.level.as_deref() {
+                            Some("warn") => true,
+                            Some(_) => false,
+                            None => default_target_is_warn,
+                        };
+                        let violation = Violation {
+                            breadcrumb: Vec::new(),
+                            message: v.message,
+                            hint: v.hint,
+                            schema_pointer: v
+                                .pointer
+                                .unwrap_or_else(|| format!("/checkers/{name}")),
+                            keyword: "checker".to_string(),
+                        };
+                        if goes_to_warnings {
+                            warning_violations.push(violation);
+                        } else {
+                            failing_violations.push(violation);
+                        }
+                    }
+                    if !failing_violations.is_empty() {
+                        out.failing.push(KeyReport {
+                            key: Key::name(&report.key),
+                            schema: format!("checker:{name}"),
+                            violations: failing_violations,
+                        });
+                    }
+                    if !warning_violations.is_empty() {
+                        out.warnings.push(KeyReport {
+                            key: Key::name(&report.key),
+                            schema: format!("checker:{name}"),
+                            violations: warning_violations,
+                        });
+                    }
                 }
             }
-            Err(error) => target.push(failure(format!(
-                "checker printed something other than a JSON array of reports: {error}"
-            ))),
+            Err(error) => {
+                let target = if default_target_is_warn { &mut out.warnings } else { &mut out.failing };
+                target.push(failure(format!(
+                    "checker printed something other than a JSON array of reports: {error}"
+                )));
+            }
         }
     }
     out
