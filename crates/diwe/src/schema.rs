@@ -1695,15 +1695,94 @@ pub fn run_checkers(
     };
     let mut names: Vec<&String> = config.checkers.keys().collect();
     names.sort();
-    for name in names {
-        let checker = &config.checkers[name];
-        if !all && !checker.always {
-            continue;
-        }
-        let input = serde_json::json!({
-            "root": root.to_string_lossy(),
-            "keys": keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
-        });
+
+    let input = serde_json::json!({
+        "root": root.to_string_lossy(),
+        "keys": keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+    });
+
+    // Every configured checker gets the same input and runs independently
+    // of every other -- none reads another's output. Sequentially
+    // spawning-then-waiting-then-spawning-the-next (the previous shape
+    // here) makes the wall-clock cost the *sum* of every checker's own
+    // runtime; checkers are typically small scripts (a spaCy/NLP pass in
+    // practice) where that sum dominates `schema validate`'s total time.
+    // Spawning every checker up front and only waiting afterward instead
+    // lets the OS run them concurrently for the whole span between spawn
+    // and wait -- the ideal case (checkers that are mostly I/O- or
+    // startup-bound, or a machine with cores to spare) drops this close
+    // to the *slowest single checker*; a machine whose checkers are
+    // CPU/memory-bound and collectively exceed its core count will see a
+    // smaller win, bounded by actual available throughput, but never a
+    // loss (the same total work runs, only exposed to real concurrency
+    // instead of forced serial). Each child's stdin is
+    // written and closed (via `drop`) right after spawning it, before
+    // moving to the next spawn, so one child's slow stdin read can never
+    // delay another's spawn; `wait_with_output` (second pass, below)
+    // already reads stdout/stderr on background threads while waiting,
+    // so no child can deadlock the harness by filling its stdout/stderr
+    // pipe before this function starts waiting on it.
+    struct Spawned<'a> {
+        name: &'a String,
+        checker: &'a crate::config::Checker,
+        child: Result<std::process::Child, String>,
+    }
+
+    let spawned: Vec<Spawned> = names
+        .into_iter()
+        .filter_map(|name| {
+            let checker = &config.checkers[name];
+            if !all && !checker.always {
+                return None;
+            }
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(&checker.command)
+                .current_dir(root)
+                // Checkers now run concurrently (see this function's own
+                // doc comment above): a checker backed by a BLAS-using
+                // numerical library (observed with spaCy/thinc, the
+                // term-closure checker's own stack) otherwise defaults to
+                // using every core *per process*, so N concurrent
+                // checkers oversubscribe far past the machine's core
+                // count and each one slows down rather than the run
+                // benefiting from concurrency. Pinning each checker to a
+                // single BLAS thread is a no-op for a checker that never
+                // reads these (the overwhelming majority), and never
+                // slower than the un-pinned case for one that does.
+                .env("OMP_NUM_THREADS", "1")
+                .env("OPENBLAS_NUM_THREADS", "1")
+                .env("MKL_NUM_THREADS", "1")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            let child = match child {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(input.to_string().as_bytes());
+                        // Explicit drop: closes the pipe so the checker
+                        // sees EOF on stdin instead of waiting for more.
+                        drop(stdin);
+                    }
+                    Ok(child)
+                }
+                Err(error) => Err(format!("checker could not start: {error}")),
+            };
+            Some(Spawned {
+                name,
+                checker,
+                child,
+            })
+        })
+        .collect();
+
+    for Spawned {
+        name,
+        checker,
+        child,
+    } in spawned
+    {
         let failure = |message: String| KeyReport {
             key: Key::name(&format!("checkers/{name}")),
             schema: format!("checker:{name}"),
@@ -1715,25 +1794,13 @@ pub fn run_checkers(
                 keyword: "checker".to_string(),
             }],
         };
-        let mut child = match Command::new("sh")
-            .arg("-c")
-            .arg(&checker.command)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+        let child = match child {
             Ok(child) => child,
-            Err(error) => {
-                out.failing
-                    .push(failure(format!("checker could not start: {error}")));
+            Err(message) => {
+                out.failing.push(failure(message));
                 continue;
             }
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input.to_string().as_bytes());
-        }
         let output = match child.wait_with_output() {
             Ok(output) => output,
             Err(error) => {
