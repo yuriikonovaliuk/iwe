@@ -11,9 +11,12 @@
 //! `commit()`, whether the transaction's *final* state satisfies the schema
 //! rules — the index-bounded link rules over the documents that state's
 //! writes could have affected ([`ValidationScope::AffectedSet`], see
-//! [`crate::schema::validate_affected_set`]), or everything `iwe schema
-//! validate` checks ([`ValidationScope::Full`]: every schema, the
-//! `[invariants]`, and the `always` checkers over the touched keys).
+//! [`crate::schema::validate_affected_set`]; [`ValidationScope::
+//! AffectedSetWithCheckers`] additionally runs the `always` checkers over
+//! the touched keys, without the whole-store re-validation below), or
+//! everything `iwe schema validate` checks ([`ValidationScope::Full`]:
+//! every schema, the `[invariants]`, and the `always` checkers over the
+//! touched keys).
 //!
 //! Validating only at `commit()`, and only the final state, is deliberate:
 //! a multi-write transaction may legitimately pass through invalid
@@ -514,8 +517,10 @@ impl ValidatingTransaction {
         );
         let run = match self.scope {
             ValidationScope::Full => validate_store_at(&self.schemas_dir, &self.config, &graph)?,
-            ValidationScope::AffectedSet => validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
-                .map(|(run, _affected)| run)?,
+            ValidationScope::AffectedSet | ValidationScope::AffectedSetWithCheckers => {
+                validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
+                    .map(|(run, _affected)| run)?
+            }
             ValidationScope::None => ValidationRun {
                 documents: 0,
                 schemas: 0,
@@ -606,9 +611,16 @@ impl ValidatingTransaction {
 
     /// The `always` checkers over the touched keys, against the applied
     /// state. Only the reports configured to fail count; warnings are the
-    /// CLI's to print.
+    /// CLI's to print. Runs under `Full` (as always) and under
+    /// `AffectedSetWithCheckers` -- that scope's entire reason to exist is
+    /// checker coverage without `Full`'s own whole-store schema/links
+    /// re-validation cost (`ValidationScope`'s own doc comment).
     fn failing_checker_reports(&self, touched: &[Key]) -> Option<ValidationRun> {
-        if self.scope != ValidationScope::Full || self.config.checkers.is_empty() {
+        let runs_checkers = matches!(
+            self.scope,
+            ValidationScope::Full | ValidationScope::AffectedSetWithCheckers
+        );
+        if !runs_checkers || self.config.checkers.is_empty() {
             return None;
         }
         let checked = run_checkers(&self.config, &self.checker_root, touched, false);
@@ -625,13 +637,17 @@ impl ValidatingTransaction {
     /// The compiled-in always-checkers (`crate::checkers`) — distinct from
     /// the configurable external `[checkers.*]` above: these have no
     /// `[checkers.<name>].always` toggle, no suppression-window opt-out,
-    /// and no touched-keys gate. They run on every `validate = "full"`
-    /// commit regardless of what this transaction wrote, because what they
-    /// check (e.g. a suppression's calendar expiry) can go stale
-    /// independent of any write touching it — an affected-set validation
-    /// would never catch that.
+    /// and no touched-keys gate. They run on every `validate = "full"` (or
+    /// `"affected-set-with-checkers"`) commit regardless of what this
+    /// transaction wrote, because what they check (e.g. a suppression's
+    /// calendar expiry) can go stale independent of any write touching it
+    /// — a plain affected-set validation would never catch that, and
+    /// unlike the external checkers this one is cheap (no subprocess, no
+    /// model load: a regex pass over `.iwe/config.toml`'s own text), so
+    /// there is no per-write cost tradeoff to weigh before including it
+    /// wherever the external checkers already run.
     fn always_checker_violations(&self) -> Option<ValidationRun> {
-        if self.scope != ValidationScope::Full {
+        if !matches!(self.scope, ValidationScope::Full | ValidationScope::AffectedSetWithCheckers) {
             return None;
         }
         let expired = crate::checkers::expire_suppressions::ExpireSuppressionsChecker
@@ -1341,6 +1357,88 @@ print(json.dumps(out))'"#
         ))
         .unwrap();
         assert!(tx.commit().is_ok());
+    }
+
+    /// `AffectedSetWithCheckers`'s entire reason to exist, proved both
+    /// halves at once: (1) it runs the `always` checkers over the touched
+    /// keys, same as `Full`, so a checker violation is still enforced and
+    /// reverted; (2) unlike `Full`, it does *not* re-validate the whole
+    /// store's schema/links -- a pre-existing schema violation elsewhere
+    /// in the store (written out of band, never through this backend)
+    /// does not block an unrelated commit, where `Full` would have caught
+    /// it and failed.
+    #[cfg(unix)]
+    #[test]
+    fn affected_set_with_checkers_runs_checkers_but_not_whole_store_schema_validation() {
+        use crate::config::Checker;
+
+        let temp = TempDir::new().unwrap();
+        write_schema(temp.path(), "note", "links:\n  - min: 1\n");
+        create_dir_all(temp.path().join("notes")).unwrap();
+        // Written directly to disk, never through a validating backend:
+        // zero links, violating the schema above. `Full` scope's own
+        // whole-store re-validation would catch this on every commit;
+        // affected-set-scoped validation never looks at an untouched key.
+        write(
+            temp.path().join("notes/pre-existing.md"),
+            "# Pre-existing\n",
+        )
+        .unwrap();
+
+        let mut config = config_with(&[("note", "notes/**")]);
+        config.checkers.insert(
+            "no-forbidden".to_string(),
+            Checker {
+                command: r#"python3 -c '
+import json,sys,os
+inp=json.load(sys.stdin)
+out=[]
+for k in inp["keys"]:
+    p=os.path.join(inp["root"],k+".md")
+    if os.path.exists(p) and "forbidden" in open(p).read():
+        out.append({"key":k,"violations":[{"message":"forbidden word"}]})
+print(json.dumps(out))'"#
+                    .to_string(),
+                warn: false,
+                always: true,
+                description: None,
+            },
+        );
+
+        let mut tx =
+            transaction_for(&temp, config).with_scope(ValidationScope::AffectedSetWithCheckers);
+
+        // A clean, schema-satisfying write (has a link) commits fine even
+        // though the untouched pre-existing document is itself invalid --
+        // proof this scope never re-validates the whole store.
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/a"),
+            "# A\n\n[pre-existing](pre-existing.md)\n".to_string(),
+        ))
+        .unwrap();
+        assert!(
+            tx.commit().is_ok(),
+            "an untouched, pre-existing schema violation must not block this scope's commit"
+        );
+
+        // A write the checker itself rejects (the word "forbidden") is
+        // still enforced and reverted, exactly as under `Full`.
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/c"),
+            "# C\n\n[pre-existing](pre-existing.md) forbidden\n".to_string(),
+        ))
+        .unwrap();
+        let result = tx.commit();
+        assert!(matches!(
+            result,
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert!(
+            !temp.path().join("notes/c.md").exists(),
+            "the checker-rejected write must have been reverted"
+        );
     }
 
     /// 5-iwe-t3: every CLI write funnels through this backend's `commit()`

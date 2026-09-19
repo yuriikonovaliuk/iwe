@@ -1988,7 +1988,8 @@ impl IweServer {
         let Some(mut backend) = self.validating_backend() else {
             return Err(McpError::invalid_params(
                 "transactions are not enabled for this store: set `[transactions] validate` to \
-                 \"affected-set\" or \"full\", or set `[transactions] deny`/`allow` \
+                 \"affected-set\", \"affected-set-with-checkers\", or \"full\", or set \
+                 `[transactions] deny`/`allow` \
                  (write-scope enforcement also constructs a validating backend)"
                     .to_string(),
                 None,

@@ -103,10 +103,19 @@ pub struct CommitOptions {
 /// documents are shape-checked on their own and nothing else stands
 /// between a tool call and the disk. `affected-set` checks the
 /// index-bounded link rules over the documents the write can reach
-/// (`crate::validating_transaction`). `full` validates the whole store's
-/// final state the way `iwe schema validate` does — every schema, the
-/// `[invariants]`, and the `always` checkers over the touched keys — and
-/// refuses the commit on any failing report, so a store that is clean
+/// (`crate::validating_transaction`). `affected-set-with-checkers` is the
+/// same affected-set schema/links check, plus the `always` external
+/// `[checkers.*]` (and the compiled-in always-checkers) over the touched
+/// keys -- the same checker call `full` makes, just without `full`'s own
+/// whole-store schema/links re-validation: a store whose checkers (e.g. a
+/// spaCy-backed term-closure pass) are the enforcement that actually
+/// matters per write, and whose whole-store schema shape is cheap enough
+/// to trust between full runs (`kc sync`, `iwe schema validate`), gets
+/// checker coverage on every write without `full`'s per-write cost of
+/// re-validating every other document too. `full` validates the whole
+/// store's final state the way `iwe schema validate` does — every schema,
+/// the `[invariants]`, and the `always` checkers over the touched keys —
+/// and refuses the commit on any failing report, so a store that is clean
 /// before a write is clean after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -114,6 +123,7 @@ pub enum ValidationScope {
     #[default]
     None,
     AffectedSet,
+    AffectedSetWithCheckers,
     Full,
 }
 
