@@ -297,6 +297,24 @@ async fn lock_reclaimed_between_acquire_and_apply_is_caught_by_fencing_transacti
         assert!(!created.is_error.unwrap_or(false), "{created:?}");
     }
 
+    // Widen `ValidatingTransaction::commit`'s own acquire-to-apply window
+    // (`diwe::validating_transaction::widen_fencing_window_for_test`,
+    // read via `IWE_TEST_LOCK_FENCING_DELAY_MS`) on top of this test's
+    // pre-existing BULK_COUNT/head-start engineering (module doc, knobs 1
+    // and 2): under CPU contention (another test suite running
+    // concurrently on the same machine) neither knob alone reliably
+    // widens the real wall-clock gap enough for the racer thread below to
+    // land its reclaim before `iwe_tx_commit` reaches its own fencing
+    // check -- the same failure mode `agent_transaction_test.rs`'s
+    // equivalent test already guards against with this exact hook. Set
+    // only around this one commit attempt, in this process's own
+    // environment.
+    // SAFETY: no other thread in this test reads/writes the process
+    // environment while this one is in flight (removed again below,
+    // before this function returns, on every path since nothing here
+    // panics between set and remove).
+    unsafe { std::env::set_var("IWE_TEST_LOCK_FENCING_DELAY_MS", "300") };
+
     let racer_root = repo_root.clone();
     let racer = tokio::task::spawn_blocking(move || {
         // Head start for iwe_tx_commit's own, uncontended start-of-attempt
@@ -324,6 +342,8 @@ async fn lock_reclaimed_between_acquire_and_apply_is_caught_by_fencing_transacti
 
     let commit_result = f.try_call_tool("iwe_tx_commit", json!({})).await;
     racer.await.expect("racer thread must not panic");
+    // SAFETY: see the comment at the matching `set_var` above.
+    unsafe { std::env::remove_var("IWE_TEST_LOCK_FENCING_DELAY_MS") };
 
     assert!(
         commit_result.is_err(),

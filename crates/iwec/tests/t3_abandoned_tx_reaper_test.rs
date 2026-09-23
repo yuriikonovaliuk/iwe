@@ -225,19 +225,26 @@ fn log_lines_containing(log: &Arc<Mutex<Vec<String>>>, needle_lower: &str) -> us
 async fn staging_writes_refresh_the_idle_clock_so_an_actively_used_transaction_survives() {
     let dir = store();
     let port = free_port();
-    let (_server, _log) = spawn_http(dir.path(), port, Some(2));
+    // 10s (not the tighter 2s an unloaded machine could get away with):
+    // each of the three gaps below must individually land under the idle
+    // timeout, so the margin between the two has to absorb real
+    // scheduling jitter -- both this client's own `tokio::time::sleep`
+    // and the server's MCP round trip -- when another test suite is
+    // contending for CPU on the same machine, not just cover the
+    // nominal 1.2s/2s gap.
+    let (_server, _log) = spawn_http(dir.path(), port, Some(10));
     let addr = format!("127.0.0.1:{port}");
     let client = http_client(&addr).await;
 
     let begun = call(&client, "iwe_tx_begin", json!({"handle": "alpha"})).await;
     assert!(is_ok(&begun), "begin must succeed: {}", text_of(&begun));
 
-    // Three staging writes spaced 1.2s apart -- total elapsed (~3.6s)
-    // exceeds the 2s configured idle timeout, but each write is itself a
-    // touch, so the transaction must never have gone idle long enough to
-    // be swept.
+    // Three staging writes spaced 4s apart -- total elapsed (~12s)
+    // exceeds the 10s configured idle timeout, but each write is itself
+    // a touch, so the transaction must never have gone idle long enough
+    // to be swept.
     for i in 0..3 {
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        tokio::time::sleep(Duration::from_millis(4000)).await;
         let staged = call(
             &client,
             "iwe_create",
@@ -301,29 +308,41 @@ async fn idle_transaction_is_force_aborted_leaving_store_valid_and_check_passing
     .await;
     assert!(is_ok(&staged), "staging write must succeed: {}", text_of(&staged));
 
-    // Abandon it: no further touches. Poll for the observable
-    // consequence of a force-abort -- the "ghost" slot becomes free
-    // again, exactly as an explicit `iwe_tx_abort` would leave it.
+    // Abandon it: no further touches -- crucially, that also means no
+    // further `iwe_tx_begin` against "ghost" while we wait: criterion 1
+    // (see `staging_writes_refresh_the_idle_clock_...` above) has the
+    // server refresh the idle clock on *every* operation against an
+    // already-open handle, a duplicate `iwe_tx_begin` included. Polling
+    // via `iwe_tx_begin` the way an explicit-abort check naively would
+    // must therefore never be used here -- it would touch the handle on
+    // every failed attempt and the transaction would never go idle long
+    // enough to be swept at all. Instead, poll the reaper's own
+    // force-abort log line (criterion 6) -- a purely passive
+    // observation that cannot itself refresh the idle clock.
     wait_until(
         Duration::from_secs(10),
         || {
-            let client = &client;
+            let log = &log;
             async move {
-                let reopened = call(client, "iwe_tx_begin", json!({"handle": "ghost"})).await;
-                if is_ok(&reopened) {
-                    // Clean up immediately so later assertions in this
-                    // test see the store in the post-reap state, not a
-                    // freshly reopened one.
-                    let _ = call(client, "iwe_tx_abort", json!({"handle": "ghost"})).await;
-                    true
-                } else {
-                    false
-                }
+                log_lines_containing(log, "force-abort") > 0
+                    || log_lines_containing(log, "force abort") > 0
             }
         },
-        "the idle transaction was never force-aborted (the 'ghost' handle never freed up)",
+        "the idle transaction was never force-aborted (no force-abort log line observed)",
     )
     .await;
+
+    // Now that the sweep has already happened, a single, one-shot begin
+    // confirms the observable consequence of the force-abort -- the
+    // "ghost" slot is free again, exactly as an explicit `iwe_tx_abort`
+    // would leave it -- without itself being part of the wait loop above.
+    let reopened = call(&client, "iwe_tx_begin", json!({"handle": "ghost"})).await;
+    assert!(
+        is_ok(&reopened),
+        "the 'ghost' handle must be free once the force-abort log line has appeared: {}",
+        text_of(&reopened)
+    );
+    let _ = call(&client, "iwe_tx_abort", json!({"handle": "ghost"})).await;
 
     // Store-state semantics match an explicit abort: the staged write
     // was discarded, never landing on disk.
@@ -388,27 +407,46 @@ async fn n_abandoned_transactions_do_not_accumulate_and_are_all_reaped() {
         assert!(is_ok(&staged), "staging write for {handle} must succeed: {}", text_of(&staged));
     }
 
-    // Abandon all three. Poll until every handle's slot has been freed
-    // by the sweep -- proof that abandoned transactions do not
-    // accumulate (all N are reaped, not just the first one found).
+    // Abandon all three. Poll until every handle's own force-abort has
+    // been logged -- proof that abandoned transactions do not accumulate
+    // (all N are reaped, not just the first one found). Poll the log,
+    // never `iwe_tx_begin` against the handle itself: per criterion 1
+    // (`staging_writes_refresh_the_idle_clock_...` above), the server
+    // refreshes the idle clock on *every* operation against an
+    // already-open handle, including a duplicate, refused
+    // `iwe_tx_begin` -- polling that way would touch each handle on
+    // every failed attempt and none of them would ever go idle long
+    // enough to be swept.
     for handle in handles {
         wait_until(
             Duration::from_secs(10),
             || {
-                let client = &client;
+                let log = &log;
                 async move {
-                    let reopened = call(client, "iwe_tx_begin", json!({"handle": handle})).await;
-                    if is_ok(&reopened) {
-                        let _ = call(client, "iwe_tx_abort", json!({"handle": handle})).await;
-                        true
-                    } else {
-                        false
-                    }
+                    log.lock().unwrap().iter().any(|line| {
+                        let lower = line.to_lowercase();
+                        (lower.contains("force-abort") || lower.contains("force abort"))
+                            && line.contains(handle)
+                    })
                 }
             },
             &format!("handle '{handle}' was never freed -- abandoned transactions accumulated"),
         )
         .await;
+    }
+
+    // Now that every force-abort has already been logged, a single,
+    // one-shot begin+abort per handle confirms the observable
+    // consequence -- each slot is free again -- without itself being
+    // part of the wait loop above.
+    for handle in handles {
+        let reopened = call(&client, "iwe_tx_begin", json!({"handle": handle})).await;
+        assert!(
+            is_ok(&reopened),
+            "handle '{handle}' must be free once its force-abort log line has appeared: {}",
+            text_of(&reopened)
+        );
+        let _ = call(&client, "iwe_tx_abort", json!({"handle": handle})).await;
     }
 
     // None of the staged writes landed.

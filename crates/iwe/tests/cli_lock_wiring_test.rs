@@ -62,6 +62,33 @@ fn run_iwe(work_dir: &Path, args: &[&str]) -> Output {
         .expect("run iwe")
 }
 
+/// Same as `spawn_iwe`, but also sets `IWE_TEST_LOCK_FENCING_DELAY_MS`
+/// (`iwe::new::widen_fencing_window_for_test`) in the spawned CLI
+/// process's own environment -- never this test process's, since each
+/// call is a genuinely separate `Command`, so this cannot leak into any
+/// other test running concurrently in this binary. A real commit's gap
+/// between acquiring the commit lock and checking its fencing is
+/// otherwise microseconds wide; under contended CPU (another test suite
+/// running concurrently on the same machine) that gap can be too narrow
+/// for this test's external reclaimer thread to land inside
+/// deterministically, since both the reclaimer's own thread scheduling
+/// and the CLI's acquire-to-apply step are then racing real scheduler
+/// jitter rather than each other. Widening the CLI's own window removes
+/// that source of flakiness without weakening what the test proves: the
+/// reclaim and the fencing check are still the real ones, just given
+/// room to land in the intended order.
+fn spawn_iwe_widening_fencing_window(work_dir: &Path, args: &[&str], delay_ms: u64) -> Child {
+    Command::new(crate::common::get_iwe_binary_path())
+        .args(args)
+        .current_dir(work_dir)
+        .env("IWE_COMMIT_LOCK_TIMEOUT_SECS", "3")
+        .env("IWE_TEST_LOCK_FENCING_DELAY_MS", delay_ms.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn iwe")
+}
+
 fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -204,7 +231,11 @@ fn concurrent_reclaim_between_acquire_and_apply_is_caught_by_fencing_and_the_tre
     let lock_path = temp.path().join(DEFAULT_LOCK_PATH);
     let before = snapshot_tree(temp.path());
 
-    let mut child = spawn_iwe(temp.path(), &["create", "notes/new", "--content", "# New\n"]);
+    let mut child = spawn_iwe_widening_fencing_window(
+        temp.path(),
+        &["create", "notes/new", "--content", "# New\n"],
+        300,
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

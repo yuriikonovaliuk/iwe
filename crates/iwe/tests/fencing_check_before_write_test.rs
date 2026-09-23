@@ -76,10 +76,24 @@ fn store_with_docs(docs: &[(&str, &str)]) -> TempDir {
     temp
 }
 
-fn spawn_iwe(work_dir: &Path, args: &[&str]) -> Child {
+/// Spawns `iwe` with `IWE_TEST_LOCK_FENCING_DELAY_MS`
+/// (`iwe::new::widen_fencing_window_for_test`, read by
+/// `acquire_cli_commit_lock` -- the entry point all three CLI write
+/// commands this suite exercises share) set in the spawned process's own
+/// environment only, never this test process's. Widens the otherwise
+/// microsecond-wide acquire-to-fencing-check gap so
+/// `run_with_mid_window_reclaim`'s external reclaimer lands inside it
+/// deterministically instead of racing real scheduler jitter -- matters
+/// under CPU contention (another test suite running concurrently), where
+/// the plain microsecond gap is too narrow for the reclaimer thread to
+/// reliably win. Same technique as `cli_lock_wiring_test.rs`'s own
+/// equivalent helper; does not change what either test proves, only how
+/// reliably its race lands.
+fn spawn_iwe_widening_fencing_window(work_dir: &Path, args: &[&str], delay_ms: u64) -> Child {
     Command::new(crate::common::get_iwe_binary_path())
         .args(args)
         .current_dir(work_dir)
+        .env("IWE_TEST_LOCK_FENCING_DELAY_MS", delay_ms.to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -150,7 +164,7 @@ fn run_with_mid_window_reclaim(
     let lock_path = temp.path().join(DEFAULT_LOCK_PATH);
     let before = snapshot_tree(temp.path());
 
-    let mut child = spawn_iwe(temp.path(), args);
+    let mut child = spawn_iwe_widening_fencing_window(temp.path(), args, 300);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
