@@ -1321,6 +1321,7 @@ print(json.dumps(out))'"#
                     .to_string(),
                 warn: false,
                 always: true,
+                paths: Vec::new(),
                 description: None,
             },
         );
@@ -1401,6 +1402,7 @@ print(json.dumps(out))'"#
                     .to_string(),
                 warn: false,
                 always: true,
+                paths: Vec::new(),
                 description: None,
             },
         );
@@ -1439,6 +1441,50 @@ print(json.dumps(out))'"#
             !temp.path().join("notes/c.md").exists(),
             "the checker-rejected write must have been reverted"
         );
+    }
+
+    /// A checker with `paths` starts only for a commit touching a matching
+    /// key: one that rejects everything leaves a write elsewhere alone and
+    /// still rejects a write inside its paths.
+    #[cfg(unix)]
+    #[test]
+    fn a_checker_with_paths_runs_only_for_commits_touching_them() {
+        use crate::config::Checker;
+
+        let temp = TempDir::new().unwrap();
+        create_dir_all(temp.path().join("notes")).unwrap();
+        create_dir_all(temp.path().join("other")).unwrap();
+
+        let mut config = config_with(&[]);
+        config.checkers.insert(
+            "rejects-everything".to_string(),
+            Checker {
+                command: r#"python3 -c '
+import json,sys
+inp=json.load(sys.stdin)
+print(json.dumps([{"key":k,"violations":[{"message":"no"}]} for k in inp["keys"]]))'"#
+                    .to_string(),
+                warn: false,
+                always: true,
+                paths: vec!["notes/**".to_string()],
+                description: None,
+            },
+        );
+        let mut tx =
+            transaction_for(&temp, config).with_scope(ValidationScope::AffectedSetWithCheckers);
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("other/a"), "# A\n".to_string()))
+            .unwrap();
+        assert!(tx.commit().is_ok(), "the checker must not run for other/a");
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/b"), "# B\n".to_string()))
+            .unwrap();
+        assert!(matches!(
+            tx.commit(),
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
     }
 
     /// 5-iwe-t3: every CLI write funnels through this backend's `commit()`

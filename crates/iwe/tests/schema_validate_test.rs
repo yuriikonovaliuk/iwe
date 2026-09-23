@@ -1475,6 +1475,7 @@ fn external_checkers_merge_their_reports_and_warn_mode_does_not_fail() {
             command: "sh checker.sh".to_string(),
             warn: false,
             always: true,
+            paths: Vec::new(),
             description: None,
         },
     );
@@ -1554,6 +1555,7 @@ fn external_checkers_route_per_violation_level_over_the_configured_warn_flag() {
             command: "sh checker.sh".to_string(),
             warn: false,
             always: true,
+            paths: Vec::new(),
             description: None,
         },
     );

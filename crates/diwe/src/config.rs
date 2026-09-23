@@ -331,7 +331,10 @@ pub struct Invariant {
 /// array of `{ "key": "...", "violations": [ { "message": "...", "hint":
 /// "...", "pointer": "..." } ] }`. A non-zero exit is itself a violation.
 /// `warn` reports without failing the run; `always` runs it on every
-/// whole-store validation rather than only with `--checkers`.
+/// whole-store validation rather than only with `--checkers`. `paths`, in
+/// [`SchemaBinding::r#match`] glob syntax, limits it to runs whose keys
+/// include at least one matching key: a commit touching none of them does
+/// not start the checker at all.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checker {
@@ -340,6 +343,8 @@ pub struct Checker {
     pub warn: bool,
     #[serde(default)]
     pub always: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }

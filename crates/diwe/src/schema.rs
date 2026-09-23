@@ -1745,6 +1745,11 @@ pub fn run_checkers(
             if !all && !checker.always {
                 return None;
             }
+            if !checker.paths.is_empty()
+                && !keys.iter().any(|key| patterns_match_raw(&checker.paths, key.as_str()))
+            {
+                return None;
+            }
             let child = Command::new("sh")
                 .arg("-c")
                 .arg(&checker.command)
