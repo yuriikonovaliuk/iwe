@@ -70,7 +70,7 @@ const BIN_NAME: &str = "iwe";
 #[clap(
     name = BIN_NAME,
     bin_name = BIN_NAME,
-    version,
+    version = liwe::VERSION,
     after_help = "Run 'iwe docs' for the built-in query language, configuration, and document schema references."
 )]
 pub struct App {
@@ -1731,7 +1731,7 @@ fn visible_command_tree() -> clap::Command {
 
     let mut tree = clap::Command::new(BIN_NAME)
         .bin_name(BIN_NAME)
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(liwe::VERSION)
         .args(full.get_arguments().cloned().collect::<Vec<_>>())
         .subcommands(visible);
 

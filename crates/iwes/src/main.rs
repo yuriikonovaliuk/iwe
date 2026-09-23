@@ -29,6 +29,10 @@ use lsp_types::TextDocumentSyncSaveOptions;
 use log::{debug, info};
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
+    if env::args().nth(1).is_some_and(|a| a == "--version" || a == "-V") {
+        println!("iwes {}", liwe::VERSION);
+        return Ok(());
+    }
     if env::var("IWE_DEBUG").is_ok() {
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)

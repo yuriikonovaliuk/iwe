@@ -20,7 +20,7 @@ enum Transport {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "iwec", version, about = "IWE MCP server")]
+#[command(name = "iwec", version = liwe::VERSION, about = "IWE MCP server")]
 struct Cli {
     #[arg(long, value_enum, default_value_t = Transport::Stdio)]
     transport: Transport,

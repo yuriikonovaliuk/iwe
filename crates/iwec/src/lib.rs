@@ -2439,7 +2439,7 @@ impl ServerHandler for IweServer {
                 .enable_resources()
                 .build(),
         )
-        .with_server_info(Implementation::new("iwe", env!("CARGO_PKG_VERSION")))
+        .with_server_info(Implementation::new("iwe", liwe::VERSION))
         .with_instructions(
             "IWE knowledge graph server. Tools: iwe_find, iwe_retrieve, iwe_tree, iwe_stats, iwe_squash, iwe_create, iwe_update, iwe_delete, iwe_query, iwe_rename, iwe_extract, iwe_inline, iwe_normalize, iwe_attach, iwe_argue, iwe_check. Prompts: explore, review, refactor. Resources: iwe://documents/{key}, iwe://tree, iwe://stats, iwe://config."
                 .to_string(),
