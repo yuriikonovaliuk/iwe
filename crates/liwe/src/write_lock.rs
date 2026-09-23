@@ -163,6 +163,13 @@ pub const STORE_MARKER_PATH: &str = ".iwe/store.toml";
 /// another uid is always refused. Runs before the lock is taken, on
 /// every CLI and MCP commit path.
 pub fn check_store_marker(repo_root: &Path) -> Result<(), CommitLockError> {
+    let required = std::env::var("IWE_REQUIRE_STORE_MARKER").map(|v| v == "1").unwrap_or(false);
+    check_store_marker_required(repo_root, required)
+}
+
+/// [`check_store_marker`] with the `IWE_REQUIRE_STORE_MARKER` decision
+/// passed in rather than read from the process environment.
+fn check_store_marker_required(repo_root: &Path, required: bool) -> Result<(), CommitLockError> {
     use std::os::unix::fs::MetadataExt;
 
     let marker = repo_root.join(STORE_MARKER_PATH);
@@ -175,7 +182,7 @@ pub fn check_store_marker(repo_root: &Path) -> Result<(), CommitLockError> {
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if std::env::var("IWE_REQUIRE_STORE_MARKER").map(|v| v == "1").unwrap_or(false) {
+            if required {
                 Err(CommitLockError::Unidentified)
             } else {
                 Ok(())
@@ -235,17 +242,16 @@ mod tests {
     #[test]
     fn a_marker_owned_by_this_user_passes_and_a_missing_one_is_refused_only_when_required() {
         let temp = tempfile::tempdir().unwrap();
+        // Never through the process environment: sibling tests acquire the
+        // lock concurrently and would see a required marker they lack.
         // no marker, not required: fine (plain stores, fixtures)
-        std::env::remove_var("IWE_REQUIRE_STORE_MARKER");
-        assert!(check_store_marker(temp.path()).is_ok());
+        assert!(check_store_marker_required(temp.path(), false).is_ok());
         // no marker, required: refused
-        std::env::set_var("IWE_REQUIRE_STORE_MARKER", "1");
-        assert!(matches!(check_store_marker(temp.path()), Err(CommitLockError::Unidentified)));
+        assert!(matches!(check_store_marker_required(temp.path(), true), Err(CommitLockError::Unidentified)));
         // our own marker: fine
         fs::create_dir_all(temp.path().join(".iwe")).unwrap();
         fs::write(temp.path().join(STORE_MARKER_PATH), "kind = \"git\"\n").unwrap();
-        assert!(check_store_marker(temp.path()).is_ok());
-        std::env::remove_var("IWE_REQUIRE_STORE_MARKER");
+        assert!(check_store_marker_required(temp.path(), true).is_ok());
     }
     use std::thread;
 
