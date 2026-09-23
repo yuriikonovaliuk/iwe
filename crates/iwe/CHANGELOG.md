@@ -25,8 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `requires` (conditional sections) and `$this` anchors in `links` filters are enforced by `iwe schema validate` (`iwe docs schema` §11–12); `[invariants]` from `config.toml` run on every whole-store validation (`iwe docs config`).
 - `iwe schema validate` enforces `links` rules from schema files (target typing, link counts, transitive reach along a section's links); the query language gains `via` on the reference operators. Documented in `iwe docs schema` §11 and `iwe docs query`.
 
+## [0.24.2](https://github.com/iwe-org/iwe/compare/iwe-v0.24.1...iwe-v0.24.2) - 2026-09-20
+
 ### Fixed
 
+- Commands no longer crash on a flat document — a note with a few hundred headings, paragraphs or list items in a row and no nesting used to abort the process while the library was loading.
+
+## [0.24.1](https://github.com/iwe-org/iwe/compare/iwe-v0.24.0...iwe-v0.24.1) - 2026-09-16
+
+### Fixed
+
+- `create`, `normalize --key` and `rename` refuse a key with a `..` segment or a leading `/` instead of writing, rewriting or moving a file outside the workspace. A document write that fails now prints an error instead of a panic.
 - `normalize` no longer rewrites documents it does not change. Run over a whole library it wrote every file unconditionally, giving all of them the same modification time and losing the library's edit history; it now writes only the documents whose formatting actually moved. `normalize --key` already behaved this way. The same guard now covers `update`, `rename`, `attach`, `extract`, `inline` and `squash`, which wrote unconditionally when a change turned out to be a no-op.
 
 ## [0.24.0](https://github.com/iwe-org/iwe/compare/iwe-v0.23.2...iwe-v0.24.0) - 2026-09-08

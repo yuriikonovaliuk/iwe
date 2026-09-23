@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.2](https://github.com/iwe-org/iwe/compare/iwes-v0.24.1...iwes-v0.24.2) - 2026-09-20
+
+### Fixed
+
+- The server no longer crashes when the workspace holds a flat document — a note with a few hundred headings, paragraphs or list items in a row and no nesting used to abort it during load.
+
+## [0.24.1](https://github.com/iwe-org/iwe/compare/iwes-v0.24.0...iwes-v0.24.1) - 2026-09-16
+
+### Fixed
+
+- Rename rejects a new name that resolves outside the workspace. Previously the graph kept a key such as `../note` while the file was created inside the workspace, and the links written for it dangled after a reload.
+- Go to definition returns no location for a link that resolves outside the workspace (previously it pointed the editor at a path above the workspace root).
+
 ## [0.24.0](https://github.com/iwe-org/iwe/compare/iwes-v0.23.2...iwes-v0.24.0) - 2026-09-08
 
 Workspace version bump — no user-visible changes in this crate.

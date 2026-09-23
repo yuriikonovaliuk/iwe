@@ -13,7 +13,10 @@ use diwe::config::{
     MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
-use diwe::fs::{new_for_path, new_from_hashmap, write_file_if_changed};
+use diwe::fs::{
+    key_escapes_workspace, new_for_path, new_from_hashmap, workspace_document_path,
+    write_file_if_changed,
+};
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_documents_in, validate_pending_documents,
@@ -802,6 +805,13 @@ fn op_error_to_mcp(e: OperationError) -> McpError {
     McpError::invalid_params(e.to_string(), None)
 }
 
+fn escaping_key_error(key: &str) -> McpError {
+    McpError::invalid_params(
+        format!("Key '{key}' must stay inside the workspace: no leading '/' and no '..' segments"),
+        None,
+    )
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviewPromptArgs {
     #[schemars(description = "Document key to review")]
@@ -1300,6 +1310,9 @@ impl IweServer {
                         None,
                     ));
                 }
+                if key_escapes_workspace(key.as_str()) {
+                    return Err(escaping_key_error(k));
+                }
                 key.to_string()
             }
             None => {
@@ -1608,6 +1621,9 @@ impl IweServer {
         let implicit_handle = params.handle.is_none();
         let old_key = Key::name(&params.old_key);
         let new_key = Key::name(&params.new_key);
+        if key_escapes_workspace(new_key.as_str()) {
+            return Err(escaping_key_error(&params.new_key));
+        }
         let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
         let changes = op_rename(&graph, &old_key, &new_key).map_err(op_error_to_mcp)?;
@@ -2664,7 +2680,7 @@ impl IweServer {
     fn document_path(&self, key: &Key) -> Option<PathBuf> {
         let base_path = self.base_path.as_ref()?;
         let extension = self.config.format.extension();
-        Some(base_path.join(format!("{}.{}", key, extension)))
+        workspace_document_path(base_path, key.as_str(), extension).ok()
     }
 
     fn document_file_exists(&self, key: &Key) -> bool {

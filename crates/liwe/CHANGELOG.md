@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `query::argue`: computed acceptability of claims and objections — grounded semantics with deductive support over `Against`/`Undermines` attack edges and `Rests on` support edges, with per-node `because` chains, dispute summaries and warnings. Exported as `argue`, `Argument`, `ArgueStatus`, `render_argument_text`.
 - `via` on `$references` / `$referencedBy`: a block predicate (or a section name) that restricts which of a document's links count as reference edges, applied at every hop of the walk — `$references: { match: { $key: K }, via: Is a, maxDistance: 0 }` follows only the chain of "Is a" links. Rejected on inclusion operators. `BlockIndex::targets_within`, `ViaWalk`, `build_filter_value` are exported for callers.
 
+## [0.24.2](https://github.com/iwe-org/iwe/compare/liwe-v0.24.1...liwe-v0.24.2) - 2026-09-20
+
+### Fixed
+
+- Documents with a long run of blocks at the same level no longer abort the process. Reading a document into the graph, rebuilding it from a tree and writing it back out all walked the run of siblings by recursion, so a flat note — a few hundred headings, paragraphs or list items in a row, with nothing nested under them — could exhaust the stack. The host got no error it could catch, only a crash.
+
+## [0.24.1](https://github.com/iwe-org/iwe/compare/liwe-v0.24.0...liwe-v0.24.1) - 2026-09-16
+
+Workspace version bump — no user-visible changes in this crate.
+
 ## [0.24.0](https://github.com/iwe-org/iwe/compare/liwe-v0.23.2...liwe-v0.24.0) - 2026-09-08
 
 ### Added

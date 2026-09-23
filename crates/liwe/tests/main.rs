@@ -32,3 +32,4 @@ mod squash_test;
 mod task_items_test;
 mod toc_test;
 mod transaction_interface_test;
+mod wide_document_test;

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.2](https://github.com/iwe-org/iwe/compare/diwe-v0.24.1...diwe-v0.24.2) - 2026-09-20
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.24.1](https://github.com/iwe-org/iwe/compare/diwe-v0.24.0...diwe-v0.24.1) - 2026-09-16
+
 ### Added
 
 - `[checkers]` in `config.toml` and `schema::run_checkers`: external programs that take keys as JSON on stdin and return reports as JSON — IWE's plug interface for whatever checks the schema cannot express, assuming nothing about the program.
@@ -21,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `links` rules in schema files — an IWE extension stripped before the document validator runs: per rule a `within` scope, `min`/`max` on distinct link targets, `target` (every target must satisfy a document filter), `some` (at least one must), `reach` (scoped links must transitively reach a key), and a `description` hint. Graph-dependent checks are skipped for partial-graph (pending buffer) validation.
 
 - `write_file_if_changed` writes a file only when its content differs from what is on disk, and returns whether it wrote. `write_file` and `apply_changes` now go through it, so no document is replaced with the bytes it already holds.
+- `key_escapes_workspace` tells whether a document key would leave the workspace root through a `..` segment or an absolute path, and `workspace_document_path` joins a key onto the workspace root only when it stays inside.
+
+### Fixed
+
+- `write_file` and `apply_changes` refuse a key that escapes the workspace root with an `InvalidInput` error, instead of creating, overwriting or deleting a file outside it.
 
 ## [0.24.0](https://github.com/iwe-org/iwe/compare/diwe-v0.23.2...diwe-v0.24.0) - 2026-09-08
 

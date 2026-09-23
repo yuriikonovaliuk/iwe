@@ -11,9 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `iwe_argue` tool: the dialectical standing of claims and objections (grounded semantics with deductive support), optionally restricted by key or filter; `explain: true` returns the diagnosis (root cycles and the moves that break them, downstream, defeated, pending) instead. Filters accept `$standing`.
 
+## [0.24.2](https://github.com/iwe-org/iwe/compare/iwec-v0.24.1...iwec-v0.24.2) - 2026-09-20
+
+### Fixed
+
+- The server no longer crashes when the workspace holds a flat document — a note with a few hundred headings, paragraphs or list items in a row and no nesting used to abort it during load.
+
+## [0.24.1](https://github.com/iwe-org/iwe/compare/iwec-v0.24.0...iwec-v0.24.1) - 2026-09-16
+
 ### Fixed
 
 - Writing a document leaves the file alone when the content is unchanged, instead of rewriting it and moving its modification time.
+- `iwe_create` and `iwe_rename` reject a key with a `..` segment or a leading `/` before touching the graph. Such a key used to create, overwrite or delete a file outside the workspace.
+- A write that fails on disk is reported as an error by every mutating tool. Previously the tool reported success and left the graph and the files out of step.
 
 ## [0.24.0](https://github.com/iwe-org/iwe/compare/iwec-v0.23.2...iwec-v0.24.0) - 2026-09-08
 
