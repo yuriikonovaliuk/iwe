@@ -812,6 +812,65 @@ fn escaping_key_error(key: &str) -> McpError {
     )
 }
 
+/// A write path's failure, kept distinct through `write_file`/
+/// `write_changes` (and their `_with` cores) so the MCP layer can restore
+/// upstream's split (see `write_error_to_mcp`) instead of flattening every
+/// write failure to "invalid parameters" the way a plain `String` error
+/// did: `Rejected` for everything that never needed the filesystem call
+/// that could fail this way to notice — bad params, no open transaction
+/// for an explicit handle, a freeze/mutability rule, a transaction
+/// backend's own refusal, a stale fencing token — and `Io` for a genuine
+/// I/O failure from the underlying write/remove itself.
+#[derive(Debug)]
+pub enum WriteError {
+    Rejected(String),
+    Io(std::io::Error),
+}
+
+impl From<String> for WriteError {
+    fn from(message: String) -> Self {
+        WriteError::Rejected(message)
+    }
+}
+
+impl From<std::io::Error> for WriteError {
+    fn from(error: std::io::Error) -> Self {
+        WriteError::Io(error)
+    }
+}
+
+/// `diwe::fs::apply_changes_with` reports every failure as a plain
+/// `std::io::Error`, including the two it constructs itself for a reason
+/// that was never a filesystem failure at all — `permission_denied`
+/// (`ErrorKind::PermissionDenied`) and `transaction_backend_failed`/
+/// `fencing_refused` (`ErrorKind::Other`). Those two kinds are the ones a
+/// synthetic rejection actually uses here, so they classify as
+/// `WriteError::Rejected`, unchanged from before this type existed;
+/// every other kind is the OS's own report about the write/remove call
+/// itself, so it classifies as `WriteError::Io`.
+fn classify_apply_changes_error(error: std::io::Error) -> WriteError {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Other => {
+            WriteError::Rejected(error.to_string())
+        }
+        _ => WriteError::Io(error),
+    }
+}
+
+/// Mirrors upstream's `write_error_to_mcp` (from #402, "Reject operations
+/// on files outside of the workspace"): a genuine I/O failure is reported
+/// as MCP's internal-error (the server failed to do what it accepted),
+/// not invalid-params (which means "your request was bad") — everything
+/// else keeps the invalid-params mapping every write path already used.
+fn write_error_to_mcp(e: WriteError) -> McpError {
+    match e {
+        WriteError::Rejected(message) => McpError::invalid_params(message, None),
+        WriteError::Io(error) => {
+            McpError::internal_error(format!("Failed to write to the workspace: {error}"), None)
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviewPromptArgs {
     #[schemars(description = "Document key to review")]
@@ -1359,7 +1418,7 @@ impl IweServer {
         // run it before mutating the in-memory graph so a rejection leaves
         // both graph and disk untouched rather than just disk.
         self.write_file(&key, &markdown, &handle, implicit_handle)
-            .map_err(|message| McpError::invalid_params(message, None))?;
+            .map_err(write_error_to_mcp)?;
         graph.insert_document(key.clone(), markdown.clone());
 
         let warnings = self
@@ -1411,7 +1470,7 @@ impl IweServer {
         // run it before mutating the in-memory graph so a rejection leaves
         // both graph and disk untouched rather than just disk.
         self.write_file(&key, &params.content, &handle, implicit_handle)
-            .map_err(|message| McpError::invalid_params(message, None))?;
+            .map_err(write_error_to_mcp)?;
         graph.update_document(key.clone(), params.content.clone());
 
         let new_title = (&*graph)
@@ -1462,7 +1521,7 @@ impl IweServer {
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
             self.write_changes(&changes, &handle, implicit_handle)
-                .map_err(|message| McpError::invalid_params(message, None))?;
+                .map_err(write_error_to_mcp)?;
             Self::apply_changes(&mut graph, &changes);
             warnings = self.stats_after_delete(&graph, &changes).await;
         }
@@ -1577,7 +1636,7 @@ impl IweServer {
                         // in-memory graph so a rejection leaves both graph
                         // and disk untouched rather than just disk.
                         self.write_file(key, content, &handle, implicit_handle)
-                            .map_err(|message| McpError::invalid_params(message, None))?;
+                            .map_err(write_error_to_mcp)?;
                         graph.update_document(key.clone(), content.clone());
                     }
                     let touched: Vec<Key> = changes.iter().map(|(key, _)| key.clone()).collect();
@@ -1600,7 +1659,7 @@ impl IweServer {
                 if !dry_run {
                     self.ensure_schema_clean(&pending_from_changes(&combined))?;
                     self.write_changes(&combined, &handle, implicit_handle)
-                        .map_err(|message| McpError::invalid_params(message, None))?;
+                        .map_err(write_error_to_mcp)?;
                     Self::apply_changes(&mut graph, &combined);
                     warnings = self.stats_after_delete(&graph, &combined).await;
                 }
@@ -1631,7 +1690,7 @@ impl IweServer {
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
             self.write_changes(&changes, &handle, implicit_handle)
-                .map_err(|message| McpError::invalid_params(message, None))?;
+                .map_err(write_error_to_mcp)?;
             Self::apply_changes(&mut graph, &changes);
         }
 
@@ -1723,7 +1782,7 @@ impl IweServer {
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
             self.write_changes(&changes, &handle, implicit_handle)
-                .map_err(|message| McpError::invalid_params(message, None))?;
+                .map_err(write_error_to_mcp)?;
             Self::apply_changes(&mut graph, &changes);
         }
 
@@ -1819,7 +1878,7 @@ impl IweServer {
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
             self.write_changes(&changes, &handle, implicit_handle)
-                .map_err(|message| McpError::invalid_params(message, None))?;
+                .map_err(write_error_to_mcp)?;
             Self::apply_changes(&mut graph, &changes);
         }
 
@@ -1847,7 +1906,7 @@ impl IweServer {
                 let key = Key::name(key_str);
                 if self.read_file(&key).as_deref() != Some(normalized_content.as_str()) {
                     self.write_file(&key, normalized_content, &handle, implicit_handle)
-                        .map_err(|message| McpError::invalid_params(message, None))?;
+                        .map_err(write_error_to_mcp)?;
                     changed += 1;
                 }
             }
@@ -1964,7 +2023,7 @@ impl IweServer {
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&combined))?;
             self.write_changes(&combined, &handle, implicit_handle)
-                .map_err(|message| McpError::invalid_params(message, None))?;
+                .map_err(write_error_to_mcp)?;
             Self::apply_changes(&mut graph, &combined);
         }
 
@@ -2769,7 +2828,7 @@ impl IweServer {
         content: &str,
         handle: &Option<String>,
         implicit_handle: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), WriteError> {
         let existed = self.document_file_exists(key);
         let effect = if existed {
             diwe::journal::Effect::Update
@@ -2790,7 +2849,9 @@ impl IweServer {
                     .write(TxWrite::Put(key.clone(), content.to_string()))
                     .is_err()
                 {
-                    return Err(format!("write rejected by transaction backend for '{key}'"));
+                    return Err(WriteError::Rejected(format!(
+                        "write rejected by transaction backend for '{key}'"
+                    )));
                 }
                 tx.effects.push(diwe::journal::KeyEffect::new(key, effect));
                 // The staging write itself is a transaction operation; stamp
@@ -2803,9 +2864,9 @@ impl IweServer {
             // direct write — only the default (omitted) handle falls
             // through, matching today's exact no-handle behavior.
             if !implicit_handle {
-                return Err(format!(
+                return Err(WriteError::Rejected(format!(
                     "no transaction is open for handle '{tx_key}'; call iwe_tx_begin first"
-                ));
+                )));
             }
         }
         match self.validating_backend() {
@@ -3093,7 +3154,7 @@ impl IweServer {
         content: &str,
         lock_guard: Option<&CommitLockGuard>,
         mut new_tx: impl FnMut() -> TX,
-    ) -> Result<(), String> {
+    ) -> Result<(), WriteError> {
         let Some(file_path) = self.document_path(key) else {
             return Ok(());
         };
@@ -3110,17 +3171,19 @@ impl IweServer {
         {
             let _ = tx.commit();
             let _ = tx.abort();
-            return Err(format!("write rejected by transaction backend for '{key}'"));
+            return Err(WriteError::Rejected(format!(
+                "write rejected by transaction backend for '{key}'"
+            )));
         }
         if let Err(message) = self.enforce_write_permission(key, content) {
             let _ = tx.abort();
-            return Err(message);
+            return Err(WriteError::Rejected(message));
         }
         if tx.commit().is_err() {
             let _ = tx.abort();
-            return Err(format!(
+            return Err(WriteError::Rejected(format!(
                 "write rejected: transaction backend refused to commit for '{key}'"
-            ));
+            )));
         }
         // Fencing check, immediately before the irreversible step (the
         // actual filesystem write below) — mirrors the checks
@@ -3136,11 +3199,7 @@ impl IweServer {
         }
         match write_file_if_changed(&file_path, content) {
             Ok(_) => Ok(()),
-            Err(error) => Err(format!(
-                "Failed to write '{}': {}",
-                file_path.display(),
-                error
-            )),
+            Err(error) => Err(WriteError::Io(error)),
         }
     }
 
@@ -3161,17 +3220,17 @@ impl IweServer {
         changes: &Changes,
         handle: &Option<String>,
         implicit_handle: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), WriteError> {
         if let Some(staged) = self.stage_changes(changes, handle) {
-            return staged;
+            return staged.map_err(WriteError::Rejected);
         }
         // Same guard as `write_file`: an explicit handle naming no open
         // transaction is a caller error, not a silent unstaged write.
         if !implicit_handle {
-            return Err(format!(
+            return Err(WriteError::Rejected(format!(
                 "no transaction is open for handle '{}'; call iwe_tx_begin first",
                 resolve_tx_handle(handle)
-            ));
+            )));
         }
         match self.validating_backend() {
             // 6-t1: commit-lock coverage for the `NoopTransaction` write
@@ -3212,7 +3271,7 @@ impl IweServer {
         changes: &Changes,
         lock_guard: Option<&CommitLockGuard>,
         new_tx: impl FnMut() -> TX,
-    ) -> Result<(), String> {
+    ) -> Result<(), WriteError> {
         let Some(base_path) = &self.base_path else {
             return Ok(());
         };
@@ -3271,7 +3330,7 @@ impl IweServer {
                     );
                     Ok(())
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(classify_apply_changes_error(error)),
             }
         }
     }
