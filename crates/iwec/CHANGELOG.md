@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-09-24 (iwe-plus; upstream iwe 0.24.2)
+
+### Fixed
+
+- `[transactions] validate = "affected-set"` / `"affected-set-with-checkers"` apply each affected document's whole schema (frontmatter, body caps, `requires`, `asserts`, link target filters), as `iwe schema validate` does. They checked link counts and dangling links only, so a write could create a document missing a required property or linking to a document its schema's target filter excludes. `[invariants]` stay full-scope only.
+- A failing `[commit]` trigger's notice ends with the trigger's last stderr line (kc's `KC-*` reason).
+
 ## [1.0.0] — 2026-09-24 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added

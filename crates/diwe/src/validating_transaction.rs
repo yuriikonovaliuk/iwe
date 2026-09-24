@@ -1114,8 +1114,8 @@ mod tests {
         );
     }
 
-    /// Full scope: a shape rule (`properties` on the frontmatter) that the
-    /// affected-set scope never looks at is enforced, and a store-wide
+    /// Full scope: a shape rule (`properties` on the frontmatter) is
+    /// enforced (as the affected-set scope also does), and a store-wide
     /// `[invariants]` count is enforced too — a write that is fine on its
     /// own but pushes the store over an invariant is refused.
     #[test]
@@ -1153,15 +1153,19 @@ mod tests {
         ));
         assert!(!temp.path().join("notes/a.md").exists());
 
-        // ... and accepted by the affected-set scope, which only knows
-        // link rules.
+        // ... and by the affected-set scope too, which applies each
+        // affected document's whole schema (only `[invariants]` are
+        // full-scope alone).
         let mut bounded = transaction_for(&temp, config.clone());
         bounded.begin().unwrap();
         bounded
             .write(Write::Put(Key::name("notes/a"), "# A\n".to_string()))
             .unwrap();
-        assert!(bounded.commit().is_ok());
-        fs::remove_file(temp.path().join("notes/a.md")).unwrap();
+        assert!(matches!(
+            bounded.commit(),
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert!(!temp.path().join("notes/a.md").exists());
 
         // Invariant: with the hub present the count is 1 and a valid
         // note commits; removing the hub breaks the invariant and is
@@ -1441,6 +1445,72 @@ print(json.dumps(out))'"#
             !temp.path().join("notes/c.md").exists(),
             "the checker-rejected write must have been reverted"
         );
+    }
+
+    /// The affected-set scope applies a document's whole schema, as `iwe
+    /// schema validate` does: a created document missing a required
+    /// frontmatter property is refused, not only link-count rules.
+    #[test]
+    fn affected_set_refuses_a_created_document_missing_a_required_property() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "note",
+            "frontmatter:\n  type: object\n  required: [since]\n",
+        );
+        create_dir_all(temp.path().join("notes")).unwrap();
+        let mut tx = transaction_for(&temp, config_with(&[("note", "notes/**")]))
+            .with_scope(ValidationScope::AffectedSet);
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/a"), "---\nsince: 2026-09-24\n---\n\n# A\n".to_string()))
+            .unwrap();
+        assert!(tx.commit().is_ok(), "a document that has the property commits");
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(Key::name("notes/b"), "# B\n".to_string())).unwrap();
+        assert!(matches!(
+            tx.commit(),
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert!(!temp.path().join("notes/b.md").exists(), "the refused create never lands");
+    }
+
+    /// ...and a link rule's target filter: a created document linking to a
+    /// document the filter excludes is refused.
+    #[test]
+    fn affected_set_refuses_a_created_document_whose_link_fails_the_target_filter() {
+        let temp = TempDir::new().unwrap();
+        write_schema(
+            temp.path(),
+            "note",
+            "links:\n  - within: Depends on\n    target: { kind: step }\n",
+        );
+        create_dir_all(temp.path().join("notes")).unwrap();
+        write(temp.path().join("notes/step.md"), "---\nkind: step\n---\n\n# Step\n").unwrap();
+        write(temp.path().join("notes/other.md"), "---\nkind: other\n---\n\n# Other\n").unwrap();
+        let mut tx = transaction_for(&temp, config_with(&[("note", "notes/**")]))
+            .with_scope(ValidationScope::AffectedSet);
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/good"),
+            "# Good\n\n## Depends on\n\n- [Step](step.md)\n".to_string(),
+        ))
+        .unwrap();
+        assert!(tx.commit().is_ok(), "a link the filter admits commits");
+
+        tx.begin().unwrap();
+        tx.write(Write::Put(
+            Key::name("notes/bad"),
+            "# Bad\n\n## Depends on\n\n- [Other](other.md)\n".to_string(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            tx.commit(),
+            Err(CommitError::Other(ValidationFailure::Violations(_)))
+        ));
+        assert!(!temp.path().join("notes/bad.md").exists(), "the refused create never lands");
     }
 
     /// A checker with `paths` starts only for a commit touching a matching

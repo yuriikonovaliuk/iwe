@@ -2152,7 +2152,6 @@ pub fn validate_affected_set(
     graph: &Graph,
     touched: &[Key],
 ) -> Result<(ValidationRun, Vec<Key>), Vec<String>> {
-    let bindings = SchemaBindings::compile(&config.schemas)?;
     let compiled = compile_schemas(dir, &config.schemas)?;
 
     let mut affected: HashSet<Key> = touched.iter().cloned().collect();
@@ -2192,46 +2191,43 @@ pub fn validate_affected_set(
     let mut affected_keys: Vec<Key> = affected.into_iter().collect();
     affected_keys.sort();
 
-    let mut reports = Vec::new();
-    let mut documents = 0;
-    let mut schemas_used = HashSet::new();
+    // Every affected document gets the whole-store per-document check --
+    // its schema (frontmatter, body, caps), requires, asserts, and links
+    // including target filters -- not a links-only subset: a commit must
+    // refuse what `iwe schema validate` would. A touched key the state
+    // does not hold (a document this transaction removes) still pulled its
+    // referrers in above, but has no document of its own to check.
+    let present: Vec<Key> = affected_keys.iter().filter(|key| graph.has_key(key)).cloned().collect();
+    let mut run = validate_documents_in(dir, config, graph, &present, true)?;
+
+    // Plus the commit-time link checks the whole-store pass does not make
+    // for a rule without a target filter: a link that no longer resolves
+    // (the document it names was removed or renamed away) is refused.
+    let bindings = SchemaBindings::compile(&config.schemas)?;
     let mut cache = RunCache::new();
-    for key in &affected_keys {
-        // A touched key the state does not hold — a document this
-        // transaction removes, or one it creates seen from the state
-        // before it — still pulls its referrers in above, but has no
-        // document of its own to check.
-        if !graph.has_key(key) {
-            continue;
-        }
-        let names = bindings.schemas_for(&key.to_string());
-        if names.is_empty() {
-            continue;
-        }
-        documents += 1;
+    for key in &present {
         let index = BlockIndex::build(graph, key);
-        for name in names {
-            schemas_used.insert(name);
-            let set = &compiled[name];
-            let violations = check_links_bounded(graph, key, name, &set.links, &mut cache, &index);
-            if !violations.is_empty() {
-                reports.push(KeyReport {
-                    key: key.clone(),
-                    schema: name.to_string(),
-                    violations,
-                });
+        for name in bindings.schemas_for(&key.to_string()) {
+            let extra = check_links_bounded(graph, key, name, &compiled[name].links, &mut cache, &index);
+            if extra.is_empty() {
+                continue;
+            }
+            let existing = run.reports.iter().position(|r| &r.key == key && r.schema == name);
+            let report = match existing {
+                Some(i) => &mut run.reports[i],
+                None => {
+                    run.reports.push(KeyReport { key: key.clone(), schema: name.to_string(), violations: Vec::new() });
+                    run.reports.last_mut().expect("just pushed")
+                }
+            };
+            for violation in extra {
+                if !report.violations.iter().any(|v| v.message == violation.message) {
+                    report.violations.push(violation);
+                }
             }
         }
     }
-
-    Ok((
-        ValidationRun {
-            reports,
-            documents,
-            schemas: schemas_used.len(),
-        },
-        affected_keys,
-    ))
+    Ok((run, affected_keys))
 }
 
 /// The index-bounded subset of [`check_links`]'s checks: link counts
