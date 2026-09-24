@@ -133,16 +133,24 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
     };
 
     // The trigger's stderr is drained on a thread (a full pipe must never
-    // stall it) and only its last line kept: that is the reason a failure
-    // notice names.
+    // stall it) and one line kept as the reason a failure notice names:
+    // the last line carrying a `KC-` code (kc prints detail lines after
+    // it), else the last non-empty line.
     let last_stderr_line = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
             use std::io::BufRead;
-            std::io::BufReader::new(stderr)
-                .lines()
-                .map_while(Result::ok)
-                .filter(|line| !line.trim().is_empty())
-                .last()
+            let mut last = None;
+            let mut coded = None;
+            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if line.contains("KC-") {
+                    coded = Some(line.clone());
+                }
+                last = Some(line);
+            }
+            coded.or(last)
         })
     });
     let reason = move || {
