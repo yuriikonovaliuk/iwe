@@ -1,3 +1,4 @@
+mod compact_tools;
 pub mod watcher;
 
 use std::collections::{HashMap, HashSet};
@@ -2431,6 +2432,30 @@ impl IweServer {
 #[tool_handler]
 #[prompt_handler]
 impl ServerHandler for IweServer {
+    // Replaces the listing #[tool_handler] would generate: the same tools,
+    // served compact unless IWEC_FULL_TOOL_SCHEMAS=1 (see compact_tools).
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+        let mut tools = Self::tool_router().list_all();
+        if compact_tools::enabled() {
+            tools = tools.into_iter().map(compact_tools::compact).collect();
+        }
+        Ok(rmcp::model::ListToolsResult {
+            result_type: Some(rmcp::model::ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(rmcp::model::CacheScope::Public),
+        })
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()

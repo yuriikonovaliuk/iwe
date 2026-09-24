@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-09-24 (iwe-plus; upstream iwe 0.24.2)
+
+### Changed
+
+- The MCP server's tool listing is compact by default: a one-line description per tool, short hints only for non-obvious parameters, deprecated parameters left out, and no `$schema`, `format`, numeric bounds or `null` unions. The listing drops from ~26 KB to ~10 KB, which every agent request carries. `IWEC_FULL_TOOL_SCHEMAS=1` serves the full specs.
+
 ## [1.1.1] — 2026-09-24 (iwe-plus; upstream iwe 0.24.2)
 
 ### Fixed
