@@ -367,6 +367,23 @@ fn fail_open_on_nonzero_exit_keeps_the_write_committed() {
     assert_fail_open_write_committed(&output, &store, &probe_log);
 }
 
+/// A failing trigger's notice names its reason: the last line the child
+/// wrote to stderr (kc's KC-* code, say), still on the one notice line.
+#[test]
+fn fail_open_notice_carries_the_triggers_last_stderr_line() {
+    let log_dir = TempDir::new().expect("tempdir");
+    let probe_log = log_dir.path().join("probe.log");
+    let command = "echo detail >&2; echo 'KC-LOCK-TIMEOUT: timed out waiting' >&2; exit 2";
+    let store = store_with_config(&trigger_config(command, true, None, None));
+
+    let output = run_iwe(store.path(), &["create", "a", "--content", "# A\n"]);
+    assert_fail_open_write_committed(&output, &store, &probe_log);
+    let err = stderr(&output);
+    let notice: Vec<&str> = err.lines().filter(|l| l.starts_with(FAIL_PREFIX)).collect();
+    assert_eq!(notice.len(), 1, "stderr: {err}");
+    assert!(notice[0].ends_with(": KC-LOCK-TIMEOUT: timed out waiting"), "notice: {}", notice[0]);
+}
+
 /// A command naming a binary that does not exist: the spawn/exec failure
 /// must fail open exactly like a non-zero exit.
 #[test]

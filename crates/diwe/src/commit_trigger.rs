@@ -122,7 +122,7 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
         .env(ENV_STORE_ROOT, &store_root)
         .env(ENV_LOCK_GENERATION, generation.to_string())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
@@ -132,6 +132,30 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
         }
     };
 
+    // The trigger's stderr is drained on a thread (a full pipe must never
+    // stall it) and only its last line kept: that is the reason a failure
+    // notice names.
+    let last_stderr_line = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .last()
+        })
+    });
+    let reason = move || {
+        last_stderr_line
+            .and_then(|reader| reader.join().ok().flatten())
+            .map(|line| {
+                let line = line.trim();
+                let cut: String = line.chars().take(300).collect();
+                format!(": {cut}")
+            })
+            .unwrap_or_default()
+    };
+
     // Bounded wait: never block the caller past ~timeout. `try_wait` is
     // reaped on a short poll so a hung child cannot wedge the commit.
     let deadline = Instant::now() + timeout;
@@ -139,7 +163,7 @@ fn run_trigger(commit: &CommitOptions, store_root: &Path, hold: Option<&CommitLo
         match child.try_wait() {
             Ok(Some(status)) => {
                 if !status.success() {
-                    notice(format!("'{command}' exited with {status}"));
+                    notice(format!("'{command}' exited with {status}{}", reason()));
                 }
                 return;
             }
