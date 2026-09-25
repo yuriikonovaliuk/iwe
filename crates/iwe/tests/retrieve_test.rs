@@ -2950,3 +2950,83 @@ fn test_retrieve_lexical_seeds() {
     assert!(success, "stderr: {}", stderr);
     assert_eq!(stdout, "ownership\n");
 }
+
+const FRONTMATTER_DOC: &str =
+    "---\nstatus:  open   # set by triage\ntags: [a, b]\n---\n\n# Test Document\n\nContent here.\n";
+
+#[test]
+fn test_retrieve_json_omits_frontmatter_by_default() {
+    let dir = setup_workspace();
+    write(dir.path().join("test-doc.md"), FRONTMATTER_DOC).unwrap();
+
+    let (stdout, stderr, success) = run_iwe(dir.path(), &["-k", "test-doc", "-f", "json"]);
+    assert!(success, "stderr: {}", stderr);
+    let docs: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(docs[0]["content"], "# Test Document\n\nContent here.\n");
+}
+
+#[test]
+fn test_retrieve_json_with_frontmatter_returns_the_stored_document() {
+    let dir = setup_workspace();
+    write(dir.path().join("test-doc.md"), FRONTMATTER_DOC).unwrap();
+
+    let (stdout, stderr, success) =
+        run_iwe(dir.path(), &["-k", "test-doc", "-f", "json", "--frontmatter"]);
+    assert!(success, "stderr: {}", stderr);
+    let docs: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(docs[0]["content"], FRONTMATTER_DOC);
+}
+
+#[test]
+fn test_retrieve_markdown_with_frontmatter_leads_the_body_with_it() {
+    let dir = setup_workspace();
+    write(dir.path().join("test-doc.md"), FRONTMATTER_DOC).unwrap();
+
+    let (stdout, stderr, success) = run_iwe(dir.path(), &["-k", "test-doc", "--frontmatter"]);
+    assert!(success, "stderr: {}", stderr);
+    let expected = indoc! {"
+        ````markdown #test-doc
+        ---
+        title: Test Document
+        ---
+
+        ---
+        status:  open   # set by triage
+        tags: [a, b]
+        ---
+
+        # Test Document
+
+        Content here.
+        ````
+    "};
+    assert_eq!(stdout, expected);
+
+    // Without the flag, the stored frontmatter stays out of the output.
+    let (stdout, _, success) = run_iwe(dir.path(), &["-k", "test-doc"]);
+    assert!(success);
+    assert!(!stdout.contains("triage"), "{stdout}");
+}
+
+#[test]
+fn test_retrieve_with_frontmatter_then_update_round_trips_byte_identical() {
+    let dir = setup_workspace();
+    write(dir.path().join("test-doc.md"), FRONTMATTER_DOC).unwrap();
+
+    let (stdout, stderr, success) =
+        run_iwe(dir.path(), &["-k", "test-doc", "-f", "json", "--frontmatter"]);
+    assert!(success, "stderr: {}", stderr);
+    let docs: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let content = docs[0]["content"].as_str().unwrap();
+
+    let output = Command::new(crate::common::get_iwe_binary_path())
+        .args(["update", "-k", "test-doc", "-c", content])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("test-doc.md")).unwrap(),
+        FRONTMATTER_DOC
+    );
+}

@@ -74,7 +74,14 @@ The MCP server exposes 14 tools for reading, writing, querying, and refactoring 
 
 Because `content` is the whole file, frontmatter belongs at its first byte — that is where other tools read it. There is no separate frontmatter parameter to place it for you, and nothing is inserted above or below what you send. `iwe_update` has the same contract, with the opposite existence precondition.
 
-The `template`, `variables` and `frontmatter` parameters are reserved for a later template mode and are rejected today.
+#### Round-tripping a document
+
+`iwe_retrieve` returns the body only unless asked for the frontmatter, and `iwe_update` replaces the whole file. Two optional flags, both off by default, make retrieve → edit → update safe:
+
+- `iwe_retrieve` with `frontmatter: true` returns `content` exactly as `iwe_update` expects it: the stored frontmatter block first, verbatim, then the body. Written back unchanged, the file is byte-identical.
+- `iwe_update` with `keep_frontmatter: true` keeps the document's stored frontmatter and replaces only the body with `content`. `content` must then carry no frontmatter block — one is refused, not merged. Inside a transaction the frontmatter kept is the transaction's staged one. The resulting document is validated, permission-checked, journaled and committed exactly like a full update.
+
+`iwe_create`'s `template`, `variables` and `frontmatter` parameters are reserved for a later template mode and are rejected today.
 
 #### Stats warnings
 
@@ -109,6 +116,7 @@ The tool is **always strict**: every mutating application must carry an `expect`
 | `expand`  | Object over `includes` / `includedBy` / `references` / `referencedBy` → integer depths (`0` = unbounded, omitted key = not followed). Follows those edges out from each seed. Expansion is doc-only when omitted. |
 | `limit`   | Cap the number of seed documents kept **before** expansion — top-N by relevance when searching, the first N of the selection otherwise (`0` = unlimited). |
 | `max_documents` | Cap the number of documents returned **after** expansion, trimming periphery documents first (`0` = unlimited). |
+| `frontmatter` | `true` leads each document's `content` with its stored YAML frontmatter block, verbatim (comments and spacing included), so the content can be passed straight back to `iwe_update`. Default `false`: the body only. |
 
 Output is seeds first (relevance order), then expansion. The edge-list toggles (`backlinks`, `children`) are unchanged. The pre-existing `depth`, `context`, and `links` parameters are **deprecated** aliases for `expand`'s `includes` / `includedBy` / `references`; passing `expand` together with any of them is an error.
 

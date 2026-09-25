@@ -375,3 +375,80 @@ async fn default_handle_commit_fires_the_trigger_and_an_explicit_handles_staging
 
     client.cancel().await.expect("client to disconnect");
 }
+// ---------------------------------------------------------------------------
+// keep_frontmatter updates ride the same commit path as full updates: one
+// journal line and one trigger invocation per write-tool commit, and per
+// transaction commit.
+// ---------------------------------------------------------------------------
+
+const KEPT: &str = "---\nstatus: open # kept\n---\n\n# Kept\n\nOld.\n";
+
+#[tokio::test]
+async fn keep_frontmatter_update_commits_one_journal_line_and_one_probe_line() {
+    let log_dir = TempDir::new().expect("tempdir");
+    let probe_log = log_dir.path().join("probe.log");
+    let command = probe_command(&probe_log);
+    let store = store_with_config(&trigger_config(&command, true, None));
+    create_dir_all(store.path().join("notes")).unwrap();
+    write(store.path().join("notes/kept.md"), KEPT).unwrap();
+    let (port, _server) = spawn_server(&store);
+    let client = connect(&format!("127.0.0.1:{port}")).await;
+
+    let updated = call_tool(
+        &client,
+        "iwe_update",
+        json!({"key": "notes/kept", "content": "# Kept\n\nNew.\n", "keep_frontmatter": true}),
+    )
+    .await;
+    assert!(!updated.expect("update").is_error.unwrap_or(false));
+
+    assert_eq!(
+        fs::read_to_string(store.path().join("notes/kept.md")).unwrap(),
+        "---\nstatus: open # kept\n---\n\n# Kept\n\nNew.\n"
+    );
+    let records = journal_records(&store);
+    assert_eq!(records.len(), 1, "one write-tool commit, one journal line: {records:?}");
+    assert_eq!(records[0]["effects"][0]["key"], "notes/kept");
+    assert_eq!(probe_lines(&probe_log).len(), 1, "one write-tool commit, one trigger invocation");
+    assert_all_probe_lines_in_window(&probe_log, &store, "keep_frontmatter write-tool");
+
+    client.cancel().await.expect("client to disconnect");
+}
+
+#[tokio::test]
+async fn keep_frontmatter_update_in_a_transaction_commits_once() {
+    let log_dir = TempDir::new().expect("tempdir");
+    let probe_log = log_dir.path().join("probe.log");
+    let command = probe_command(&probe_log);
+    let store = store_with_config(&trigger_config(&command, true, Some("full")));
+    create_dir_all(store.path().join("notes")).unwrap();
+    write(store.path().join("notes/kept.md"), KEPT).unwrap();
+    let (port, _server) = spawn_server(&store);
+    let client = connect(&format!("127.0.0.1:{port}")).await;
+
+    let begun = call_tool(&client, "iwe_tx_begin", json!({"handle": "h1"})).await;
+    assert!(!begun.expect("tx_begin").is_error.unwrap_or(false));
+    let updated = call_tool(
+        &client,
+        "iwe_update",
+        json!({"key": "notes/kept", "content": "# Kept\n\nNew.\n", "keep_frontmatter": true, "handle": "h1"}),
+    )
+    .await;
+    assert!(!updated.expect("update").is_error.unwrap_or(false));
+    assert!(probe_lines(&probe_log).is_empty(), "staged, not committed");
+    assert_eq!(fs::read_to_string(store.path().join("notes/kept.md")).unwrap(), KEPT);
+
+    let committed = call_tool(&client, "iwe_tx_commit", json!({"handle": "h1"})).await;
+    let committed = committed.expect("tx_commit");
+    assert!(!committed.is_error.unwrap_or(false), "commit must succeed: {committed:?}");
+
+    assert_eq!(
+        fs::read_to_string(store.path().join("notes/kept.md")).unwrap(),
+        "---\nstatus: open # kept\n---\n\n# Kept\n\nNew.\n"
+    );
+    assert_eq!(journal_records(&store).len(), 1, "one tx commit, one journal line");
+    assert_eq!(probe_lines(&probe_log).len(), 1, "one tx commit, one trigger invocation");
+    assert_all_probe_lines_in_window(&probe_log, &store, "keep_frontmatter tx commit");
+
+    client.cancel().await.expect("client to disconnect");
+}

@@ -116,3 +116,101 @@ pub fn write_document_skip_frontmatter(blocks: &Blocks, format: &FormatOptions) 
         }
     }
 }
+
+/// Byte length of the leading frontmatter block of `content` (opening fence
+/// through the closing fence line), exactly as the format's reader
+/// recognizes it; `None` when the document has no frontmatter.
+pub fn frontmatter_block_len(content: &str, format: &FormatOptions) -> Option<usize> {
+    match format {
+        #[cfg(feature = "djot")]
+        FormatOptions::Djot(_) => crate::djot::reader::frontmatter_block_len(content),
+        _ => markdown_frontmatter_block_len(content),
+    }
+}
+
+/// The markdown reader's rule: a leading YAML metadata block, or the empty
+/// `---`/`---` pair it special-cases.
+fn markdown_frontmatter_block_len(content: &str) -> Option<usize> {
+    for empty in ["---\n---\n", "---\r\n---\r\n", "---\n---", "---\r\n---"] {
+        if content.starts_with(empty) && (empty.ends_with('\n') || content.len() == empty.len()) {
+            return Some(empty.len());
+        }
+    }
+    crate::model::split_raw_frontmatter(content)
+        .0
+        .map(|block| block.len())
+}
+
+/// The stored leading frontmatter of `content`, verbatim: the frontmatter
+/// block plus the blank lines that separate it from the body, so that
+/// `prefix + body` restores the document. Empty when there is none.
+pub fn frontmatter_prefix<'a>(content: &'a str, format: &FormatOptions) -> &'a str {
+    let Some(mut end) = frontmatter_block_len(content, format) else {
+        return "";
+    };
+    while let Some(line_len) = content[end..].find('\n').map(|i| i + 1) {
+        if !content[end..end + line_len].trim().is_empty() {
+            break;
+        }
+        end += line_len;
+    }
+    &content[..end]
+}
+
+/// Whether `content` opens with a frontmatter block.
+pub fn has_frontmatter(content: &str, format: &FormatOptions) -> bool {
+    read_document(content, format).frontmatter.is_some()
+}
+
+#[cfg(test)]
+mod frontmatter_prefix_tests {
+    use super::*;
+
+    fn markdown() -> FormatOptions {
+        FormatOptions::Markdown(MarkdownOptions::default())
+    }
+
+    #[test]
+    fn prefix_is_the_block_and_the_blank_lines_after_it_verbatim() {
+        let content = "---\ntags: [a, b]   # kept as written\nstatus: open\n---\n\n\n# Title\n\nBody\n";
+        assert_eq!(
+            frontmatter_prefix(content, &markdown()),
+            "---\ntags: [a, b]   # kept as written\nstatus: open\n---\n\n\n"
+        );
+    }
+
+    #[test]
+    fn prefix_is_empty_without_frontmatter() {
+        assert_eq!(frontmatter_prefix("# Title\n\n---\n\nafter a rule\n", &markdown()), "");
+        assert_eq!(frontmatter_prefix("", &markdown()), "");
+        assert!(!has_frontmatter("# Title\n", &markdown()));
+    }
+
+    #[test]
+    fn empty_and_body_less_blocks_are_recognized() {
+        assert_eq!(frontmatter_prefix("---\n---\n# T\n", &markdown()), "---\n---\n");
+        assert_eq!(frontmatter_prefix("---\na: 1\n---\n", &markdown()), "---\na: 1\n---\n");
+        assert_eq!(frontmatter_prefix("---\na: 1\n---", &markdown()), "---\na: 1\n---");
+    }
+
+    #[test]
+    fn crlf_blocks_keep_their_line_endings() {
+        let content = "---\r\na: 1\r\n---\r\n\r\n# T\r\n";
+        assert_eq!(frontmatter_prefix(content, &markdown()), "---\r\na: 1\r\n---\r\n\r\n");
+    }
+
+    #[cfg(feature = "djot")]
+    #[test]
+    fn djot_prefix_is_the_block_verbatim() {
+        let djot = FormatOptions::Djot(DjotOptions::default());
+        let content = "---\nstatus: open # c\n---\n\n# Title\n";
+        assert_eq!(frontmatter_prefix(content, &djot), "---\nstatus: open # c\n---\n\n");
+        assert_eq!(frontmatter_prefix("# Title\n", &djot), "");
+    }
+
+    #[test]
+    fn has_frontmatter_follows_the_reader() {
+        assert!(has_frontmatter("---\na: 1\n---\n# T\n", &markdown()));
+        assert!(has_frontmatter("---\n---\n# T\n", &markdown()));
+    }
+}

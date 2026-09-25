@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-09-25 (iwe-plus; upstream iwe 0.24.2)
+
+### Added
+
+- Documents round-trip through MCP. `iwe_retrieve` takes `frontmatter: true` to lead each document's `content` with its stored YAML frontmatter block, verbatim, so the content can go straight back to `iwe_update` (byte-identical when unchanged); `iwe retrieve --frontmatter` does the same on the CLI. `iwe_update` takes `keep_frontmatter: true` to keep the stored frontmatter (inside a transaction, the staged one) and replace only the body; content that carries its own frontmatter block is refused, not merged. The written document is validated, permission-checked, journaled and committed like any full update. Both flags default off, leaving output, token cost and behaviour unchanged; the compact tool listing grows by 200 bytes (9,662 → 9,862).
+
 ## [1.2.0] — 2026-09-24 (iwe-plus; upstream iwe 0.24.2)
 
 ### Changed

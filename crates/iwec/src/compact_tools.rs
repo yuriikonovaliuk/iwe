@@ -66,6 +66,8 @@ fn param_hint(name: &str) -> Option<&'static str> {
         "depth" => "levels to show",
         "max_documents" => "cap on documents after expansion",
         "max_tokens" | "max_document_tokens" => "cap on content tokens",
+        "frontmatter" => "content leads with the stored frontmatter, verbatim",
+        "keep_frontmatter" => "keep stored frontmatter; content = body only",
         _ => return None,
     })
 }
@@ -194,6 +196,19 @@ mod tests {
             "$ref": "#/$defs/E",
             "description": "{includes|includedBy|references|referencedBy: depth}, 0 = unbounded"
         }}}));
+    }
+
+    #[test]
+    fn frontmatter_flags_get_terse_hints() {
+        let mut v = serde_json::json!({"properties": {
+            "frontmatter": {"type": ["boolean", "null"], "description": "Lead each document's content with its stored frontmatter. Long."},
+            "keep_frontmatter": {"type": ["boolean", "null"], "description": "Keep the stored frontmatter. Long."}
+        }});
+        compact_schema(&mut v);
+        assert_eq!(v, serde_json::json!({"properties": {
+            "frontmatter": {"type": "boolean", "description": "content leads with the stored frontmatter, verbatim"},
+            "keep_frontmatter": {"type": "boolean", "description": "keep stored frontmatter; content = body only"}
+        }}));
     }
 
     #[test]

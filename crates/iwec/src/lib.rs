@@ -359,6 +359,10 @@ pub struct RetrieveParams {
         description = "Cap content tokens per document. Unlimited if omitted (0 also = unlimited)."
     )]
     pub max_document_tokens: Option<usize>,
+    #[schemars(
+        description = "Lead each document's `content` with its stored YAML frontmatter block, verbatim, so the content can be passed back to iwe_update as-is. Default: false (body only)."
+    )]
+    pub frontmatter: Option<bool>,
     #[serde(flatten)]
     pub selector: SelectorParams,
 }
@@ -419,6 +423,7 @@ impl RetrieveParams {
             max_documents: self.max_documents,
             max_tokens: self.max_tokens,
             max_document_tokens: self.max_document_tokens,
+            frontmatter: self.frontmatter.unwrap_or(false),
         }
     }
 }
@@ -524,9 +529,37 @@ pub struct UpdateParams {
     #[schemars(description = "New full markdown content")]
     pub content: String,
     #[schemars(
+        description = "Keep the document's stored frontmatter and replace only the body with `content`, which must then carry no frontmatter block (an error otherwise; nothing is merged). Default: false (content replaces the whole document)."
+    )]
+    pub keep_frontmatter: Option<bool>,
+    #[schemars(
         description = "Transaction handle from iwe_tx_begin to stage this write into. Omit to use the implicit default transaction (today's behavior)."
     )]
     pub handle: Option<String>,
+}
+
+/// The full document an `iwe_update` with `keep_frontmatter` writes: the
+/// stored frontmatter block, verbatim, then `body`. A `body` that carries its
+/// own frontmatter is refused rather than merged, and so is a document whose
+/// stored frontmatter cannot be located verbatim (it would otherwise be lost).
+fn keep_frontmatter_content(graph: &Graph, key: &Key, body: &str) -> Result<String, McpError> {
+    if liwe::format::has_frontmatter(body, graph.format_options()) {
+        return Err(McpError::invalid_params(
+            "keep_frontmatter: content must be the body only, without a frontmatter block (omit keep_frontmatter to replace the frontmatter too)".to_string(),
+            None,
+        ));
+    }
+    let prefix = graph.frontmatter_prefix(key);
+    if prefix.is_empty() && graph.frontmatter(key).is_some() {
+        return Err(McpError::invalid_params(
+            format!("keep_frontmatter: the stored frontmatter of '{key}' could not be located verbatim; pass the full content instead"),
+            None,
+        ));
+    }
+    if !prefix.is_empty() && !prefix.ends_with('\n') && !body.is_empty() {
+        return Ok(format!("{prefix}\n{body}"));
+    }
+    Ok(format!("{prefix}{body}"))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1465,14 +1498,23 @@ impl IweServer {
             .get_key_title(&key)
             .unwrap_or_else(|| params.key.clone());
 
-        self.ensure_schema_clean(&[(key.clone(), params.content.clone())])?;
+        // keep_frontmatter: the document as written is the stored frontmatter
+        // (as the transaction sees it) followed by the new body; from here on
+        // it is validated and written exactly like a full update.
+        let content = if params.keep_frontmatter.unwrap_or(false) {
+            keep_frontmatter_content(&graph, &key, &params.content)?
+        } else {
+            params.content.clone()
+        };
+
+        self.ensure_schema_clean(&[(key.clone(), content.clone())])?;
 
         // Write-permission (e.g. EXT-FREEZE) is checked inside `write_file`;
         // run it before mutating the in-memory graph so a rejection leaves
         // both graph and disk untouched rather than just disk.
-        self.write_file(&key, &params.content, &handle, implicit_handle)
+        self.write_file(&key, &content, &handle, implicit_handle)
             .map_err(write_error_to_mcp)?;
-        graph.update_document(key.clone(), params.content.clone());
+        graph.update_document(key.clone(), content);
 
         let new_title = (&*graph)
             .get_key_title(&key)

@@ -40,6 +40,7 @@ Without `-k` (and without a search flag), reads the document key from stdin (for
 | `--max-documents <N>`          | Cap the number of documents returned **after** expansion, trimming periphery documents first. `0` = unlimited. | unlimited  |
 | `--max-tokens <N>`             | Cap total content tokens across all documents (whole documents are dropped). `0` = unlimited. | unlimited  |
 | `--max-document-tokens <N>`         | Cap content tokens per document (body is head-truncated with a marker). `0` = unlimited. | unlimited  |
+| `--frontmatter`                | Lead each document's content with its stored YAML frontmatter block, verbatim (in `json`/`yaml`, the `content` field; in `markdown`, the body below the retrieve header). | off (body only) |
 
 > **Note.** The colon-suffix (`KEY:DEPTH`) on the anchor *selection* flags above and the depth values on the `--expand-*` flags are unrelated: the anchor flags **restrict which documents are seeds**, the `--expand-*` flags **follow edges out from the seeds**.
 

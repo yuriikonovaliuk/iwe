@@ -22,6 +22,10 @@ MARKDOWN (default, -f markdown):
   Empty edge lists (includedBy, includes, referencedBy) are omitted
   from frontmatter.
 
+  That header block is retrieve's own metadata. The document's stored
+  frontmatter is left out unless --frontmatter is given; then the body
+  (and, in json/yaml, the content field) leads with it, verbatim.
+
 KEYS (-f keys):
   One document key per line, suitable for piping:
 

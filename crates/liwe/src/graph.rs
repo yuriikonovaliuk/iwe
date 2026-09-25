@@ -397,6 +397,17 @@ impl Graph {
         self.frontmatter.get(key)
     }
 
+    /// The document's stored frontmatter, verbatim: the leading frontmatter
+    /// block plus the blank lines before the body (see
+    /// [`crate::format::frontmatter_prefix`]). Empty when the document has
+    /// no frontmatter or does not exist.
+    pub fn frontmatter_prefix(&self, key: &Key) -> &str {
+        self.content
+            .get(key)
+            .map(|content| crate::format::frontmatter_prefix(content, &self.format_options))
+            .unwrap_or("")
+    }
+
     pub fn maybe_key(&self, key: &Key) -> Option<impl NodePointer<'_>> {
         self.keys
             .get(key)

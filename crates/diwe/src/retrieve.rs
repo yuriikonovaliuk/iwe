@@ -57,6 +57,9 @@ pub struct RetrieveOptions {
     pub max_documents: Option<usize>,
     pub max_tokens: Option<usize>,
     pub max_document_tokens: Option<usize>,
+    /// Lead each document's `content` with its stored frontmatter block,
+    /// verbatim, so the content can be written back as a full update.
+    pub frontmatter: bool,
 }
 
 /// Sentinel expansion depth meaning "follow this direction with no depth limit".
@@ -223,7 +226,11 @@ impl<'a> DocumentReader<'a> {
             .get_key_title(key)
             .unwrap_or_else(|| key.to_string());
 
-        let content = self.get_document_content(key);
+        let content = if options.frontmatter {
+            self.get_document_content_with_frontmatter(key)
+        } else {
+            self.get_document_content(key)
+        };
         let included_by = self.get_parent_documents(key);
 
         let includes = if options.children {
@@ -257,6 +264,22 @@ impl<'a> DocumentReader<'a> {
 
     fn get_document_content(&self, key: &Key) -> String {
         self.graph.to_markdown_skip_frontmatter(key)
+    }
+
+    /// The stored frontmatter block, verbatim, followed by the body as
+    /// [`Self::get_document_content`] renders it. Should the stored block
+    /// not be locatable although the document has frontmatter, the whole
+    /// document is rendered instead, frontmatter re-serialized.
+    fn get_document_content_with_frontmatter(&self, key: &Key) -> String {
+        let prefix = self.graph.frontmatter_prefix(key);
+        if prefix.is_empty() && self.graph.frontmatter(key).is_some() {
+            return self.graph.to_markdown(key);
+        }
+        let body = self.get_document_content(key);
+        if !body.is_empty() && !prefix.is_empty() && !prefix.ends_with('\n') {
+            return format!("{prefix}\n{body}");
+        }
+        format!("{prefix}{body}")
     }
 
     fn get_parent_documents(&self, key: &Key) -> Vec<EdgeRef> {
@@ -421,4 +444,43 @@ fn edge_tokens(doc: &DocumentOutput) -> usize {
     .filter_map(|edges| serde_yaml::to_string(edges).ok())
     .map(|s| count_tokens(&s))
     .sum()
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::*;
+    use liwe::model::config::MarkdownOptions;
+
+    const DOC: &str = "---\nstatus: open # comment\n---\n\n# Title\n\nBody\n";
+
+    fn graph() -> Graph {
+        let mut state = liwe::model::State::new();
+        state.insert("doc".to_string(), DOC.to_string());
+        state.insert("plain".to_string(), "# Plain\n".to_string());
+        Graph::import(&state, MarkdownOptions::default(), None)
+    }
+
+    fn content(graph: &Graph, key: &str, frontmatter: bool) -> String {
+        let options = RetrieveOptions {
+            frontmatter,
+            ..Default::default()
+        };
+        DocumentReader::new(graph)
+            .retrieve(&Key::name(key), &options)
+            .documents[0]
+            .content
+            .clone()
+    }
+
+    #[test]
+    fn content_is_the_body_by_default() {
+        assert_eq!(content(&graph(), "doc", false), "# Title\n\nBody\n");
+    }
+
+    #[test]
+    fn frontmatter_option_leads_with_the_stored_block_verbatim() {
+        let graph = graph();
+        assert_eq!(content(&graph, "doc", true), DOC);
+        assert_eq!(content(&graph, "plain", true), "# Plain\n");
+    }
 }

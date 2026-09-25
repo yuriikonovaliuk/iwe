@@ -577,6 +577,12 @@ struct Retrieve {
     #[clap(long, help = "Cap content tokens per document (0 = unlimited)")]
     max_document_tokens: Option<usize>,
 
+    #[clap(
+        long,
+        help = "Lead each document's content with its stored YAML frontmatter block, verbatim (body only by default)"
+    )]
+    frontmatter: bool,
+
     #[clap(flatten)]
     selector: FilterArgs,
 }
@@ -1860,6 +1866,7 @@ fn retrieve_command(args: Retrieve) {
         max_documents: args.max_documents,
         max_tokens: args.max_tokens,
         max_document_tokens: args.max_document_tokens,
+        frontmatter: args.frontmatter,
     };
 
     let reader = DocumentReader::new(&graph);
@@ -1937,7 +1944,8 @@ fn retrieve_command(args: Retrieve) {
         RetrieveFormat::Markdown => {
             let md_options = graph.format_options().markdown_options();
             let renderer =
-                RetrieveRenderer::new(&output, &md_options, &graph, args.max_document_tokens);
+                RetrieveRenderer::new(&output, &md_options, &graph, args.max_document_tokens)
+                    .with_frontmatter(args.frontmatter);
             print!("{}", renderer.render());
         }
     }

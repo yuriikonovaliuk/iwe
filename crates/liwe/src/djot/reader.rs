@@ -578,6 +578,15 @@ fn normalize_line_endings(content: &str) -> String {
     content.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// Byte length of the leading frontmatter block in `content`, or `None`.
+pub fn frontmatter_block_len(content: &str) -> Option<usize> {
+    if content.contains('\r') {
+        return None;
+    }
+    let (_, frontmatter, consumed) = strip_frontmatter(content);
+    frontmatter.map(|_| consumed)
+}
+
 fn strip_frontmatter(content: &str) -> (String, Option<Mapping>, usize) {
     let Some(rest) = content.strip_prefix("---\n") else {
         return (content.to_string(), None, 0);

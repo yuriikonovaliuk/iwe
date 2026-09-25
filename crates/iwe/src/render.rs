@@ -32,6 +32,7 @@ pub struct RetrieveRenderer<'a> {
     options: &'a MarkdownOptions,
     graph: &'a Graph,
     max_document_tokens: Option<usize>,
+    frontmatter: bool,
 }
 
 impl<'a> RetrieveRenderer<'a> {
@@ -46,7 +47,14 @@ impl<'a> RetrieveRenderer<'a> {
             options,
             graph,
             max_document_tokens,
+            frontmatter: false,
         }
+    }
+
+    /// Lead each document's body with its stored frontmatter block, verbatim.
+    pub fn with_frontmatter(mut self, frontmatter: bool) -> Self {
+        self.frontmatter = frontmatter;
+        self
     }
 
     pub fn render(&self) -> String {
@@ -64,7 +72,10 @@ impl<'a> RetrieveRenderer<'a> {
         let body = if doc.content.is_empty() {
             String::new()
         } else {
-            let rendered = render_body(self.graph, self.options, &doc.key);
+            let mut rendered = render_body(self.graph, self.options, &doc.key);
+            if self.frontmatter {
+                rendered.insert_str(0, self.graph.frontmatter_prefix(&Key::name(&doc.key)));
+            }
             truncate_rendered_body(rendered, self.max_document_tokens, clipped)
         };
         render_block(&doc.key, &frontmatter, &[], &body)
