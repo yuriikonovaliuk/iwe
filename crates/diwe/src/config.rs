@@ -146,6 +146,78 @@ pub struct TransactionOptions {
     pub allow: Vec<String>,
 }
 
+/// How strictly `[integrity]` holds one structural property of the store
+/// (links that resolve, pages reachable from the root). `off` (the
+/// default) enforces nothing. `no-new` refuses a commit that adds a
+/// violation the pre-commit state did not have: existing debt may stay or
+/// shrink, never grow. `strict` refuses a commit whose resulting store has
+/// any violation at all; there is no exceptions list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntegrityMode {
+    #[default]
+    Off,
+    NoNew,
+    Strict,
+}
+
+impl IntegrityMode {
+    pub fn is_off(self) -> bool {
+        self == IntegrityMode::Off
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IntegrityMode::Off => "off",
+            IntegrityMode::NoNew => "no-new",
+            IntegrityMode::Strict => "strict",
+        }
+    }
+}
+
+fn default_integrity_root() -> String {
+    "index".to_string()
+}
+
+/// `[integrity]`: structural link integrity, enforced at the commit every
+/// write goes through (see [`crate::integrity`]) and reported by
+/// `iwe schema validate`. `links` governs broken links (an internal link or
+/// inclusion to a key that does not exist); `orphans` governs documents not
+/// reachable from `root` by following outgoing links and inclusions. Left
+/// at its default (both `off`), IWE behaves exactly as without the section.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrityOptions {
+    #[serde(default)]
+    pub links: IntegrityMode,
+    #[serde(default)]
+    pub orphans: IntegrityMode,
+    /// The key every document must be reachable from. Default `index`.
+    #[serde(default = "default_integrity_root")]
+    pub root: String,
+}
+
+impl Default for IntegrityOptions {
+    fn default() -> Self {
+        Self {
+            links: IntegrityMode::Off,
+            orphans: IntegrityMode::Off,
+            root: default_integrity_root(),
+        }
+    }
+}
+
+impl IntegrityOptions {
+    /// Whether either property is enforced.
+    pub fn is_enabled(&self) -> bool {
+        !self.links.is_off() || !self.orphans.is_off()
+    }
+
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Default for LibraryOptions {
     fn default() -> Self {
         Self {
@@ -179,6 +251,8 @@ pub struct Configuration {
     pub journal: JournalOptions,
     #[serde(default)]
     pub transactions: TransactionOptions,
+    #[serde(default, skip_serializing_if = "IntegrityOptions::is_default")]
+    pub integrity: IntegrityOptions,
     #[serde(default)]
     pub commit: CommitOptions,
     #[serde(default)]
@@ -361,6 +435,7 @@ impl Default for Configuration {
             search: Default::default(),
             journal: Default::default(),
             transactions: Default::default(),
+            integrity: Default::default(),
             commit: Default::default(),
             commands: Default::default(),
             actions: Default::default(),
@@ -1003,7 +1078,7 @@ mod tests {
                   |
                 3 | [schema.note]
                   |  ^^^^^^
-                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `transactions`, `commit`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
+                unknown field `schema`, expected one of `version`, `format`, `markdown`, `djot`, `library`, `completion`, `search`, `journal`, `transactions`, `integrity`, `commit`, `commands`, `actions`, `templates`, `schemas`, `invariants`, `checkers`
             "#}
         );
     }

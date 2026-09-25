@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] — 2026-09-26 (iwe-plus; upstream iwe 0.24.2)
+
+### Added
+
+- `[integrity]` in `.iwe/config.toml`: structural link integrity, refused rather than warned about. `links` (broken links: an internal link or inclusion to a key with no document) and `orphans` (documents not reachable from `root`, default `index`, by following outgoing links and inclusions; pages that only link to each other count) each take `off` (default), `no-new` (a commit may not add a broken link or orphan the store did not already have; standing debt may stay or shrink) or `strict` (the resulting store must have none; no exceptions list). Enforced at the one commit every write goes through: every CLI write command and MCP write tool, whole-store `iwe normalize`, and `iwe_tx_commit`, so a new page and the link to it are judged together. A refused write changes nothing on disk; its error starts `link integrity:`, names each new broken link (`source → target`) and orphan (twenty of each, then a count), and hints: pass `link_from` to `iwe_create`, or create the page and its link in one transaction. MCP refusals carry `{ "iwe_error": "link_integrity" }`. Default off: behaviour is unchanged for every existing store.
+- `iwe schema validate` reports the same debt with the same code, under schema `integrity` (keywords `broken-link`, `orphan`): `strict` fails the run, `no-new` debt prints as `warning:` lines and leaves the exit code alone, so a drain never quarantines a write over old debt. A `-k`/`--filter` selection keeps only its own reports.
+- `iwe_create` takes `link_from: <key>` and `iwe create` takes `--link-from <KEY>`: in the same commit (or staged on the same transaction), `- [<title>](<key>)` linking the new document is appended to the end of that existing document, written the way the store writes links and relative to its directory. A `link_from` that does not exist is an error and nothing is written. The compact tool listing grows by 107 bytes (9,862 → 9,969).
+- `iwe stats`, `iwe_stats`, the `iwe://stats` resource and the `explore` prompt add an `integrity` object (modes, root, `brokenLinkCount`, `unreachableDocuments`, `unreachable`) when the section is enabled.
+
+### Changed
+
+- A validating commit reads the store once and parses each of its pre- and post-commit graphs at most once, shared by schema validation and the integrity gate. Under `no-new`, the pre-commit debt is cached by a digest of the store state, so a long-running `iwec` parses the whole store once per commit, not twice.
+
 ## [1.4.0] — 2026-09-25 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added

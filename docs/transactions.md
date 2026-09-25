@@ -78,6 +78,12 @@ Two backends exist:
 
 Both backends honor the same failed-transaction contract described next.
 
+The validating backend also enforces [`[integrity]`](configuration.md#link-integrity)
+at `commit`: a transaction whose final state adds (`no-new`) or leaves
+(`strict`) a broken link or an orphan is refused whole. This is what makes
+"create a page and link it" one unit — staged separately, the page alone
+would be an orphan; committed together, it is reachable.
+
 ## Rejected writes fail the whole transaction
 
 If any single write in a transaction is rejected for lack of permission —

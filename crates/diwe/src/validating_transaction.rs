@@ -42,6 +42,7 @@
 //!   other agents keep writing.
 
 use std::collections::hash_map::DefaultHasher;
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -58,6 +59,8 @@ use liwe::write_lock::{acquire_commit_lock, CommitLockError, CommitLockGuard};
 use crate::config::{write_permitted, Configuration};
 pub use crate::config::ValidationScope;
 use crate::fs::{new_for_path, write_file};
+use crate::config::IntegrityMode;
+use crate::integrity::{check_commit, debt, state_digest, Debt, DebtCache, IntegrityViolation};
 use crate::permissions::WriteOperation;
 use crate::schema::{
     render_reports_text, run_checkers, validate_affected_set, validate_store_at, KeyReport,
@@ -108,6 +111,9 @@ pub enum ValidationFailure {
     /// applied — the transaction falls back to its pending state, exactly
     /// as for the other pre-apply failure modes.
     WriteScopeDenied(Vec<Key>),
+    /// The final state breaks `[integrity]`: it adds (`no-new`) or leaves
+    /// (`strict`) a broken link or an orphan. Nothing was applied.
+    Integrity(IntegrityViolation),
 }
 
 /// The name this failure type had while the backend only knew the
@@ -155,6 +161,7 @@ impl fmt::Display for ValidationFailure {
                     listed.join(", ")
                 )
             }
+            Self::Integrity(violation) => write!(f, "{violation}"),
         }
     }
 }
@@ -263,10 +270,12 @@ impl ValidatingTransaction {
     /// The backend `[transactions]` asks for over the store at
     /// `base_path` inside the project at `root` (where `.iwe/` lives), or
     /// `None` when the section is fully left at its default (`validate =
-    /// none`, `deny = []`, `allow = []`) — the caller then stays on
-    /// [`liwe::transaction::NoopTransaction`]. A backend is built when
-    /// EITHER `[transactions] validate` is set to a non-`None` scope OR
-    /// `[transactions] deny`/`allow` is non-empty: the write-scope check
+    /// none`, `deny = []`, `allow = []`) and `[integrity]` is off — the
+    /// caller then stays on [`liwe::transaction::NoopTransaction`]. A
+    /// backend is built when `[transactions] validate` is set to a
+    /// non-`None` scope, OR `[transactions] deny`/`allow` is non-empty, OR
+    /// `[integrity]` enables a property (its gate runs at this backend's
+    /// commit, whatever the scope): the write-scope check
     /// needs this backend's `commit()` to enforce `deny`/`allow` even
     /// when no schema validation is configured. When the only trigger is
     /// non-empty `deny`/`allow` (validate left at its default `None`), the
@@ -280,7 +289,10 @@ impl ValidatingTransaction {
         let scope = config.transactions.validate;
         let has_scope_list =
             !config.transactions.deny.is_empty() || !config.transactions.allow.is_empty();
-        if scope == ValidationScope::None && !has_scope_list {
+        // `[integrity]` is enforced at this backend's commit too, so an
+        // enabled section builds one even with `validate = none` (the
+        // schema scope then stays `None` and only the integrity gate runs).
+        if scope == ValidationScope::None && !has_scope_list && !config.integrity.is_enabled() {
             return None;
         }
         Some(
@@ -409,10 +421,10 @@ impl ValidatingTransaction {
         dot_iwe.is_dir().then(|| root.to_path_buf())
     }
 
-    /// The state that would result from applying every pending write on
-    /// top of what is currently on disk at `base_path`.
-    fn final_state(&self) -> State {
-        let mut state = new_for_path(&self.base_path, self.format);
+    /// `state` (what is on disk at `base_path` when the commit reads it)
+    /// with every pending write applied: the state the commit would
+    /// produce.
+    fn apply_to(&self, mut state: State) -> State {
         for write in &self.pending {
             match write {
                 Write::Put(key, content) => {
@@ -508,17 +520,11 @@ impl ValidatingTransaction {
     /// is the primary guarantee; this method stays consistent so the
     /// "no validation at None" invariant holds even if the gate is ever
     /// bypassed.
-    fn reports_for(&self, state: &State, touched: &[Key]) -> Result<Vec<KeyReport>, Vec<String>> {
-        let graph = Graph::from_state(
-            state,
-            false,
-            self.config.format_options(),
-            self.config.library.frontmatter_document_title.clone(),
-        );
+    fn reports_for(&self, graph: &Graph, touched: &[Key]) -> Result<Vec<KeyReport>, Vec<String>> {
         let run = match self.scope {
-            ValidationScope::Full => validate_store_at(&self.schemas_dir, &self.config, &graph)?,
+            ValidationScope::Full => validate_store_at(&self.schemas_dir, &self.config, graph)?,
             ValidationScope::AffectedSet | ValidationScope::AffectedSetWithCheckers => {
-                validate_affected_set(&self.schemas_dir, &self.config, &graph, touched)
+                validate_affected_set(&self.schemas_dir, &self.config, graph, touched)
                     .map(|(run, _affected)| run)?
             }
             ValidationScope::None => ValidationRun {
@@ -528,6 +534,54 @@ impl ValidatingTransaction {
             },
         };
         Ok(run.reports)
+    }
+
+    fn graph_of(&self, state: &State) -> Graph {
+        Graph::from_state(
+            state,
+            false,
+            self.config.format_options(),
+            self.config.library.frontmatter_document_title.clone(),
+        )
+    }
+
+    /// What [`crate::integrity::state_digest`] mixes in besides the
+    /// documents: everything else a state's debt depends on.
+    fn integrity_context(&self) -> String {
+        format!(
+            "{:?}|{:?}|{:?}",
+            self.config.format_options(),
+            self.config.library.frontmatter_document_title,
+            self.config.integrity
+        )
+    }
+
+    /// The `[integrity]` gate over the final state against the current
+    /// on-disk one — [`crate::integrity::check_commit`], the same
+    /// definitions `iwe schema validate` reports. The pre-commit debt is
+    /// needed only when a `no-new` property has something to compare, and
+    /// is then looked up in [`DebtCache`] (the state the previous commit
+    /// landed) before the pre-commit graph is parsed. Returns the digest
+    /// and debt of the final state, for the caller to cache once the
+    /// commit has actually landed.
+    fn check_integrity(&self, states: &CommitStates<'_>) -> Result<Option<(u64, Debt)>, ValidationFailure> {
+        let options = &self.config.integrity;
+        if !options.is_enabled() {
+            return Ok(None);
+        }
+        let caches = options.links == IntegrityMode::NoNew || options.orphans == IntegrityMode::NoNew;
+        let context = self.integrity_context();
+        let after_debt = check_commit(options, states.after_graph(), || {
+            let digest = state_digest(&states.before, &context);
+            if let Some(debt) = DebtCache::get(digest) {
+                return debt;
+            }
+            let before = debt(states.before_graph(), options);
+            DebtCache::put(digest, before.clone());
+            before
+        })
+        .map_err(ValidationFailure::Integrity)?;
+        Ok(caches.then(|| (state_digest(&states.after, &context), after_debt)))
     }
 
     /// The touched keys `[transactions]`'s `deny`/`allow` lists on the
@@ -555,15 +609,19 @@ impl ValidatingTransaction {
     /// write into a refusal; a violation this transaction would introduce
     /// is. The pre-state is validated only when the final state has
     /// reports at all, so a clean write costs one validation.
-    fn validate_final_state(&self, touched: &[Key]) -> Result<(), ValidationFailure> {
+    fn validate_final_state(
+        &self,
+        states: &CommitStates<'_>,
+        touched: &[Key],
+    ) -> Result<(), ValidationFailure> {
         let after = self
-            .reports_for(&self.final_state(), touched)
+            .reports_for(states.after_graph(), touched)
             .map_err(ValidationFailure::Config)?;
         if after.is_empty() {
             return Ok(());
         }
         let before = self
-            .reports_for(&new_for_path(&self.base_path, self.format), touched)
+            .reports_for(states.before_graph(), touched)
             .map_err(ValidationFailure::Config)?;
         let standing: HashSet<(String, String, String)> = before
             .iter()
@@ -708,8 +766,20 @@ impl ValidatingTransaction {
         // entirely — the scope check above is what gates the commit, and
         // schema cost is not paid. At `AffectedSet` / `Full` the
         // validation runs as before.
-        if self.scope != ValidationScope::None {
-            self.validate_final_state(&touched)?;
+        // The on-disk state is read once and each graph parsed at most once,
+        // shared by the schema validation and the `[integrity]` gate.
+        let mut landed_debt = None;
+        if self.scope != ValidationScope::None || self.config.integrity.is_enabled() {
+            let before = new_for_path(&self.base_path, self.format);
+            let after = self.apply_to(before.clone());
+            let states = CommitStates::new(self, before, after);
+            if self.scope != ValidationScope::None {
+                self.validate_final_state(&states, &touched)?;
+            }
+            // `[integrity]`: broken links and orphans, whatever the schema
+            // scope — the commit every write goes through is where a new
+            // page and the link to it are judged together.
+            landed_debt = self.check_integrity(&states)?;
         }
 
         // Fencing check, immediately before the irreversible step (the
@@ -748,7 +818,40 @@ impl ValidatingTransaction {
             self.restore(&prior).map_err(ValidationFailure::Io)?;
             return Err(ValidationFailure::Violations(run));
         }
+        if let Some((digest, debt)) = landed_debt {
+            DebtCache::put(digest, debt);
+        }
         Ok(())
+    }
+}
+
+/// One commit's pre- and post-commit states and their graphs, each graph
+/// parsed on first use and at most once.
+struct CommitStates<'a> {
+    tx: &'a ValidatingTransaction,
+    before: State,
+    after: State,
+    before_graph: OnceCell<Graph>,
+    after_graph: OnceCell<Graph>,
+}
+
+impl<'a> CommitStates<'a> {
+    fn new(tx: &'a ValidatingTransaction, before: State, after: State) -> Self {
+        Self {
+            tx,
+            before,
+            after,
+            before_graph: OnceCell::new(),
+            after_graph: OnceCell::new(),
+        }
+    }
+
+    fn before_graph(&self) -> &Graph {
+        self.before_graph.get_or_init(|| self.tx.graph_of(&self.before))
+    }
+
+    fn after_graph(&self) -> &Graph {
+        self.after_graph.get_or_init(|| self.tx.graph_of(&self.after))
     }
 }
 

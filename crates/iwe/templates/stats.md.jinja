@@ -85,6 +85,15 @@
 {% endfor %}
 {%- endif %}
 
+{%- if integrity %}
+
+## Link Integrity
+
+- **Mode:** links = {{ integrity.links }}, orphans = {{ integrity.orphans }}, root = {{ integrity.root }}
+- **Broken links:** {{ integrity.brokenLinkCount }}
+- **Unreachable from root:** {{ integrity.unreachableDocuments }}
+{%- endif %}
+
 {%- if orphans %}
 
 ## Orphans

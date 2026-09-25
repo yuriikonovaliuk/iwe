@@ -445,6 +445,44 @@ match = ["notes/**", "!notes/index"]
 Run [`iwe schema validate`](cli-schema.md) to check the store against these
 bindings.
 
+## Link Integrity
+
+The `[integrity]` section: structural link integrity, refused at the commit every write goes through
+(CLI and MCP alike, a transaction's commit included) and reported by
+`iwe schema validate`:
+
+``` toml
+[integrity]
+links = "no-new"    # off | no-new | strict
+orphans = "no-new"  # off | no-new | strict
+root = "index"      # every document must be reachable from this key
+```
+
+- A **broken link** is an internal link or inclusion to a key that has no
+  document. External URLs are not internal links; a `#fragment` is dropped
+  when the target is resolved, so a missing anchor in an existing document
+  is not broken.
+- An **orphan** is a document not reachable from `root` by following
+  outgoing links and inclusions. Pages that only link to each other are
+  orphans; with no `root` document, every document is one.
+- `off` (the default for both) enforces nothing. `no-new` refuses a commit
+  that adds a broken link or an orphan the store did not have before it:
+  standing debt may stay or shrink, never grow. `strict` refuses a commit
+  that leaves any broken link or orphan; there is no exceptions list.
+- A refused write changes nothing on disk. Its error starts with
+  `link integrity:`, names each broken link (`source → target`) and each
+  orphan (twenty of each, then a count), and says how to fix it: create the
+  page with `iwe create --link-from <parent>` (MCP: `link_from`), or create
+  the page and its link in one transaction.
+- `iwe schema validate` reports the same debt with the same code, under
+  schema `integrity` (keywords `broken-link`, `orphan`): a `strict` property
+  fails the run, a `no-new` one is printed as `warning:` lines and leaves
+  the exit code alone — a whole-store run has no pre-commit state to tell
+  new debt from old.
+- Enabling the section makes every write commit through the validating
+  backend (as `[transactions] validate` does), so `iwe_tx_begin` works
+  even with `validate = "none"`.
+
 ## Migration from Version 2
 
 If you're upgrading from a configuration using the old `[models]` section, IWE will automatically migrate your configuration to version 3. The migration:

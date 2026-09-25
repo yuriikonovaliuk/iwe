@@ -15,6 +15,7 @@ mod freeze_multi_property_write_test;
 mod handle_keyed_open_txs_test;
 mod http_transport_test;
 mod inline_test;
+mod link_integrity_test;
 mod mutability_test;
 mod normalize_test;
 mod per_session_tx_handle_test;

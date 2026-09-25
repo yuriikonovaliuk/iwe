@@ -37,6 +37,7 @@ chrono.workspace = true
 libc = "0.2"
 serde_json.workspace = true
 uuid.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

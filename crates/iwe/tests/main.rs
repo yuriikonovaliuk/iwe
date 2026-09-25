@@ -26,6 +26,7 @@ mod inline_test;
 mod internal_test;
 mod journal_baseline_diff_test;
 mod journal_test;
+mod link_integrity_test;
 mod mutability_test;
 mod rule_description_test;
 mod new_test;

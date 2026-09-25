@@ -87,6 +87,7 @@ The MCP server exposes 14 tools for reading, writing, querying, and refactoring 
 | `key`        | Required. The document's stable identity — draw it from metadata (an entity name, a session date), not the title wording. Subdirectory keys such as `people/ada` are allowed; omit the file extension. |
 | `content`    | Required. Frontmatter block first (when there is one), then the markdown, normally starting with `# Title`. |
 | `if_exists`  | `"fail"` (default) errors when the key is taken; `"skip"` leaves the existing document untouched and returns `created: false`, which makes retries idempotent. |
+| `link_from`  | Optional. Key of an existing document to link the new one from: in the same commit (or staged on the same transaction, with `handle`), `- [<title>](<key>)` is appended to the end of that document, written the way the store writes links and relative to its directory. A key that does not exist is an error and nothing is written. Linking from a page reachable from the store's root keeps the new page reachable under `[integrity]`. |
 
 Because `content` is the whole file, frontmatter belongs at its first byte — that is where other tools read it. There is no separate frontmatter parameter to place it for you, and nothing is inserted above or below what you send. `iwe_update` has the same contract, with the opposite existence precondition.
 
@@ -107,9 +108,21 @@ A successful `iwe_create`, `iwe_update`, or `iwe_query` (`update` / `delete`) ma
 - **dangling-link** — a link whose target document does not exist.
 - **similar-page** — a just-authored page that is near-identical to another (only on `create` / `update`; see [Detecting similar pages](cli-stats.md#detecting-similar-pages)).
 
-These warnings are **advisory** — nothing is ever blocked by them. The hard rejects are schema validation (under `--strict` / the always-strict `iwe_query`), and, on every write regardless of strictness, a frozen document or a property a schema marks `mutable: false` (see [Document Schema](document-schema.md#11-freeze)). Each finding is reported **once per session**, so the first mutation surfaces the store's standing issues and later calls surface only what changed. Resolve reported warnings before ending the session; each carries the fix in its message.
+These warnings are **advisory** — nothing is ever blocked by them (their `orphan` is "nothing links here"; the enforced rule below is reachability from the root). The hard rejects are [link integrity](#link-integrity), schema validation (under `--strict` / the always-strict `iwe_query`), and, on every write regardless of strictness, a frozen document or a property a schema marks `mutable: false` (see [Document Schema](document-schema.md#11-freeze)). Each finding is reported **once per session**, so the first mutation surfaces the store's standing issues and later calls surface only what changed. Resolve reported warnings before ending the session; each carries the fix in its message.
 
 The per-document `iwe_stats` result (call `iwe_stats` with a `key`) also carries a `similarPages` array — other documents near-identical to that page.
+
+#### Link integrity
+
+With [`[integrity]`](configuration.md#link-integrity) enabled, every write — each write tool, and `iwe_tx_commit` for a transaction — is refused when it would add (`no-new`) or leave (`strict`) a broken link or an orphan (a document not reachable from `root`, `index` by default, through links and inclusions). A refused write changes nothing on disk. The error is invalid-params with data `{ "iwe_error": "link_integrity" }`, and its message names each new broken link and orphan:
+
+``` text
+link integrity: refused, the write would leave 1 new orphan(s) (links = "no-new", orphans = "no-new", root = "index"); nothing was written
+  orphan: people/ada (not reachable from 'index')
+hint (orphan): pass link_from=<a reachable parent key> to iwe_create, or create the page and its link in one transaction (iwe_tx_begin … iwe_tx_commit), or link it from a reachable page in the same write
+```
+
+`iwe_delete` removes every link to the deleted page in the same commit, so deleting a page leaves no broken link; it is refused when it cuts other pages off from the root. `iwe_rename` rewrites every link, so it keeps integrity. `iwe_stats` adds an `integrity` object (modes, root, `brokenLinkCount`, `unreachableDocuments`, `unreachable`) when the section is enabled.
 
 ### Query
 

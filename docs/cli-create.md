@@ -36,7 +36,10 @@ iwe create <KEY> --template NAME --set FIELD=VALUE [--set FIELD=VALUE ...]
 | `--set <FIELD=VALUE>`     | Set a single frontmatter field, written above the rendered document. Repeatable.           | template |
 | `-i, --if-exists <MODE>`  | `fail` / `skip`, plus `suffix` / `override` in template mode.                             | both     |
 | `--strict`                | Validate against the configured document schema before writing.                           | both     |
+| `--link-from <KEY>`       | In the same commit, append `- [<title>](<key>)` linking the new document to the end of the existing document `KEY`. A missing `KEY` is an error and nothing is written. | both     |
 | `-e, --edit`              | Open the created file in `$EDITOR`.                                                       | both     |
+
+`--link-from` is how a new page stays reachable under [`[integrity]`](configuration.md#link-integrity): the page and the link to it are one commit, so neither lands without the other. The link is written the way the store writes links (`refs_path`, `refs_extension`), relative to `KEY`'s directory, and joins a list already ending that document.
 
 On success the absolute path of the created file is printed. `--if-exists skip` on an existing document prints nothing and exits successfully.
 

@@ -152,6 +152,8 @@ notes/intro › Tasks: header is 18 tokens (limit 12)
 
 Clean documents produce no output.
 
+With [`[integrity]`](configuration.md#link-integrity) enabled, the run also reports broken links and orphans, computed by the same code the commit gate uses, under schema `integrity` (keywords `broken-link`, keyed to the link's source, and `orphan`). A `strict` property's reports fail the run; a `no-new` property's are printed to stderr as `warning:` lines and leave the exit code alone, because standing debt is not a failure under `no-new`. With a selection (`-k`, `--filter`), only the reports keyed to selected documents are kept; with `--schema-file`, integrity is not checked.
+
 ### Exit codes
 
 | Code | Meaning                                                              |

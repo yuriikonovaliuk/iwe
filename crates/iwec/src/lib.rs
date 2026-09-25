@@ -511,6 +511,10 @@ pub struct CreateParams {
         description = "Behavior when the key already exists: \"fail\" (default) reports an error, \"skip\" leaves the existing document untouched and returns created: false, which makes retries idempotent."
     )]
     pub if_exists: Option<CreateIfExists>,
+    #[schemars(
+        description = "Key of an existing document to link the new one from: in the same commit, a list item `- [<title>](<key>)` linking the new document is appended to the end of that document. Linking it from a page reachable from the store's root keeps it reachable."
+    )]
+    pub link_from: Option<String>,
     #[schemars(skip)]
     pub template: Option<String>,
     #[schemars(skip)]
@@ -899,11 +903,20 @@ fn classify_apply_changes_error(error: std::io::Error) -> WriteError {
 /// else keeps the invalid-params mapping every write path already used.
 fn write_error_to_mcp(e: WriteError) -> McpError {
     match e {
-        WriteError::Rejected(message) => McpError::invalid_params(message, None),
+        WriteError::Rejected(message) => rejection_to_mcp(message),
         WriteError::Io(error) => {
             McpError::internal_error(format!("Failed to write to the workspace: {error}"), None)
         }
     }
+}
+
+/// A refused write as invalid-params, carrying `iwe_error: "link_integrity"`
+/// when `[integrity]` refused it, so a client can tell that refusal from
+/// every other without parsing the text.
+fn rejection_to_mcp(message: String) -> McpError {
+    let data = diwe::integrity::is_integrity_error(&message)
+        .then(|| serde_json::json!({ "iwe_error": diwe::integrity::ERROR_CODE }));
+    McpError::invalid_params(message, data)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1312,7 +1325,8 @@ impl IweServer {
                 similar_pages: similar,
             })
         } else {
-            let stats = GraphStatistics::from_graph(&graph);
+            let stats =
+                GraphStatistics::from_graph(&graph).with_integrity(&graph, &self.config.integrity);
             to_json_result(&stats)
         }
     }
@@ -1497,6 +1511,61 @@ impl IweServer {
                     None,
                 )),
             };
+        }
+
+        if let Some(link_from) = &params.link_from {
+            // `link_from`: the new document and the list item linking it
+            // land as one change set, through the same commit (or staged
+            // on the same transaction) — never one without the other.
+            let parent = Key::name(strip_doc_extension(link_from));
+            if parent == key {
+                return Err(McpError::invalid_params(
+                    format!("link_from '{link_from}' names the document being created"),
+                    None,
+                ));
+            }
+            let parent_content = if (&*graph).get_node_id(&parent).is_some() {
+                graph.get_document(&parent).or_else(|| self.read_file(&parent))
+            } else {
+                None
+            };
+            let Some(parent_content) = parent_content else {
+                return Err(McpError::invalid_params(
+                    format!("link_from '{link_from}' does not exist; nothing was written"),
+                    None,
+                ));
+            };
+            let title = diwe::integrity::document_title(
+                &key,
+                &markdown,
+                self.config.format_options(),
+                self.config.library.frontmatter_document_title.clone(),
+            );
+            let linked = diwe::integrity::append_link_item(
+                &parent_content,
+                &parent,
+                &key,
+                &title,
+                &self.config.format_options(),
+            );
+            let changes = Changes::new()
+                .create(key.clone(), markdown.clone())
+                .update(parent.clone(), linked);
+            self.ensure_schema_clean(&pending_from_changes(&changes))?;
+            self.write_changes(&changes, &handle, implicit_handle)
+                .map_err(write_error_to_mcp)?;
+            Self::apply_changes(&mut graph, &changes);
+            let upserts = [key.clone(), parent];
+            let warnings = self
+                .stats_warnings(&graph, &upserts, &[], std::slice::from_ref(&key))
+                .await;
+            return to_json_result_with_warnings(
+                &CreateResult {
+                    key: key_name,
+                    created: true,
+                },
+                &warnings,
+            );
         }
 
         self.ensure_schema_clean(&[(key.clone(), markdown.clone())])?;
@@ -2169,7 +2238,7 @@ impl IweServer {
                 "transactions are not enabled for this store: set `[transactions] validate` to \
                  \"affected-set\", \"affected-set-with-checkers\", or \"full\", or set \
                  `[transactions] deny`/`allow` \
-                 (write-scope enforcement also constructs a validating backend)"
+                 (write-scope enforcement also constructs a validating backend), or enable `[integrity]`"
                     .to_string(),
                 None,
             ));
@@ -2402,13 +2471,10 @@ impl IweServer {
                 if is_default {
                     self.reload_graph_from_disk().await;
                 }
-                Err(McpError::invalid_params(
-                    format!(
-                        "transaction refused; nothing was written and the staged changes to {} were discarded: {message}",
-                        if keys.is_empty() { "no documents".to_string() } else { keys.join(", ") }
-                    ),
-                    None,
-                ))
+                Err(rejection_to_mcp(format!(
+                    "transaction refused; nothing was written and the staged changes to {} were discarded: {message}",
+                    if keys.is_empty() { "no documents".to_string() } else { keys.join(", ") }
+                )))
             }
         }
     }
@@ -2533,7 +2599,7 @@ impl IweServer {
     )]
     async fn explore(&self) -> Result<GetPromptResult, McpError> {
         let graph = self.graph.lock().await;
-        let stats = GraphStatistics::from_graph(&graph);
+        let stats = GraphStatistics::from_graph(&graph).with_integrity(&graph, &self.config.integrity);
         let stats_json = serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
 
         let messages = vec![PromptMessage::new_text(
@@ -2725,7 +2791,7 @@ impl ServerHandler for IweServer {
         }
 
         if uri == "iwe://stats" {
-            let stats = GraphStatistics::from_graph(&graph);
+            let stats = GraphStatistics::from_graph(&graph).with_integrity(&graph, &self.config.integrity);
             let json = serde_json::to_string_pretty(&stats)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             return Ok(

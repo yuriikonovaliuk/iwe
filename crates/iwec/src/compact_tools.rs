@@ -68,6 +68,7 @@ fn param_hint(name: &str) -> Option<&'static str> {
         "max_tokens" | "max_document_tokens" => "cap on content tokens",
         "frontmatter" => "content leads with the stored frontmatter, verbatim",
         "keep_frontmatter" => "keep stored frontmatter; content = body only",
+        "link_from" => "existing key to append a link to the new doc to, same commit",
         _ => return None,
     })
 }

@@ -528,6 +528,26 @@ pub struct GraphStatistics {
 
     pub broken_link_count: usize,
     pub broken_links: Vec<BrokenLink>,
+
+    /// `[integrity]`'s view of the same store, present only when the
+    /// section enables a property: the debt counted with the commit
+    /// gate's own definitions (orphans by reachability from the root).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<IntegritySummary>,
+}
+
+/// The integrity debt `[integrity]` counts: broken links and the documents
+/// not reachable from `root`, whatever each property's mode.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegritySummary {
+    pub links: crate::config::IntegrityMode,
+    pub orphans: crate::config::IntegrityMode,
+    pub root: String,
+    pub broken_link_count: usize,
+    pub unreachable_documents: usize,
+    #[serde(serialize_with = "serialize_keys")]
+    pub unreachable: Vec<Key>,
 }
 
 impl GraphStatistics {
@@ -541,6 +561,26 @@ impl GraphStatistics {
 
         csv_writer.flush()?;
         Ok(())
+    }
+
+    /// Adds the [`IntegritySummary`] when `options` enables a property.
+    pub fn with_integrity(
+        mut self,
+        graph: &Graph,
+        options: &crate::config::IntegrityOptions,
+    ) -> Self {
+        if options.is_enabled() {
+            let unreachable = crate::integrity::unreachable_keys(graph, &Key::name(&options.root));
+            self.integrity = Some(IntegritySummary {
+                links: options.links,
+                orphans: options.orphans,
+                root: options.root.clone(),
+                broken_link_count: self.broken_link_count,
+                unreachable_documents: unreachable.len(),
+                unreachable,
+            });
+        }
+        self
     }
 
     pub fn from_graph(graph: &Graph) -> Self {
@@ -718,6 +758,7 @@ impl GraphStatistics {
             most_connected,
             broken_link_count: broken_links.len(),
             broken_links,
+            integrity: None,
         }
     }
 }

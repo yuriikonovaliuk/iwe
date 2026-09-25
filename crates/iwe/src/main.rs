@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::io::Write;
 use std::path::PathBuf;
@@ -842,6 +843,13 @@ struct Create {
         help = "Validate the document against the configured schema before writing"
     )]
     strict: bool,
+
+    #[clap(
+        long,
+        value_name = "KEY",
+        help = "Key of an existing document to link the new one from: in the same commit, a list item `- [<title>](<key>)` is appended to the end of that document"
+    )]
+    link_from: Option<String>,
 
     #[clap(long, short = 'e', help = "Open created file in $EDITOR")]
     edit: bool,
@@ -2262,6 +2270,23 @@ fn create_command(args: Create) {
 
     prepared.content = normalize_content(&config, &prepared.key, &prepared.content);
 
+    if let Some(link_from) = &args.link_from {
+        let changes = link_from_changes(&config, &prepared, link_from);
+        if args.strict {
+            gate_pending(&config, &diwe::schema::pending_from_changes(&changes));
+        }
+        apply_changes(&changes, &config);
+        let path = prepared
+            .path
+            .canonicalize()
+            .unwrap_or_else(|_| prepared.path.clone());
+        println!("{}", path.display());
+        if args.edit {
+            open_in_editor(&path);
+        }
+        return;
+    }
+
     if args.strict {
         gate_pending(&config, &[(prepared.key.clone(), prepared.content.clone())]);
     }
@@ -2282,6 +2307,42 @@ fn create_command(args: Create) {
             std::process::exit(1);
         }
     }
+}
+
+/// `iwe create --link-from`: the new document plus the `link_from`
+/// document with a list item linking it appended, as one change set — one
+/// commit, so the page and the link to it land together or not at all.
+/// A `link_from` that does not exist is an error; nothing is written.
+fn link_from_changes(config: &Configuration, prepared: &PreparedDocument, link_from: &str) -> Changes {
+    let parent = Key::name(liwe::model::strip_doc_extension(link_from));
+    if parent == prepared.key {
+        eprintln!("Error: --link-from '{link_from}' names the document being created");
+        std::process::exit(1);
+    }
+    let parent_path = get_library_path(config).join(parent.to_path(config.format));
+    let Ok(parent_content) = std::fs::read_to_string(&parent_path) else {
+        eprintln!("Error: --link-from '{link_from}' does not exist; nothing was written");
+        std::process::exit(1);
+    };
+    let title = diwe::integrity::document_title(
+        &prepared.key,
+        &prepared.content,
+        config.format_options(),
+        config.library.frontmatter_document_title.clone(),
+    );
+    let linked = diwe::integrity::append_link_item(
+        &parent_content,
+        &parent,
+        &prepared.key,
+        &title,
+        &config.format_options(),
+    );
+    let changes = if prepared.path.exists() {
+        Changes::new().update(prepared.key.clone(), prepared.content.clone())
+    } else {
+        Changes::new().create(prepared.key.clone(), prepared.content.clone())
+    };
+    changes.update(parent, linked)
 }
 
 fn prepare_from_content(
@@ -2871,8 +2932,34 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
         }
     };
     let root = std::env::current_dir().expect("to get current dir");
+    let state = graph.export();
+    // `[integrity]`: this whole-store rewrite never goes through a
+    // validating backend, so it runs the same commit gate itself, under
+    // the lock it already holds, against what is on disk now.
+    if configuration.integrity.is_enabled() {
+        let before = diwe::fs::new_for_path(&get_library_path(configuration), configuration.format);
+        let mut after = before.clone();
+        after.extend(state.clone());
+        let graph_of = |state: &liwe::model::State| {
+            Graph::from_state(
+                state,
+                false,
+                configuration.format_options(),
+                configuration.library.frontmatter_document_title.clone(),
+            )
+        };
+        if let Err(violation) = diwe::integrity::check_commit(
+            &configuration.integrity,
+            &graph_of(&after),
+            || diwe::integrity::debt(&graph_of(&before), &configuration.integrity),
+        ) {
+            drop(guard);
+            eprintln!("Error: write rejected: {violation}");
+            std::process::exit(1);
+        }
+    }
     diwe::fs::write_store_at_path(
-        &graph.export(),
+        &state,
         &get_library_path(configuration),
         configuration.format,
         |key, content, prior_content| {
@@ -3166,6 +3253,18 @@ fn schema_validate_command(args: SchemaValidate) {
 
     let mut reports = run.reports;
     let mut checker_warnings = Vec::new();
+    // `[integrity]`: the same definitions and code the commit gate uses.
+    // `strict` properties fail the run; `no-new` debt is reported as a
+    // warning — with no pre-commit state to compare against, standing
+    // debt is not a failure. A selection keeps the reports keyed to it.
+    if args.schema_file.is_none() {
+        let selected: Option<HashSet<Key>> =
+            (!whole_graph).then(|| keys.iter().cloned().collect());
+        let integrity =
+            diwe::integrity::validation_reports(&config.integrity, &graph, selected.as_ref());
+        reports.extend(integrity.failing);
+        checker_warnings.extend(integrity.warnings);
+    }
     if whole_graph {
         match diwe::schema::check_invariants(&config, &graph) {
             Ok(failed) => reports.extend(failed),
@@ -3436,7 +3535,7 @@ fn stats_command(args: Stats) {
 
     match args.format {
         StatsFormat::Markdown => {
-            let stats = GraphStatistics::from_graph(&graph);
+            let stats = GraphStatistics::from_graph(&graph).with_integrity(&graph, &config.integrity);
             let output = render_stats(&stats);
             print!("{}", output);
         }
@@ -3448,12 +3547,12 @@ fn stats_command(args: Stats) {
             }
         }
         StatsFormat::Json => {
-            let stats = GraphStatistics::from_graph(&graph);
+            let stats = GraphStatistics::from_graph(&graph).with_integrity(&graph, &config.integrity);
             let json = serde_json::to_string_pretty(&stats).expect("Failed to serialize stats");
             println!("{}", json);
         }
         StatsFormat::Yaml => {
-            let stats = GraphStatistics::from_graph(&graph);
+            let stats = GraphStatistics::from_graph(&graph).with_integrity(&graph, &config.integrity);
             let yaml = serde_yaml::to_string(&stats).expect("Failed to serialize stats");
             print!("{}", yaml);
         }
