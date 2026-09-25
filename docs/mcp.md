@@ -15,6 +15,8 @@ You configure the server by pointing your AI tool to the `iwec` binary and setti
 | `--transport <stdio\|http>` | `stdio`     | Serve over stdio, or over HTTP                               |
 | `--host <HOST>`             | `127.0.0.1` | Address to bind to (only used with `--transport http`)       |
 | `--port <PORT>`             | `8000`      | Port to listen on (only used with `--transport http`)        |
+| `--state-dir <PATH>`        | none        | Keep sessions and open transactions on disk (HTTP only)      |
+| `--drain-timeout-secs <N>`  | `30`        | On SIGTERM/SIGINT, wait this long for open transactions      |
 
 With `--transport http` the server listens for Streamable HTTP connections at `http://<host>:<port>/mcp`:
 
@@ -29,6 +31,20 @@ iwec --transport http --host 0.0.0.0 --port 8000
 ```
 
 The server speaks plain HTTP, so put a reverse proxy in front of it for TLS or authentication when exposing it beyond localhost.
+
+#### Restarts
+
+With `--state-dir <PATH>` a restart of the HTTP server is invisible to connected clients. Each session's `initialize` parameters are kept in `<PATH>/sessions/` (one private file per session, removed when the client ends the session, pruned after 7 days without activity), so a client keeps using its `Mcp-Session-Id` after a restart without re-initializing. Session IDs must match `[A-Za-z0-9_-]{1,128}`; any other is answered `400`.
+
+Open transactions do not survive a restart, so the server never pretends they do. It records the key of every open transaction in `<PATH>/open-transactions.json`; on the next start each one becomes *lost*, and every write tool and `iwe_tx_commit` under that key is refused:
+
+```
+transaction session:<id> was dropped by a daemon restart at <time>; none of its staged writes were applied; call iwe_tx_abort to acknowledge, then begin again
+```
+
+This holds for an implicit (no-`handle`) transaction too: the session's next no-handle write is refused, not applied directly. `iwe_tx_abort` (or a new `iwe_tx_begin`) under the key clears it; reads are unaffected; a lost key is remembered across further restarts and forgotten after 24 hours. A transaction the idle reaper (`--tx-idle-timeout-secs`) force-aborts is refused the same way, with or without `--state-dir` (`... was force-aborted after <N>s idle at <time>; ...`).
+
+On SIGTERM or SIGINT the server refuses new `iwe_tx_begin` calls (`daemon is restarting, retry shortly`), keeps serving everything else, and waits up to `--drain-timeout-secs` for open transactions to commit or abort before exiting. A second signal ends the wait early. `--state-dir` is refused with `--transport stdio`.
 
 ## Tools
 

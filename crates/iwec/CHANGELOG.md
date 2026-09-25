@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-09-25 (iwe-plus; upstream iwe 0.24.2)
+
+### Added
+
+- `iwec --transport http --state-dir <PATH>`: a daemon restart is invisible to connected MCP clients. Each session's `initialize` parameters are kept in `<PATH>/sessions/` (one mode-0600 file per session, written atomically, removed when the client ends the session, pruned at startup after 7 days without activity), and a request naming a session the new process has never seen restores it, so `tools/list` and `tools/call` keep working under the same `Mcp-Session-Id` without re-initializing. Session IDs outside `[A-Za-z0-9_-]{1,128}` are answered `400`. Without the flag, sessions stay in memory as before.
+- Transactions a restart drops are refused by name, never bypassed. With `--state-dir`, the keys of all open transactions (explicit handles and session-derived implicit ones) are kept in `<PATH>/open-transactions.json`; at startup each becomes a lost-transaction tombstone, and every write tool and `iwe_tx_commit` under that key fails with `transaction <key> was dropped by a daemon restart at <time>; none of its staged writes were applied; call iwe_tx_abort to acknowledge, then begin again`. A session's no-handle write after its implicit transaction was lost is refused, not written to disk. `iwe_tx_abort` or `iwe_tx_begin` on the key clears the tombstone; reads are unaffected; tombstones survive further restarts and expire after 24 hours.
+- Graceful stop: the HTTP daemon handles SIGTERM (systemd's stop signal) as well as SIGINT. It refuses new `iwe_tx_begin` calls (`daemon is restarting, retry shortly`), keeps serving everything else, waits up to `--drain-timeout-secs` (default 30) for open transactions to commit or abort, logs which drained and which were dropped, then exits. Dropped ones are tombstoned on the next start via the state dir.
+
+### Fixed
+
+- A transaction force-aborted by the HTTP idle reaper (`--tx-idle-timeout-secs`) is tombstoned the same way (`transaction <key> was force-aborted after <N>s idle at <time>; ...`). Previously a session's next no-handle write after its implicit transaction was reaped found no transaction and landed directly on disk.
+
 ## [1.3.0] — 2026-09-25 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added

@@ -20,6 +20,7 @@ mod normalize_test;
 mod per_session_tx_handle_test;
 mod prompt_test;
 mod query_test;
+mod restart_resilience_test;
 mod resource_test;
 mod retrieve_test;
 mod schema_test;

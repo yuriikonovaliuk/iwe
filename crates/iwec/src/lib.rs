@@ -1,4 +1,5 @@
 mod compact_tools;
+pub mod durable;
 pub mod watcher;
 
 use std::collections::{HashMap, HashSet};
@@ -930,6 +931,58 @@ pub struct IweServer {
     /// `std` mutex, not tokio's: it is taken from the synchronous write
     /// paths and never held across an await.
     open_txs: Arc<std::sync::Mutex<HashMap<String, OpenTransaction>>>,
+    /// Transactions dropped while their agents still believe them open
+    /// (restart, idle reaper), the keys mid-commit, the optional on-disk
+    /// record of both, and the stop-signal drain flag — see [`TxGuard`].
+    tx_guard: Arc<TxGuard>,
+}
+
+/// Keeps an agent's writes from silently landing outside a transaction it
+/// believes is open. A transaction the daemon dropped — by a restart (read
+/// back from `<state-dir>/open-transactions.json`) or by the idle reaper —
+/// leaves a tombstone under its key; every write tool and `iwe_tx_commit`
+/// resolved to that key is refused with the tombstone's message until
+/// `iwe_tx_abort` acknowledges it or `iwe_tx_begin` starts afresh. Without
+/// this, a no-handle write from a session whose implicit transaction was
+/// dropped would find no transaction and be applied straight to disk.
+///
+/// Lock order: `open_txs` first, then `state`.
+#[derive(Default)]
+struct TxGuard {
+    state: std::sync::Mutex<TxGuardState>,
+    /// Set by `--state-dir` (HTTP only); `None` keeps everything in memory.
+    file: std::sync::OnceLock<durable::TxStateFile>,
+    /// Set on a stop signal: `iwe_tx_begin` is refused while open
+    /// transactions drain.
+    draining: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct TxGuardState {
+    lost: HashMap<String, durable::LostTransaction>,
+    /// Keys `iwe_tx_commit` has taken out of `open_txs` and not yet
+    /// finished with; still recorded as open on disk, so a crash mid-commit
+    /// tombstones them rather than forgetting them.
+    committing: HashSet<String>,
+}
+
+fn lost_transaction_error(lost: &durable::LostTransaction) -> McpError {
+    McpError::invalid_params(
+        lost.message(),
+        Some(serde_json::json!({
+            "iwe_error": "transaction_lost",
+            "handle": lost.key,
+            "cause": lost.cause,
+            "at": lost.at,
+        })),
+    )
+}
+
+fn daemon_draining_error() -> McpError {
+    McpError::invalid_params(
+        "daemon is restarting, retry shortly; no transaction was opened".to_string(),
+        Some(serde_json::json!({ "iwe_error": "daemon_draining" })),
+    )
 }
 
 /// The map key `open_txs` uses for a transaction begun without an
@@ -1599,7 +1652,12 @@ impl IweServer {
         }
 
         let dry_run = params.dry_run.unwrap_or(false);
-        let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
+        let writes = !dry_run && matches!(op, Operation::Update(_) | Operation::Delete(_));
+        let (graph_arc, _tx_lease) = if writes {
+            self.tx_graph(&handle, implicit_handle)?
+        } else {
+            self.tx_graph_for_read(&handle, implicit_handle)?
+        };
         let mut graph = graph_arc.lock().await;
 
         let index = match &op {
@@ -2087,6 +2145,9 @@ impl IweServer {
         // comment) — an explicit handle's transaction gets its own
         // private graph snapshot below and never touches this lock.
         let key = resolve_request_tx_handle(&params.handle, &context);
+        if self.is_draining() {
+            return Err(daemon_draining_error());
+        }
         let _graph = self.graph.lock().await;
         let mut open = self.open_txs.lock().expect("open transaction lock");
         if let Some(tx) = open.get_mut(&key) {
@@ -2137,6 +2198,34 @@ impl IweServer {
                 activity: Arc::new(TransactionActivity::default()),
             },
         );
+        // Beginning afresh on a lost transaction's key is the other way to
+        // acknowledge it. The key must be on disk as open before the agent
+        // is told it is: an unrecorded transaction would be forgotten by a
+        // restart instead of tombstoned.
+        let acknowledged = self
+            .tx_guard
+            .state
+            .lock()
+            .expect("transaction guard lock")
+            .lost
+            .remove(&key);
+        if let Err(error) = self.persist_tx_state(&open) {
+            if let Some(mut tx) = open.remove(&key) {
+                let _ = tx.backend.abort();
+            }
+            if let Some(lost) = acknowledged {
+                self.tx_guard
+                    .state
+                    .lock()
+                    .expect("transaction guard lock")
+                    .lost
+                    .insert(key.clone(), lost);
+            }
+            return Err(McpError::internal_error(
+                format!("transaction failed to begin: could not record it in the state dir: {error}"),
+                None,
+            ));
+        }
         drop(open);
 
         #[derive(Serialize)]
@@ -2163,12 +2252,43 @@ impl IweServer {
         let key = resolve_request_tx_handle(&params.handle, &context);
         let is_default = key == DEFAULT_TX_HANDLE;
         let mut graph = self.graph.lock().await;
-        let taken = self.open_txs.lock().expect("open transaction lock").remove(&key);
+        let taken = {
+            let mut open = self.open_txs.lock().expect("open transaction lock");
+            let taken = open.remove(&key);
+            if taken.is_some() {
+                // Still open as far as a restart is concerned until the
+                // outcome is known (see `TxGuardState::committing`).
+                self.tx_guard
+                    .state
+                    .lock()
+                    .expect("transaction guard lock")
+                    .committing
+                    .insert(key.clone());
+            }
+            taken
+        };
         let Some(mut tx) = taken else {
+            self.refuse_if_lost(&key)?;
             return Err(McpError::invalid_params(
                 "no transaction is open; call iwe_tx_begin first".to_string(),
                 None,
             ));
+        };
+        // Clears the mid-commit mark and rewrites the durable record on every
+        // exit from here (put back under `open_txs` first when retryable).
+        let finish = |server: &Self, reopen: Option<OpenTransaction>| {
+            let mut open = server.open_txs.lock().expect("open transaction lock");
+            if let Some(tx) = reopen {
+                open.insert(key.clone(), tx);
+            }
+            server
+                .tx_guard
+                .state
+                .lock()
+                .expect("transaction guard lock")
+                .committing
+                .remove(&key);
+            server.persist_tx_state_logged(&open);
         };
         let keys = tx.staged_keys();
         match tx.backend.commit_or_abort() {
@@ -2203,6 +2323,7 @@ impl IweServer {
                 }
                 self.record_journal_commit(collapse_effects(&tx.effects), None);
                 drop(graph);
+                finish(self, None);
                 #[derive(Serialize)]
                 struct TxCommitted {
                     status: &'static str,
@@ -2262,10 +2383,7 @@ impl IweServer {
                             let _ = tx.backend.write(write);
                         }
                     }
-                    self.open_txs
-                        .lock()
-                        .expect("open transaction lock")
-                        .insert(key, tx);
+                    finish(self, Some(tx));
                     return Err(McpError::invalid_params(
                         format!(
                             "transaction commit refused: {message}; nothing was written and the transaction remains open for retry"
@@ -2280,6 +2398,7 @@ impl IweServer {
                 // private graph (dropped with `tx` here), so the shared
                 // graph — and any other still-open transaction's own
                 // staged state — was never touched and needs no reload.
+                finish(self, None);
                 if is_default {
                     self.reload_graph_from_disk().await;
                 }
@@ -2304,10 +2423,42 @@ impl IweServer {
     ) -> Result<CallToolResult, McpError> {
         let key = resolve_request_tx_handle(&params.handle, &context);
         let is_default = key == DEFAULT_TX_HANDLE;
-        let taken = {
+        #[derive(Serialize)]
+        struct TxAborted {
+            status: &'static str,
+            discarded: Vec<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            acknowledged: Option<String>,
+        }
+        let (taken, acknowledged) = {
             let _graph = self.graph.lock().await;
-            self.open_txs.lock().expect("open transaction lock").remove(&key)
+            let mut open = self.open_txs.lock().expect("open transaction lock");
+            let taken = open.remove(&key);
+            // Aborting a lost transaction acknowledges its tombstone.
+            let acknowledged = if taken.is_none() {
+                self.tx_guard
+                    .state
+                    .lock()
+                    .expect("transaction guard lock")
+                    .lost
+                    .remove(&key)
+                    .filter(|lost| !lost.expired(chrono::Utc::now()))
+            } else {
+                None
+            };
+            if taken.is_some() || acknowledged.is_some() {
+                self.persist_tx_state_logged(&open);
+            }
+            (taken, acknowledged)
         };
+        if let Some(lost) = acknowledged {
+            tracing::info!(handle = %key, "lost transaction acknowledged by iwe_tx_abort");
+            return to_json_result(&TxAborted {
+                status: "aborted",
+                discarded: Vec::new(),
+                acknowledged: Some(lost.message()),
+            });
+        }
         let Some(mut tx) = taken else {
             return Err(McpError::invalid_params(
                 "no transaction is open".to_string(),
@@ -2325,14 +2476,10 @@ impl IweServer {
             self.reload_graph_from_disk().await;
         }
 
-        #[derive(Serialize)]
-        struct TxAborted {
-            status: &'static str,
-            discarded: Vec<String>,
-        }
         to_json_result(&TxAborted {
             status: "aborted",
             discarded: keys,
+            acknowledged: None,
         })
     }
 }
@@ -2647,6 +2794,7 @@ impl IweServer {
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
             open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tx_guard: Arc::new(TxGuard::default()),
         }
     }
 
@@ -2669,11 +2817,118 @@ impl IweServer {
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
             open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tx_guard: Arc::new(TxGuard::default()),
         }
     }
 
     pub fn from_documents(documents: Vec<(&str, &str)>) -> Self {
         Self::from_documents_with_config(documents, Configuration::default())
+    }
+
+    /// Turns on the durable transaction record under `--state-dir`: every
+    /// key the previous process still had open becomes a restart tombstone
+    /// (stamped now), unexpired tombstones carry over, and the file is
+    /// rewritten with nothing open. Returns the tombstones now standing.
+    /// Call once, before serving.
+    pub fn enable_tx_state(
+        &self,
+        file: durable::TxStateFile,
+    ) -> std::io::Result<Vec<durable::LostTransaction>> {
+        let snapshot = file.load()?;
+        let now = chrono::Utc::now();
+        let open = self.open_txs.lock().expect("open transaction lock");
+        {
+            let mut state = self.tx_guard.state.lock().expect("transaction guard lock");
+            for lost in snapshot.lost {
+                if !lost.expired(now) {
+                    state.lost.insert(lost.key.clone(), lost);
+                }
+            }
+            for key in snapshot.open {
+                let lost = durable::LostTransaction::now(&key, durable::LostCause::Restart, None);
+                state.lost.insert(key, lost);
+            }
+        }
+        if self.tx_guard.file.set(file).is_err() {
+            return Err(std::io::Error::other("transaction state file already enabled"));
+        }
+        self.persist_tx_state(&open)?;
+        let state = self.tx_guard.state.lock().expect("transaction guard lock");
+        let mut lost: Vec<_> = state.lost.values().cloned().collect();
+        lost.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(lost)
+    }
+
+    /// Rewrites `open-transactions.json` (when `--state-dir` is set) from
+    /// `open` — the caller's held `open_txs` guard — plus the keys mid-commit
+    /// and the unexpired tombstones.
+    fn persist_tx_state(&self, open: &HashMap<String, OpenTransaction>) -> std::io::Result<()> {
+        let Some(file) = self.tx_guard.file.get() else {
+            return Ok(());
+        };
+        let now = chrono::Utc::now();
+        let mut state = self.tx_guard.state.lock().expect("transaction guard lock");
+        state.lost.retain(|_, lost| !lost.expired(now));
+        let mut keys: HashSet<String> = open.keys().cloned().collect();
+        keys.extend(state.committing.iter().cloned());
+        let lost: Vec<_> = state.lost.values().cloned().collect();
+        file.save(&keys, &lost)
+    }
+
+    /// [`Self::persist_tx_state`] for a caller that must not fail on it:
+    /// logs instead.
+    fn persist_tx_state_logged(&self, open: &HashMap<String, OpenTransaction>) {
+        if let Err(error) = self.persist_tx_state(open) {
+            tracing::error!(%error, "failed to record open transactions in the state dir");
+        }
+    }
+
+    /// The standing tombstone for `key`, if any (an expired one is dropped).
+    fn lost_transaction(&self, key: &str) -> Option<durable::LostTransaction> {
+        let mut state = self.tx_guard.state.lock().expect("transaction guard lock");
+        match state.lost.get(key) {
+            Some(lost) if lost.expired(chrono::Utc::now()) => {
+                state.lost.remove(key);
+                None
+            }
+            other => other.cloned(),
+        }
+    }
+
+    /// Refuses with the tombstone's error when `key` names a lost transaction.
+    fn refuse_if_lost(&self, key: &str) -> Result<(), McpError> {
+        match self.lost_transaction(key) {
+            Some(lost) => Err(lost_transaction_error(&lost)),
+            None => Ok(()),
+        }
+    }
+
+    /// Stop signal received: refuse new `iwe_tx_begin` calls from now on,
+    /// while everything else keeps being served.
+    pub fn begin_draining(&self) {
+        self.tx_guard
+            .draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_draining(&self) -> bool {
+        self.tx_guard
+            .draining
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Every transaction key open or mid-commit right now, sorted.
+    pub fn open_transaction_keys(&self) -> Vec<String> {
+        let open = self.open_txs.lock().expect("open transaction lock");
+        let state = self.tx_guard.state.lock().expect("transaction guard lock");
+        let mut keys: Vec<String> = open
+            .keys()
+            .chain(state.committing.iter())
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 
     /// Force-aborts transactions that have not been touched for `idle_timeout`.
@@ -2691,10 +2946,33 @@ impl IweServer {
                         .then(|| key.clone())
                 })
                 .collect();
-            expired_keys
+            let expired = expired_keys
                 .into_iter()
                 .filter_map(|key| open.remove(&key).map(|tx| (key, tx)))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // Tombstone each reaped key before `open_txs` is released: the
+            // agent still believes the transaction open, and without the
+            // tombstone its next no-handle write would find no transaction
+            // and land directly on disk.
+            if !expired.is_empty() {
+                {
+                    let mut state = self.tx_guard.state.lock().expect("transaction guard lock");
+                    let now = chrono::Utc::now();
+                    state.lost.retain(|_, lost| !lost.expired(now));
+                    for (key, _) in &expired {
+                        state.lost.insert(
+                            key.clone(),
+                            durable::LostTransaction::now(
+                                key,
+                                durable::LostCause::Idle,
+                                Some(idle_timeout.as_secs()),
+                            ),
+                        );
+                    }
+                }
+                self.persist_tx_state_logged(&open);
+            }
+            expired
         };
 
         let reaped = expired.len();
@@ -2736,6 +3014,7 @@ impl IweServer {
             index: Arc::new(Mutex::new(None)),
             seen: Arc::new(Mutex::new(HashSet::new())),
             open_txs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tx_guard: Arc::new(TxGuard::default()),
         }
     }
 
@@ -2926,6 +3205,12 @@ impl IweServer {
                 tx.touch();
                 return Ok(());
             }
+            // A dropped transaction's key never falls through to a direct
+            // write (see `TxGuard`); `tx_graph` already refused it, this is
+            // the last line.
+            if let Some(lost) = self.lost_transaction(&tx_key) {
+                return Err(WriteError::Rejected(lost.message()));
+            }
             // An explicit handle that names no open transaction is a
             // caller error, not a silent fall-through to an unstaged
             // direct write — only the default (omitted) handle falls
@@ -3067,10 +3352,32 @@ impl IweServer {
     /// explicit handle names no open transaction, rather than silently
     /// falling back to the shared graph and bypassing the isolation the
     /// caller asked for by naming a handle at all.
+    ///
+    /// A key with a lost-transaction tombstone is refused outright (see
+    /// [`TxGuard`]): every write tool comes through here first.
     fn tx_graph(
         &self,
         handle: &Option<String>,
         implicit_handle: bool,
+    ) -> Result<(Arc<Mutex<Graph>>, Option<TransactionLease>), McpError> {
+        self.tx_graph_checked(handle, implicit_handle, true)
+    }
+
+    /// [`Self::tx_graph`] for a read-only request (`iwe_query` find/count or
+    /// a dry run): a tombstone does not block reads.
+    fn tx_graph_for_read(
+        &self,
+        handle: &Option<String>,
+        implicit_handle: bool,
+    ) -> Result<(Arc<Mutex<Graph>>, Option<TransactionLease>), McpError> {
+        self.tx_graph_checked(handle, implicit_handle, false)
+    }
+
+    fn tx_graph_checked(
+        &self,
+        handle: &Option<String>,
+        implicit_handle: bool,
+        refuse_lost: bool,
     ) -> Result<(Arc<Mutex<Graph>>, Option<TransactionLease>), McpError> {
         let key = resolve_tx_handle(handle);
         let mut open = self.open_txs.lock().expect("open transaction lock");
@@ -3079,6 +3386,9 @@ impl IweServer {
                 tx.touch();
                 let lease = TransactionLease::acquire(tx.activity.clone());
                 Ok((tx.graph.clone(), Some(lease)))
+            }
+            None if refuse_lost && self.lost_transaction(&key).is_some() => {
+                Err(self.refuse_if_lost(&key).expect_err("tombstone present"))
             }
             None if implicit_handle => Ok((self.graph.clone(), None)),
             None => Err(McpError::invalid_params(
@@ -3290,6 +3600,9 @@ impl IweServer {
     ) -> Result<(), WriteError> {
         if let Some(staged) = self.stage_changes(changes, handle) {
             return staged.map_err(WriteError::Rejected);
+        }
+        if let Some(lost) = self.lost_transaction(&resolve_tx_handle(handle)) {
+            return Err(WriteError::Rejected(lost.message()));
         }
         // Same guard as `write_file`: an explicit handle naming no open
         // transaction is a caller error, not a silent unstaged write.

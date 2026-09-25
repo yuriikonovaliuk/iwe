@@ -50,3 +50,21 @@ but never runs them.
 Both services set `MemoryMax=1500M`, roughly 1.7 times the observed
 600–900 MB post-write RSS range.  `Restart=on-failure` ensures an OOM-killed
 server is replaced by a fresh, small-footprint process.
+
+## Restarts (iwe-plus 1.4.0+)
+
+`iwec --state-dir <PATH>` makes a restart invisible to connected MCP clients
+and turns transactions a restart drops into explicit refusals; see
+`docs/mcp.md`, "Restarts".  The committed units do not pass it yet: the flag
+needs the 1.4.0 binary installed first (an older `iwec` refuses to start on an
+unknown flag), and `PATH` must be writable by `iwe-store`, e.g.
+
+```sh
+sudo -u iwe-store install -d -m 0700 /var/lib/iwe-store/iwec-state/iwe-memory /var/lib/iwe-store/iwec-state/mind
+# then add to each ExecStart:  --state-dir /var/lib/iwe-store/iwec-state/<store>
+```
+
+On `systemctl --user stop`/`restart`, systemd sends SIGTERM to `sudo`, which
+relays it to `iwec`; iwec drains open transactions for up to
+`--drain-timeout-secs` (default 30, below systemd's 90 s stop timeout) before
+exiting.
