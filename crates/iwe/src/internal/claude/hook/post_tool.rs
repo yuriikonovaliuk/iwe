@@ -6,8 +6,7 @@ use diwe::search_query::build_index;
 use diwe::stats::{mutation_findings, Rule};
 use liwe::model::Key;
 
-use crate::internal::claude::hook::store::{enter_memory_store, library_path_of, HookPayload};
-use crate::new::normalize_content;
+use crate::internal::claude::hook::store::{enter_memory_store, workspace_path_of, HookPayload};
 
 const EDITOR_TOOLS: [&str; 3] = ["Write", "Edit", "MultiEdit"];
 const WRITE_VERBS: [&str; 5] = ["create", "update", "rename", "delete", "attach"];
@@ -45,36 +44,20 @@ fn editor_report(payload: &HookPayload) -> Option<PostToolReport> {
         return None;
     }
 
-    let library = library_path_of(config);
-    let key = key_within(&library, &written)?;
+    let workspace = workspace_path_of(config);
+    let key = key_within(&workspace, &written)?;
     if is_machinery(&key) {
         return None;
     }
 
-    let path = document_path(config, &library, &key);
-    let raw = std::fs::read_to_string(&path).ok()?;
+    let path = document_path(config, &workspace, &key);
+    let content = std::fs::read_to_string(&path).ok()?;
+    let report = schema_report(config, &key, &content)?;
 
-    let mut notices = Vec::new();
-    let mut context = Vec::new();
-
-    let content = match normalized_in_place(config, &key, &path, &raw) {
-        Some(content) => {
-            notices.push(format!("iwe normalized {}", path.display()));
-            context.push(format!(
-                "`{}` was written outside the CLI, so it landed unnormalized. It has been rewritten into this store's canonical form — re-read it before editing it again, and prefer `iwe update -k {} --strict --content -`, which normalizes and validates on the way in.",
-                key, key
-            ));
-            content
-        }
-        None => raw,
-    };
-
-    if let Some(report) = schema_report(config, &key, &content) {
-        notices.push(format!("iwe: {} does not match its schema", key));
-        context.push(report);
-    }
-
-    report_of(notices, context)
+    report_of(
+        vec![format!("iwe: {} does not match its schema", key)],
+        vec![report],
+    )
 }
 
 fn command_report(payload: &HookPayload) -> Option<PostToolReport> {
@@ -87,12 +70,12 @@ fn command_report(payload: &HookPayload) -> Option<PostToolReport> {
 
     let store = enter_memory_store(payload.text("cwd"))?;
     let config = store.config();
-    let library = library_path_of(config);
+    let workspace = workspace_path_of(config);
 
     let stdout = payload
         .nested("tool_response", "stdout")
         .unwrap_or_default();
-    let keys: Vec<Key> = written_keys(&library, &stdout)
+    let keys: Vec<Key> = written_keys(&workspace, &stdout)
         .into_iter()
         .filter(|key| !is_machinery(key))
         .collect();
@@ -104,7 +87,7 @@ fn command_report(payload: &HookPayload) -> Option<PostToolReport> {
         let failing: Vec<(&Key, String)> = keys
             .iter()
             .filter_map(|key| {
-                let path = document_path(config, &library, key);
+                let path = document_path(config, &workspace, key);
                 let content = std::fs::read_to_string(&path).ok()?;
                 schema_report(config, key, &content).map(|report| (key, report))
             })
@@ -149,20 +132,6 @@ fn report_of(notices: Vec<String>, context: Vec<String>) -> Option<PostToolRepor
     })
 }
 
-fn normalized_in_place(
-    config: &Configuration,
-    key: &Key,
-    path: &Path,
-    raw: &str,
-) -> Option<String> {
-    let normalized = normalize_content(config, key, raw);
-    if normalized == raw {
-        return None;
-    }
-    std::fs::write(path, &normalized).ok()?;
-    Some(normalized)
-}
-
 fn schema_report(config: &Configuration, key: &Key, content: &str) -> Option<String> {
     let run = validate_pending_documents(config, &[(key.clone(), content.to_string())]).ok()?;
     if run.reports.is_empty() {
@@ -175,18 +144,18 @@ fn schema_report(config: &Configuration, key: &Key, content: &str) -> Option<Str
     ))
 }
 
-fn document_path(config: &Configuration, library: &Path, key: &Key) -> PathBuf {
-    library.join(format!("{}.{}", key, config.format.extension()))
+fn document_path(config: &Configuration, workspace: &Path, key: &Key) -> PathBuf {
+    workspace.join(format!("{}.{}", key, config.format.extension()))
 }
 
 fn is_machinery(key: &Key) -> bool {
     key.to_string() == "MEMORY"
 }
 
-fn key_within(library: &Path, path: &Path) -> Option<Key> {
-    let library = library.canonicalize().ok()?;
+fn key_within(workspace: &Path, path: &Path) -> Option<Key> {
+    let workspace = workspace.canonicalize().ok()?;
     let path = path.canonicalize().ok()?;
-    let relative = path.strip_prefix(&library).ok()?;
+    let relative = path.strip_prefix(&workspace).ok()?;
 
     let name = relative
         .with_extension("")
@@ -237,7 +206,7 @@ fn verb_of<'a>(tokens: &[&'a str]) -> Option<&'a str> {
     None
 }
 
-fn written_keys(library: &Path, stdout: &str) -> Vec<Key> {
+fn written_keys(workspace: &Path, stdout: &str) -> Vec<Key> {
     let mut keys: Vec<Key> = Vec::new();
 
     for line in stdout.lines() {
@@ -248,7 +217,7 @@ fn written_keys(library: &Path, stdout: &str) -> Vec<Key> {
                 .map(Key::name)
         }) {
             Some(key) => Some(key),
-            None => key_within(library, Path::new(line)),
+            None => key_within(workspace, Path::new(line)),
         };
 
         if let Some(key) = found {

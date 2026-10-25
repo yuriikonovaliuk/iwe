@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, MarkdownOptions, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, write};
 use std::path::Path;
@@ -10,8 +10,9 @@ fn setup() -> TempDir {
     let path = dir.path();
     create_dir_all(path.join(".iwe")).unwrap();
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
+            locale: Some("en".to_string()),
             ..Default::default()
         },
         markdown: MarkdownOptions {
@@ -257,8 +258,9 @@ fn setup_chain() -> TempDir {
     let path = dir.path();
     create_dir_all(path.join(".iwe")).unwrap();
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
+            locale: Some("en".to_string()),
             ..Default::default()
         },
         markdown: MarkdownOptions {

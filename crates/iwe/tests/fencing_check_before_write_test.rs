@@ -59,7 +59,7 @@ fn store_with_docs(docs: &[(&str, &str)]) -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     create_dir_all(temp.path().join(".iwe")).expect("mkdir .iwe");
     let mut config = Configuration::default();
-    config.library.path = "".to_string();
+    config.workspace.path = "".to_string();
     config.markdown.refs_extension = "".to_string();
     write(
         temp.path().join(".iwe/config.toml"),

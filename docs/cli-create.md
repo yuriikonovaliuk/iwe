@@ -5,7 +5,7 @@ Creates a document in one of two explicit modes.
 | Mode         | Selected by            | Who composes the document           | Key                                    |
 | ------------ | ---------------------- | ----------------------------------- | -------------------------------------- |
 | **Content**  | default                | you — `--content` is the whole file | required                               |
-| **Template** | `--template` / `-t`    | iwe — a named template renders your variables | derived from `key_template`, or explicit |
+| **Template** | `--template` / `-t`    | IWE — a named template renders your variables | derived from `key_template`, or explicit |
 
 The mode is never inferred from the shape of the input. `--content` and `--template` are mutually exclusive.
 
@@ -84,7 +84,7 @@ Because the key is explicit it *is* the document's identity, so `--if-exists` ac
 
 ## Template mode
 
-`--template NAME` composes the document from a template in `.iwe/config.toml`. The name is always required — nothing about template mode is implicit: `--var`, `--vars-yaml`, `--vars-json` and `--set` all require `--template`, and `--template` in turn requires a name. (`library.default_template` applies to [`iwe new`](cli-new.md) only.)
+`--template NAME` composes the document from a template in `.iwe/config.toml`. The name is always required — nothing about template mode is implicit: `--var`, `--vars-yaml`, `--vars-json` and `--set` all require `--template`, and `--template` in turn requires a name. (`workspace.default_template` applies to [`iwe new`](cli-new.md) only.)
 
 ``` bash
 # The stock template shipped in every configuration
@@ -116,11 +116,11 @@ Those two produce identical documents: `draft` is a boolean for `{% if draft %}`
 
 The bulk mapping is applied first and every `--var` overrides it, **wherever the flags sit on the command line** — `--var title=A --vars-yaml 'title: B'` still yields `A`. Among `--var` flags alone the last one for a name wins. Values are replaced wholesale; there is no deep merge.
 
-Because `--var` values are strings, `--var draft=false` is the **string** `"false"`, which `{% if draft %}` reads as true. Write `draft: false` in `--vars-yaml` when you mean the boolean. Shell quoting is stripped before iwe sees the argument, so a value-typing rule on `--var` could only ever guess; strings-only removes the guess.
+Because `--var` values are strings, `--var draft=false` is the **string** `"false"`, which `{% if draft %}` reads as true. Write `draft: false` in `--vars-yaml` when you mean the boolean. Shell quoting is stripped before IWE sees the argument, so a value-typing rule on `--var` could only ever guess; strings-only removes the guess.
 
 - `body` is the prose slot by convention. `{{content}}` is a legacy alias for `{{body}}` in templates — `content` names the same variable, and setting both is an error.
 - Template mode never reads stdin — piped input belongs to content mode. Every variable arrives through a flag; a variable no flag sets renders as empty.
-- `slug`, `today`, `now` and `id` are computed by iwe and cannot be set as variables, in any of the three forms.
+- `slug`, `today`, `now` and `id` are computed by IWE and cannot be set as variables, in any of the three forms.
 - The key derivation and `{{slug}}` read the `title` variable. `title` and `body` are ordinary variables by convention, not privileged parameters — a template that uses neither simply ignores them.
 - `--vars-yaml ''` and `--vars-json ''` are errors; `--vars-yaml '{}'` is a valid no-op. A `--var` argument without `=` that looks like a mapping points you at `--vars-yaml`.
 - A null variable value (`body: null`, `body: ~`, or a bare `body:`) is rejected — the template would render it as the text `none`. Pass `''` for an empty value.
@@ -185,8 +185,8 @@ Without a `<KEY>` the key comes from the template's `key_template`. With a `<KEY
 | `{{title}}`   | The `title` variable                                                                            |
 | `{{body}}`    | The `body` variable. `{{content}}` is a legacy alias                                            |
 | `{{slug}}`    | URL-safe form of the `title` variable                                                           |
-| `{{today}}`   | Current date — `library.date_format` for the key, `markdown.date_format` for the document       |
-| `{{now}}`     | Current date and time — `library.time_format` / `markdown.time_format`, each falling back to the matching `date_format` |
+| `{{today}}`   | Current date — `workspace.date_format` for the key, `markdown.date_format` for the document       |
+| `{{now}}`     | Current date and time — `workspace.time_format` / `markdown.time_format`, each falling back to the matching `date_format` |
 | `{{id}}`      | Random 8-character alphanumeric ID                                                              |
 
 Any other name passed with `--var`, `--vars-yaml` or `--vars-json` is available under that name.
@@ -227,6 +227,6 @@ iwe create docs/one --content "$(cat one.md)" --strict
 ## See also
 
 - [`iwe update`](cli-update.md) — replace or mutate an existing document
-- [`iwe new`](cli-new.md) — title-first quick capture with `library.default_template`
+- [`iwe new`](cli-new.md) — title-first quick capture with `workspace.default_template`
 - [Document Schema](document-schema.md#11-freeze) — a write to a frozen document, or a property a schema marks `mutable: false`, is rejected regardless of `--strict`.
 - [Transactions](transactions.md) — how a write (or a batch of writes) reaches durable storage.

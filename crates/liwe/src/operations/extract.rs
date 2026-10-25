@@ -5,7 +5,7 @@ use itertools::Itertools;
 use crate::graph::{Graph, GraphContext};
 use crate::model::config::LinkType;
 use crate::model::ids::alloc_node_id;
-use crate::model::node::{Node, NodeIter, Reference, ReferenceType};
+use crate::model::node::{Node, NodeIter, Reference, ReferenceType, Target};
 use crate::model::tree::Tree;
 use crate::model::{Key, NodeId};
 
@@ -133,13 +133,11 @@ fn extract_section_rec(
             Tree {
                 id: alloc_node_id(),
                 line_range: None,
-                node: Node::Reference(Reference {
-                    key: new_key.clone(),
-                    text: title.to_string(),
+                node: Node::Reference(Reference::plain(
+                    Target::for_key(new_key, reference_type),
+                    title,
                     reference_type,
-                    url: new_key.to_library_url(),
-                    display_url: None,
-                }),
+                )),
                 children: vec![],
             },
         );

@@ -23,6 +23,7 @@ pub use argue::{
     argue, diagnose, render_diagnosis_text, render_text as render_argument_text, Argument,
     Diagnosis, Status as ArgueStatus,
 };
+pub use crate::collation::Collation;
 pub use builder::{
     ParseError, build_filter_value, build_projection, build_update_doc, check_path_segments, parse_expect, parse_filter_expression, parse_filter_mapping, parse_operation,
 };

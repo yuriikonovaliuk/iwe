@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, MarkdownOptions, WikiLinkPath, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, write};
 use std::process::Command;
@@ -474,18 +474,50 @@ fn setup_empty_workspace() -> TempDir {
     temp_dir
 }
 
-fn setup_iwe_config(temp_path: &std::path::Path) {
-    create_dir_all(temp_path.join(".iwe")).expect("Failed to create .iwe directory");
-
-    let config = Configuration {
-        library: LibraryOptions {
-            path: "".to_string(),
+#[test]
+fn test_squash_writes_resolved_wiki_link_in_full_mode() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_path = temp_dir.path();
+    setup_iwe_config_with(
+        temp_path,
+        MarkdownOptions {
+            refs_extension: "".to_string(),
+            wiki_link_path: WikiLinkPath::Full,
             ..Default::default()
         },
-        markdown: MarkdownOptions {
+    );
+    create_dir_all(temp_path.join("sub")).expect("Should create sub directory");
+    write(temp_path.join("main.md"), "# Main\n\ntext [[target]]\n")
+        .expect("Should write main file");
+    write(temp_path.join("sub/target.md"), "# Target\n").expect("Should write target file");
+
+    let output = run_squash_command(temp_path, &["main"]);
+
+    assert_eq!(
+        "# Main\n\ntext [[sub/target]]\n",
+        String::from_utf8(output.stdout).expect("Valid UTF-8 output")
+    );
+}
+
+fn setup_iwe_config(temp_path: &std::path::Path) {
+    setup_iwe_config_with(
+        temp_path,
+        MarkdownOptions {
             refs_extension: "".to_string(),
             ..Default::default()
         },
+    );
+}
+
+fn setup_iwe_config_with(temp_path: &std::path::Path, markdown: MarkdownOptions) {
+    create_dir_all(temp_path.join(".iwe")).expect("Failed to create .iwe directory");
+
+    let config = Configuration {
+        workspace: WorkspaceOptions {
+            path: "".to_string(),
+            ..Default::default()
+        },
+        markdown,
         ..Default::default()
     };
 

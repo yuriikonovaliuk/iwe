@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-10-25 (iwe-plus; upstream iwe 0.29.1)
+
+### Changed
+
+- Merged upstream iwe 0.29.1. Tool behaviour is unchanged; `iwe_find` sorting is locale-aware (`workspace.locale`), and the config it reads calls the document directory `[workspace]` (an older `[library]` is migrated in place).
+
 ## [1.5.0] — 2026-09-26 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added
@@ -60,6 +66,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `iwe_argue` tool: the dialectical standing of claims and objections (grounded semantics with deductive support), optionally restricted by key or filter; `explain: true` returns the diagnosis (root cycles and the moves that break them, downstream, defeated, pending) instead. Filters accept `$standing`.
+
+### Changed
+- Read tools no longer wait for each other; only writes run exclusively
+
+### Fixed
+- Changes picked up by the file watcher could briefly replace a newer write to the same document, or drop a document that was deleted and recreated
+- A failed file write no longer leaves the server's graph showing changes that never reached disk
+
+## [0.29.1](https://github.com/iwe-org/iwe/compare/iwec-v0.29.0...iwec-v0.29.1) - 2026-10-24
+
+### Fixed
+- `iwe_rename` keeps `#section` anchors in wiki links such as `[[note#section]]` (previously these links were left pointing at the old name)
+
+## [0.29.0](https://github.com/iwe-org/iwe/compare/iwec-v0.28.0...iwec-v0.29.0) - 2026-10-20
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.28.0](https://github.com/iwe-org/iwe/compare/iwec-v0.27.0...iwec-v0.28.0) - 2026-10-17
+
+### Added
+
+- `iwe_query` accepts `sort: { field: { order, collation } }` with `binary` for codepoint order or a locale tag such as `sv-SE`
+
+### Changed
+
+- `iwe_find` and `iwe_query` `sort` on text fields use locale-aware collation: case and accents no longer split results, `Note 2` sorts before `Note 10` and emoji are ignored except to break ties (previously byte order)
+- The collation language comes from `workspace.locale` in `.iwe/config.toml`, falling back to the system locale and then English
+
+## [0.27.0](https://github.com/iwe-org/iwe/compare/iwec-v0.26.1...iwec-v0.27.0) - 2026-10-16
+
+### Changed
+
+- `iwe_rename` keeps `[[Name]]` links as they are when a note moves to another folder under the same file name, and otherwise writes the shortest name that resolves (previously every link was rewritten to the full path)
+- `iwe_rename` rewrites a `[[Name]]` link to another note that would otherwise start pointing at the renamed note, so it keeps its target
+
+## [0.26.1](https://github.com/iwe-org/iwe/compare/iwec-v0.26.0...iwec-v0.26.1) - 2026-10-08
+
+### Fixed
+
+- `iwe_query` no longer hangs when a query reaches a link to a missing document or to a non-markdown file
+
+## [0.26.0](https://github.com/iwe-org/iwe/compare/iwec-v0.25.0...iwec-v0.26.0) - 2026-10-07
+
+### Fixed
+
+- Every tool that writes a document keeps a link to a directory as written (`[docs](docs/)` no longer becomes `[docs](docs.md)`) and keeps code spans and emphasis inside link text instead of flattening them to plain words.
+
+## [0.25.0](https://github.com/iwe-org/iwe/compare/iwec-v0.24.2...iwec-v0.25.0) - 2026-10-02
+
+### Changed
+
+- The `iwe://config` resource reports the document collection under a `workspace` object (was `library`).
+- The `[library]` configuration table is now `[workspace]`. A config that still says `[library]` keeps working.
+
+### Fixed
+
+- `iwe_retrieve` and the `review` / `refactor` prompts reject an unknown key with a `Document '<key>' not found` error instead of returning an empty placeholder document; `keys` used as the candidate set for `search` / `fuzzy` still match nothing.
+- `iwe_tree` rejects unknown `keys` instead of silently leaving them out of the result.
+
+### Deprecated
+
+- The `iwe://config` resource still carries a `library` object, a copy of `workspace`, for clients that read the old name.
 
 ## [0.24.2](https://github.com/iwe-org/iwe/compare/iwec-v0.24.1...iwec-v0.24.2) - 2026-09-20
 

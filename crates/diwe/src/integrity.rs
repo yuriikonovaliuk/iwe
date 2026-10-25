@@ -69,7 +69,7 @@ pub fn reachable_from(graph: &Graph, root: &Key) -> HashSet<Key> {
         let inclusions = graph
             .get_inclusion_edges_in(&key)
             .into_iter()
-            .filter_map(|id| graph.graph_node(id).ref_key());
+            .filter_map(|id| graph.reference_target_key(id));
         for target in inclusions.chain(graph.get_reference_edges_in(&key)) {
             if !seen.contains(&target) && graph.has_key(&target) {
                 seen.insert(target.clone());

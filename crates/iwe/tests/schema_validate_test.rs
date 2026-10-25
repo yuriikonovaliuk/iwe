@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions, Patterns, SchemaBinding};
+use diwe::config::{Configuration, MarkdownOptions, Patterns, SchemaBinding, WorkspaceOptions};
 use indoc::indoc;
 use serde_json::json;
 use std::collections::HashMap;
@@ -482,7 +482,7 @@ fn binding(name: &str, pattern: &str) -> HashMap<String, SchemaBinding> {
 
 fn write_config(path: &std::path::Path, schemas: HashMap<String, SchemaBinding>) {
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },
@@ -727,7 +727,7 @@ fn write_config_with_invariants(
     invariants: HashMap<String, diwe::config::Invariant>,
 ) {
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },
@@ -1427,7 +1427,7 @@ fn write_config_with_checkers(
     checkers: HashMap<String, diwe::config::Checker>,
 ) {
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

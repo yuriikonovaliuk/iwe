@@ -5,7 +5,7 @@
 // command reaches it or whether `--strict` is passed. Layer-free fixtures
 // only: no `origin:`/`mint:`/package vocabulary.
 
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, WorkspaceOptions, MarkdownOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, read_to_string, write};
 use std::path::Path;
@@ -17,7 +17,7 @@ fn setup(docs: Vec<(&str, &str)>) -> TempDir {
     let temp_path = temp_dir.path();
     create_dir_all(temp_path.join(".iwe")).expect("mkdir .iwe");
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

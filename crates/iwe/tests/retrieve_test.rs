@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions, RefsText};
+use diwe::config::{Configuration, MarkdownOptions, RefsText, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, write};
 use std::process::Command;
@@ -11,7 +11,7 @@ fn setup_workspace() -> TempDir {
     create_dir_all(temp_path.join(".iwe")).expect("Failed to create .iwe directory");
 
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },
@@ -3029,4 +3029,17 @@ fn test_retrieve_with_frontmatter_then_update_round_trips_byte_identical() {
         std::fs::read_to_string(dir.path().join("test-doc.md")).unwrap(),
         FRONTMATTER_DOC
     );
+}
+
+#[test]
+fn test_retrieve_lists_every_missing_document() {
+    let dir = setup_workspace();
+    write(dir.path().join("one.md"), "# One\n").expect("Should write document");
+
+    let (stdout, stderr, success) =
+        run_iwe(dir.path(), &["-k", "one", "-k", "missing", "-k", "other"]);
+
+    assert!(!success);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "Error: Documents not found: 'missing', 'other'\n");
 }

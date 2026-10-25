@@ -1,8 +1,7 @@
 use crate::model::config::RefsPath;
 use crate::model::inline::{prepend_checkbox, Inline, Inlines};
-use crate::model::node::{Node, NodeIter, ReferenceType};
+use crate::model::node::{Node, NodeIter, Reference, ReferenceType, Target};
 use crate::model::writer::Block;
-use crate::model::Key;
 
 pub struct Projector {
     header_level: usize,
@@ -37,11 +36,19 @@ impl Projector {
         }
     }
 
-    fn regular_url(&self, key: &Key, original_url: &str) -> String {
-        let base = key.link_url(&self.parent, self.refs_path);
-        match original_url.split_once('#') {
-            Some((_, fragment)) => format!("{base}#{fragment}"),
-            None => base,
+    fn reference_url(&self, reference: &Reference) -> String {
+        match (&reference.target, reference.reference_type) {
+            (Target::Path { key, fragment }, ReferenceType::Regular) => {
+                let base = key.link_url(&self.parent, self.refs_path);
+                match fragment {
+                    Some(fragment) => format!("{base}#{fragment}"),
+                    None => base,
+                }
+            }
+            (target, _) => reference
+                .display_url
+                .clone()
+                .unwrap_or_else(|| target.unresolved_url()),
         }
     }
 
@@ -55,16 +62,10 @@ impl Projector {
     fn resolve_inline(&self, inline: Inline) -> Inline {
         match inline {
             Inline::Reference(reference) => {
-                let url = match reference.reference_type {
-                    ReferenceType::Regular => self.regular_url(&reference.key, &reference.url),
-                    ReferenceType::WikiLink | ReferenceType::WikiLinkPiped => reference
-                        .display_url
-                        .clone()
-                        .unwrap_or_else(|| reference.key.to_library_url()),
-                };
+                let url = self.reference_url(&reference);
                 let inlines = match reference.reference_type {
                     ReferenceType::WikiLink => vec![],
-                    _ => vec![Inline::Str(reference.text)],
+                    _ => self.resolve_inlines(reference.inlines),
                 };
                 Inline::Link(
                     url,
@@ -152,20 +153,13 @@ impl Projector {
                 Node::Reference(reference) => {
                     let reference_type = reference.reference_type;
                     let inlines = match reference_type {
-                        ReferenceType::Regular => self.resolve_inlines(iter.inlines()),
-                        ReferenceType::WikiLink => vec![],
-                        ReferenceType::WikiLinkPiped => {
-                            vec![Inline::Str(iter.ref_text().unwrap_or_default())]
+                        ReferenceType::Regular | ReferenceType::WikiLinkPiped => {
+                            self.resolve_inlines(iter.inlines())
                         }
+                        ReferenceType::WikiLink => vec![],
                     };
 
-                    let url = match reference_type {
-                        ReferenceType::Regular => self.regular_url(&reference.key, &reference.url),
-                        ReferenceType::WikiLink | ReferenceType::WikiLinkPiped => reference
-                            .display_url
-                            .clone()
-                            .unwrap_or_else(|| reference.key.to_library_url()),
-                    };
+                    let url = self.reference_url(&reference);
 
                     let link = Inline::Link(
                         url,

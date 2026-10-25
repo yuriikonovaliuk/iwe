@@ -1,12 +1,14 @@
 use super::graph_node::GraphNode;
 use super::Graph;
 use super::GraphContext;
+use crate::model::inline::text_to_inlines;
 use crate::model::node::Node;
 use crate::model::node::NodeIter;
 use crate::model::node::NodePointer;
 use crate::model::node::Reference;
 use crate::model::node::ReferenceType;
 use crate::model::node::Table;
+use crate::model::node::Target;
 use crate::model::LineRange;
 use crate::model::NodeId;
 
@@ -50,6 +52,10 @@ impl<'a> NodePointer<'a> for GraphNodePointer<'a> {
             id,
             graph: self.graph,
         })
+    }
+
+    fn to_target(&self, target: &Target) -> Option<Self> {
+        self.graph.resolve(target).and_then(|key| self.to_key(key))
     }
 }
 
@@ -112,29 +118,30 @@ impl<'a> NodeIter<'a> for GraphNodePointer<'a> {
             GraphNode::Raw(raw) => Some(Node::Raw(raw.lang(), raw.content().to_string())),
             GraphNode::HorizontalRule(_) => Some(Node::HorizontalRule()),
             GraphNode::Reference(reference) => {
-                let text = match reference.reference_type() {
-                    ReferenceType::Regular if self.graph.normalize_ref_text() => self
-                        .graph
-                        .get_ref_text(reference.key())
-                        .unwrap_or(reference.text().to_string()),
-                    ReferenceType::Regular => reference.text().to_string(),
-                    ReferenceType::WikiLink => String::default(),
-                    ReferenceType::WikiLinkPiped => reference.text().to_string(),
+                let inlines = match reference.reference_type() {
+                    ReferenceType::Regular if self.graph.normalize_ref_text() => reference
+                        .target()
+                        .path_key()
+                        .and_then(|key| self.graph.get_ref_text(key))
+                        .map(|title| text_to_inlines(&title))
+                        .unwrap_or_else(|| reference.inlines().clone()),
+                    ReferenceType::Regular | ReferenceType::WikiLinkPiped => {
+                        reference.inlines().clone()
+                    }
+                    ReferenceType::WikiLink => Vec::new(),
                 };
 
-                let key = reference.key().clone();
                 let display_url = match reference.reference_type() {
                     ReferenceType::WikiLink | ReferenceType::WikiLinkPiped => {
-                        Some(self.graph.wiki_display(&key, reference.url()))
+                        Some(self.graph.wiki_display(reference.target()))
                     }
                     ReferenceType::Regular => None,
                 };
 
                 Some(Node::Reference(Reference {
-                    key,
-                    text,
+                    target: reference.target().clone(),
+                    inlines,
                     reference_type: reference.reference_type(),
-                    url: reference.url().to_string(),
                     display_url,
                 }))
             }

@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.1](https://github.com/iwe-org/iwe/compare/diwe-v0.29.0...diwe-v0.29.1) - 2026-10-24
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.29.0](https://github.com/iwe-org/iwe/compare/diwe-v0.28.0...diwe-v0.29.0) - 2026-10-20
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.28.0](https://github.com/iwe-org/iwe/compare/diwe-v0.27.0...diwe-v0.28.0) - 2026-10-17
+
+### Changed
+
+- `DocumentFinder` sorts text fields with the graph's `TitleCollator` (codepoint order unless the graph was given a localized collator)
+
+## [0.27.0](https://github.com/iwe-org/iwe/compare/diwe-v0.26.1...diwe-v0.27.0) - 2026-10-16
+
+### Added
+
+- An `engine` feature, on by default, that gates the search, tokens, find, retrieve, stats, schema and watcher modules and their crates (`bm25`, `tiktoken-rs`, `fuzzy-matcher`, `notify`, `csv`, `globset`); a dependent that only needs the configuration types builds with `default-features = false`
+
+## [0.26.1](https://github.com/iwe-org/iwe/compare/diwe-v0.26.0...diwe-v0.26.1) - 2026-10-08
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.26.0](https://github.com/iwe-org/iwe/compare/diwe-v0.25.0...diwe-v0.26.0) - 2026-10-07
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.25.0](https://github.com/iwe-org/iwe/compare/diwe-v0.24.2...diwe-v0.25.0) - 2026-10-02
+
+### Added
+
+- `migrate_v3_to_v4` renames a configuration's `[library]` table to `[workspace]`.
+- `require_documents` checks that every key names a document in the graph and reports all missing keys in one message.
+
+### Changed
+
+- `Configuration::workspace` is a `WorkspaceOptions` (was `library: LibraryOptions`); the field still accepts `library` when reading a config file.
+- `workspace_path_in` replaces `library_path_in`.
+- `Configuration::template()` writes `version = 4`.
+
+### Deprecated
+
+- `LibraryOptions` and `library_path_in` retained as deprecated aliases.
+
 ## [0.24.2](https://github.com/iwe-org/iwe/compare/diwe-v0.24.1...diwe-v0.24.2) - 2026-09-20
 
 Workspace version bump — no user-visible changes in this crate.

@@ -1,6 +1,7 @@
 use crate::query::argue::Status as ArgueStatus;
 use serde_yaml::Value;
 
+use crate::collation::Collation;
 use crate::model::Key;
 use crate::query::block::{BlockPredicate, MatchesSource};
 use crate::query::search::SearchSpec;
@@ -730,6 +731,7 @@ impl Projection {
 pub struct Sort {
     pub key: FieldPath,
     pub dir: SortDir,
+    pub collation: Option<Collation>,
 }
 
 impl Sort {
@@ -737,6 +739,7 @@ impl Sort {
         Sort {
             key: FieldPath::from_dotted(path),
             dir: SortDir::Asc,
+            collation: None,
         }
     }
 
@@ -744,7 +747,13 @@ impl Sort {
         Sort {
             key: FieldPath::from_dotted(path),
             dir: SortDir::Desc,
+            collation: None,
         }
+    }
+
+    pub fn with_collation(mut self, collation: Collation) -> Self {
+        self.collation = Some(collation);
+        self
     }
 }
 

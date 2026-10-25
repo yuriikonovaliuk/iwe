@@ -13,7 +13,6 @@ use itertools::Itertools;
 
 use diwe::config::{load_config, ActionDefinition, Configuration, InlineType, LinkType};
 use diwe::fs::key_escapes_workspace;
-use diwe::graph_from_path;
 use diwe::schema::{
     explain_documents, explain_documents_against_file, pending_from_changes, render_reports_text,
     validate_pending_documents,
@@ -24,10 +23,11 @@ use diwe::stats::{
     DEFAULT_SIMILARITY_THRESHOLD,
 };
 use diwe::tokens::Truncation;
+use diwe::{graph_from_path, require_documents};
 use iwe::export::{dot_details_exporter, dot_exporter, graph_data};
 use iwe::filter_args::FilterArgs;
 use iwe::find::{DocumentFinder, FindOptions};
-use iwe::init::{current_root, init_library, InitOptions, Overrides};
+use iwe::init::{current_root, init_workspace, InitOptions, Overrides};
 use iwe::internal::claude::{
     digest_claude_transcript, enable_memory, enter_memory_store, policy_report, post_tool_report,
     prompt_body, read_hook_payload, render_memory_index, session_adopt, session_brief,
@@ -44,6 +44,7 @@ use iwe::projection_args::{parse_projection_extend, parse_projection_replace};
 use iwe::render::{FindBlockRenderer, RetrieveRenderer};
 use iwe::retrieve::{DocumentReader, RetrieveOptions};
 use iwe::stats::{render_stats, GraphStatistics};
+use liwe::collation::TitleCollator;
 use liwe::graph::{Graph, GraphContext};
 use liwe::locale::get_locale;
 use liwe::model::node::NodePointer;
@@ -58,8 +59,8 @@ use liwe::query::block::{
     parse_block_predicate, BlockOp, BlockPredicate, BlockRegex, MatchesSource,
 };
 use liwe::query::{
-    check_path_segments, current_query_schema, FieldPath, Filter, Projection as QueryProjection,
-    ProjectionField, ProjectionSource, Sort as QuerySort, SortDir,
+    check_path_segments, current_query_schema, Collation, FieldPath, Filter,
+    Projection as QueryProjection, ProjectionField, ProjectionSource, Sort as QuerySort, SortDir,
 };
 use liwe::transaction::{NoopTransaction, Transaction, Write as TxWrite};
 
@@ -715,7 +716,7 @@ struct Normalize {
         long = "key",
         short = 'k',
         value_name = "KEY",
-        help = "Normalize only this document, leaving its frontmatter as written. Repeatable; omit to rewrite the whole library"
+        help = "Normalize only this document, leaving its frontmatter as written. Repeatable; omit to rewrite the whole workspace"
     )]
     key: Vec<String>,
 }
@@ -752,8 +753,12 @@ struct Init {
     )]
     okf: bool,
 
-    #[clap(long, help = "Subdirectory holding the markdown files")]
-    library: Option<String>,
+    #[clap(
+        long,
+        alias = "library",
+        help = "Subdirectory holding the markdown files"
+    )]
+    workspace: Option<String>,
 
     #[clap(long, value_parser = ["wiki", "markdown"], help = "Link format to write")]
     link_format: Option<String>,
@@ -761,7 +766,7 @@ struct Init {
     #[clap(long, help = "File extension written inside markdown links")]
     refs_extension: Option<String>,
 
-    #[clap(long, value_parser = ["markdown", "djot"], help = "Source format for the library")]
+    #[clap(long, value_parser = ["markdown", "djot"], help = "Source format for the workspace")]
     format: Option<String>,
 
     #[clap(long, help = "Date format used for keys of date-named documents")]
@@ -1919,15 +1924,8 @@ fn retrieve_command(args: Retrieve) {
             explicit_keys
         };
 
-        let mut keys = Vec::new();
-        for key_str in &key_strings {
-            let key = Key::name(key_str);
-            if (&graph).get_node_id(&key).is_none() {
-                eprintln!("Error: Document '{}' not found", key_str);
-                std::process::exit(1);
-            }
-            keys.push(key);
-        }
+        let keys: Vec<Key> = key_strings.iter().map(|k| Key::name(k)).collect();
+        exit_on_missing_documents(&graph, &keys);
 
         options.filter = resolve_filter(&args.selector, &graph);
         reader.retrieve_many(&keys, &options)
@@ -2164,7 +2162,7 @@ fn init_command(init: Init) {
         json: init.json,
         okf: init.okf,
         overrides: Overrides {
-            library: init.library,
+            workspace: init.workspace,
             link_format: init.link_format,
             refs_extension: init.refs_extension,
             format: init.format,
@@ -2172,7 +2170,7 @@ fn init_command(init: Init) {
         },
     };
 
-    let code = init_library(&current_root(), &options);
+    let code = init_workspace(&current_root(), &options);
     if code != 0 {
         std::process::exit(code);
     }
@@ -2181,7 +2179,7 @@ fn init_command(init: Init) {
 #[tracing::instrument(level = "debug")]
 fn new_command(args: New) {
     let config = get_configuration();
-    let library_path = get_library_path(&config);
+    let workspace_path = get_workspace_path(&config);
 
     let content = args.content.unwrap_or_else(read_stdin_if_available);
 
@@ -2201,7 +2199,7 @@ fn new_command(args: New) {
         serde_yaml::Value::String(content),
     );
 
-    let creator = DocumentCreator::new(&config, library_path);
+    let creator = DocumentCreator::new(&config, workspace_path);
     let options = CreateOptions {
         template_name: args.template,
         variables,
@@ -2250,8 +2248,8 @@ fn create_command(args: Create) {
     }
 
     let config = get_configuration();
-    let library_path = get_library_path(&config);
-    let creator = DocumentCreator::new(&config, library_path);
+    let workspace_path = get_workspace_path(&config);
+    let creator = DocumentCreator::new(&config, workspace_path);
 
     let prepared = if args.template.is_some() {
         prepare_from_template(&args, &creator)
@@ -2319,7 +2317,7 @@ fn link_from_changes(config: &Configuration, prepared: &PreparedDocument, link_f
         eprintln!("Error: --link-from '{link_from}' names the document being created");
         std::process::exit(1);
     }
-    let parent_path = get_library_path(config).join(parent.to_path(config.format));
+    let parent_path = get_workspace_path(config).join(parent.to_path(config.format));
     let Ok(parent_content) = std::fs::read_to_string(&parent_path) else {
         eprintln!("Error: --link-from '{link_from}' does not exist; nothing was written");
         std::process::exit(1);
@@ -2328,7 +2326,7 @@ fn link_from_changes(config: &Configuration, prepared: &PreparedDocument, link_f
         &prepared.key,
         &prepared.content,
         config.format_options(),
-        config.library.frontmatter_document_title.clone(),
+        config.workspace.frontmatter_document_title.clone(),
     );
     let linked = diwe::integrity::append_link_item(
         &parent_content,
@@ -2608,6 +2606,7 @@ fn tree_command(args: TreeArgs) {
     let graph = load_graph(&config);
 
     let explicit_keys: Vec<Key> = args.selector.key.iter().map(|k| Key::name(k)).collect();
+    exit_on_missing_documents(&graph, &explicit_keys);
     let other_selectors = args.selector.has_non_key_clauses();
     let filter_for_narrowing = if other_selectors {
         let mut s = args.selector.clone();
@@ -2644,13 +2643,6 @@ fn tree_command(args: TreeArgs) {
     } else {
         explicit_keys
     };
-
-    for root_key in &root_keys {
-        if (&graph).get_node_id(root_key).is_none() {
-            eprintln!("Error: Document '{}' not found", root_key);
-            std::process::exit(1);
-        }
-    }
 
     match args.format {
         TreeFormat::Json | TreeFormat::Yaml => {
@@ -2734,7 +2726,7 @@ fn build_tree_node(
         let ref_node_ids = graph.get_inclusion_edges_in(key);
         ref_node_ids
             .iter()
-            .filter_map(|id| graph.graph_node(*id).ref_key())
+            .filter_map(|id| graph.reference_target_key(*id))
             .sorted()
             .filter_map(|ref_key| build_tree_node(graph, &ref_key, max_depth - 1, project, visited))
             .collect()
@@ -2813,7 +2805,7 @@ fn build_tree_lines(
     let ref_node_ids = graph.get_inclusion_edges_in(key);
     let ref_keys: Vec<Key> = ref_node_ids
         .iter()
-        .filter_map(|id| graph.graph_node(*id).ref_key())
+        .filter_map(|id| graph.reference_target_key(*id))
         .sorted()
         .collect();
     for ref_key in &ref_keys {
@@ -2840,7 +2832,7 @@ fn normalize_command(args: Normalize) {
         return;
     }
 
-    let library_path = get_library_path(&configuration);
+    let workspace_path = get_workspace_path(&configuration);
     for key_str in &args.key {
         let key = Key::name(key_str);
         if key_escapes_workspace(key.as_str()) {
@@ -2850,7 +2842,7 @@ fn normalize_command(args: Normalize) {
             );
             std::process::exit(1);
         }
-        let path = library_path.join(format!("{}.{}", key, configuration.format.extension()));
+        let path = workspace_path.join(format!("{}.{}", key, configuration.format.extension()));
 
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
@@ -2900,7 +2892,7 @@ fn squash_command(args: Squash) {
         eprintln!("Error: Document '{}' not found", args.key);
         std::process::exit(1);
     }
-    let mut patch = Graph::new();
+    let mut patch = graph.new_patch();
     let squashed = graph.squash(&key, args.depth);
 
     patch.build_key_from_iter(&args.key.clone().into(), TreeIter::new(&squashed));
@@ -2937,7 +2929,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
     // validating backend, so it runs the same commit gate itself, under
     // the lock it already holds, against what is on disk now.
     if configuration.integrity.is_enabled() {
-        let before = diwe::fs::new_for_path(&get_library_path(configuration), configuration.format);
+        let before = diwe::fs::new_for_path(&get_workspace_path(configuration), configuration.format);
         let mut after = before.clone();
         after.extend(state.clone());
         let graph_of = |state: &liwe::model::State| {
@@ -2945,7 +2937,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
                 state,
                 false,
                 configuration.format_options(),
-                configuration.library.frontmatter_document_title.clone(),
+                configuration.workspace.frontmatter_document_title.clone(),
             )
         };
         if let Err(violation) = diwe::integrity::check_commit(
@@ -2960,7 +2952,7 @@ fn write_graph(graph: Graph, configuration: &Configuration) {
     }
     diwe::fs::write_store_at_path(
         &state,
-        &get_library_path(configuration),
+        &get_workspace_path(configuration),
         configuration.format,
         |key, content, prior_content| {
             diwe::permissions::check_write_permission_for_content(
@@ -3025,7 +3017,7 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
             let guard = acquire_cli_commit_lock()?;
             let result = diwe::fs::apply_changes(
                 changes,
-                &get_library_path(configuration),
+                &get_workspace_path(configuration),
                 configuration.format,
                 check,
                 get_journal_path(configuration).as_deref(),
@@ -3066,11 +3058,21 @@ fn apply_changes(changes: &Changes, configuration: &Configuration) {
 
 fn load_graph(configuration: &Configuration) -> Graph {
     graph_from_path(
-        &get_library_path(configuration),
+        &get_workspace_path(configuration),
         false,
         configuration.format_options(),
-        configuration.library.frontmatter_document_title.clone(),
+        configuration.workspace.frontmatter_document_title.clone(),
     )
+    .with_collator(TitleCollator::for_locale(
+        configuration.workspace.locale.as_deref(),
+    ))
+}
+
+fn exit_on_missing_documents(graph: &Graph, keys: &[Key]) {
+    if let Err(message) = require_documents(graph, keys) {
+        eprintln!("Error: {}", message);
+        std::process::exit(1);
+    }
 }
 
 fn load_search_graph(configuration: &Configuration) -> (Graph, diwe::search::Bm25Index) {
@@ -3079,16 +3081,16 @@ fn load_search_graph(configuration: &Configuration) -> (Graph, diwe::search::Bm2
     (graph, index)
 }
 
-fn get_library_path(configuration: &Configuration) -> PathBuf {
+fn get_workspace_path(configuration: &Configuration) -> PathBuf {
     let current_dir = env::current_dir().expect("to get current dir");
 
-    let mut library_path = current_dir;
+    let mut workspace_path = current_dir;
 
-    if !configuration.library.path.is_empty() {
-        library_path.push(configuration.library.path.clone());
+    if !configuration.workspace.path.is_empty() {
+        workspace_path.push(configuration.workspace.path.clone());
     }
 
-    library_path
+    workspace_path
 }
 
 fn get_journal_path(configuration: &Configuration) -> Option<PathBuf> {
@@ -3097,17 +3099,25 @@ fn get_journal_path(configuration: &Configuration) -> Option<PathBuf> {
 }
 
 fn parse_sort_arg(s: &str) -> Result<QuerySort, String> {
-    let (field, dir) = s
-        .rsplit_once(':')
-        .ok_or_else(|| format!("invalid --sort value '{}': expected FIELD:1 or FIELD:-1", s))?;
-    let dir = match dir {
-        "1" => SortDir::Asc,
-        "-1" => SortDir::Desc,
-        _ => {
-            return Err(format!(
-                "invalid sort direction '{}': expected 1 or -1",
-                dir
-            ))
+    let (head, last) = s.rsplit_once(':').ok_or_else(|| {
+        format!(
+            "invalid --sort value '{}': expected FIELD:1, FIELD:-1 or FIELD:DIR:COLLATION",
+            s
+        )
+    })?;
+    let direction_error = |dir: &str| format!("invalid sort direction '{}': expected 1 or -1", dir);
+    let (field, dir, collation) = match (parse_sort_dir(last), head.rsplit_once(':')) {
+        (Some(dir), _) => (head, dir, None),
+        (None, None) => return Err(direction_error(last)),
+        (None, Some((field, dir))) => {
+            let dir = parse_sort_dir(dir).ok_or_else(|| direction_error(dir))?;
+            let collation = Collation::parse(last).ok_or_else(|| {
+                format!(
+                    "invalid sort collation '{}': expected 'binary' or a BCP-47 locale tag such as 'sv-SE'",
+                    last
+                )
+            })?;
+            (field, dir, Some(collation))
         }
     };
     if field.is_empty() {
@@ -3115,7 +3125,19 @@ fn parse_sort_arg(s: &str) -> Result<QuerySort, String> {
     }
     let key = FieldPath::from_dotted(field);
     check_path_segments(key.segments()).map_err(|e| e.to_string())?;
-    Ok(QuerySort { key, dir })
+    Ok(QuerySort {
+        key,
+        dir,
+        collation,
+    })
+}
+
+fn parse_sort_dir(value: &str) -> Option<SortDir> {
+    match value {
+        "1" => Some(SortDir::Asc),
+        "-1" => Some(SortDir::Desc),
+        _ => None,
+    }
 }
 
 fn resolve_filter(args: &FilterArgs, graph: &Graph) -> Option<Filter> {
@@ -3276,7 +3298,7 @@ fn schema_validate_command(args: SchemaValidate) {
             }
         }
         if !config.checkers.is_empty() {
-            let root = get_library_path(&config);
+            let root = get_workspace_path(&config);
             let checked = diwe::schema::run_checkers(&config, &root, &keys, args.checkers);
             reports.extend(checked.failing);
             checker_warnings = checked.warnings;
@@ -3565,6 +3587,7 @@ fn export_command(args: Export) {
     let graph = load_graph(&config);
 
     let explicit_keys: Vec<Key> = args.selector.key.iter().map(|s| Key::name(s)).collect();
+    exit_on_missing_documents(&graph, &explicit_keys);
     let filter_for_narrowing = if args.selector.has_non_key_clauses() {
         let mut s = args.selector.clone();
         s.key.clear();
@@ -3872,12 +3895,12 @@ fn extract_command(args: Extract) {
     let section_id = selected.id;
 
     let (key_template, link_type) = get_extract_config(&config, args.action.as_deref());
-    let locale = get_locale(config.library.locale.as_deref());
+    let locale = get_locale(config.workspace.locale.as_deref());
     let extract_config = ExtractConfig {
         key_template,
         link_type,
         key_date_format: config
-            .library
+            .workspace
             .date_format
             .clone()
             .unwrap_or_else(|| "%Y-%m-%d".to_string()),
@@ -3947,7 +3970,7 @@ fn inline_command(args: Inline) {
     let tree = (&graph).collect(&source_key);
 
     if args.list {
-        for reference in references(&tree) {
+        for reference in references(&tree, graph.key_index()) {
             println!(
                 "{}: [{}]({})",
                 reference.number, reference.title, reference.key
@@ -3956,7 +3979,12 @@ fn inline_command(args: Inline) {
         return;
     }
 
-    let selected = match select_reference(&tree, args.reference.as_deref(), args.block) {
+    let selected = match select_reference(
+        &tree,
+        graph.key_index(),
+        args.reference.as_deref(),
+        args.block,
+    ) {
         Ok(reference) => reference,
         Err(SelectError::NotFound(query)) => {
             eprintln!("Error: No reference matches '{}'", query);
@@ -4371,8 +4399,8 @@ fn update_body(args: Update) {
         return;
     }
 
-    let library_path = get_library_path(&config);
-    let file_path = library_path.join(format!("{}.{}", key, config.format.extension()));
+    let workspace_path = get_workspace_path(&config);
+    let file_path = workspace_path.join(format!("{}.{}", key, config.format.extension()));
     if let Some(parent) = file_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -4460,12 +4488,12 @@ fn update_mutation(args: Update) {
     if let Some(parsed) = parsed_filter {
         conjuncts.push(parsed);
     }
-    match args.key.len() {
+    let named_keys: Vec<Key> = args.key.iter().map(|k| Key::name(k)).collect();
+    exit_on_missing_documents(&graph, &named_keys);
+    match named_keys.len() {
         0 => {}
-        1 => conjuncts.push(Filter::Key(liwe::query::KeyOp::Eq(Key::name(&args.key[0])))),
-        _ => conjuncts.push(Filter::Key(liwe::query::KeyOp::In(
-            args.key.iter().map(|k| Key::name(k)).collect(),
-        ))),
+        1 => conjuncts.push(Filter::Key(liwe::query::KeyOp::Eq(named_keys[0].clone()))),
+        _ => conjuncts.push(Filter::Key(liwe::query::KeyOp::In(named_keys))),
     }
     if conjuncts.is_empty() {
         eprintln!("error: --filter or -k/--key required for mutation mode");
@@ -4510,7 +4538,7 @@ fn update_mutation(args: Update) {
         enforce_strict_update(doc_expect.is_some(), &update_doc);
     }
 
-    let library_path = get_library_path(&config);
+    let workspace_path = get_workspace_path(&config);
     let ext = config.format.extension();
 
     let docs: Vec<(Key, String)> = if update_doc.block_ops.is_empty() {
@@ -4529,7 +4557,7 @@ fn update_mutation(args: Update) {
         }
         keys.into_iter()
             .filter_map(|key| {
-                let file_path = library_path.join(format!("{}.{}", key, ext));
+                let file_path = workspace_path.join(format!("{}.{}", key, ext));
                 let raw_content = std::fs::read_to_string(&file_path).ok()?;
                 let (_, body) = split_raw_frontmatter(&raw_content);
                 let mut mapping = graph.frontmatter(&key).cloned().unwrap_or_default();
@@ -4565,7 +4593,7 @@ fn update_mutation(args: Update) {
     }
 
     let (matched, changed) =
-        write_changed_documents(&config, &library_path, ext, &docs, args.dry_run);
+        write_changed_documents(&config, &workspace_path, ext, &docs, args.dry_run);
 
     if args.strict && !args.dry_run {
         let targets: Vec<Key> = docs.iter().map(|(key, _)| key.clone()).collect();
@@ -4622,14 +4650,14 @@ fn enforce_strict_update(has_doc_expect: bool, update_doc: &liwe::query::Update)
 
 fn write_changed_documents(
     configuration: &Configuration,
-    library_path: &std::path::Path,
+    workspace_path: &std::path::Path,
     ext: &str,
     docs: &[(Key, String)],
     dry_run: bool,
 ) -> (usize, usize) {
     let mut changed = 0;
     for (key, content) in docs {
-        let file_path = library_path.join(format!("{}.{}", key, ext));
+        let file_path = workspace_path.join(format!("{}.{}", key, ext));
         let existing = std::fs::read_to_string(&file_path).unwrap_or_default();
         if *content == existing {
             continue;
@@ -4762,7 +4790,7 @@ fn attach_command(args: Attach) {
         .get_key_title(&source_key)
         .unwrap_or_else(|| source_key_str.clone());
 
-    let library_path = get_library_path(&config);
+    let workspace_path = get_workspace_path(&config);
 
     for action_name in &args.to {
         let attach = match config.actions.get(action_name) {
@@ -4809,7 +4837,7 @@ fn attach_command(args: Attach) {
         }
 
         let target_path =
-            library_path.join(format!("{}.{}", target_key, config.format.extension()));
+            workspace_path.join(format!("{}.{}", target_key, config.format.extension()));
         if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }

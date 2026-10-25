@@ -112,7 +112,7 @@
 //
 // Layer-free fixtures only: no `origin:`/`mint:`/package vocabulary.
 
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, WorkspaceOptions, MarkdownOptions};
 use diwe::permissions::FREEZE_FIELD;
 use indoc::indoc;
 use liwe::model::{parse_leading_frontmatter, split_raw_frontmatter};
@@ -684,7 +684,7 @@ fn setup(doc_content: &str) -> TempDir {
     let temp_path = temp_dir.path();
     create_dir_all(temp_path.join(".iwe")).expect("mkdir .iwe");
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

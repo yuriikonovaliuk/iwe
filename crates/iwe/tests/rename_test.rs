@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions, RefsText};
+use diwe::config::{Configuration, MarkdownOptions, RefsText, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, read_to_string, write};
 use std::process::Command;
@@ -265,6 +265,50 @@ fn test_rename_updates_table_cell_links() {
     );
 }
 
+#[test]
+fn test_rename_keeps_link_fragments() {
+    let temp_dir = setup_workspace_with_docs(vec![
+        (
+            "a",
+            indoc! {"
+            # Doc A
+
+            [Doc B](b#section)
+
+            [[b#section]]
+
+            [[b#section|Alias]]
+        "},
+        ),
+        (
+            "b",
+            indoc! {"
+            # Doc B
+
+            ## Section
+        "},
+        ),
+    ]);
+    let temp_path = temp_dir.path();
+
+    let output = run_rename_command(temp_path, &["b", "renamed-b"]);
+    assert!(output.status.success());
+
+    let a_content = read_to_string(temp_path.join("a.md")).unwrap();
+    assert_eq!(
+        a_content,
+        indoc! {"
+            # Doc A
+
+            [Doc B](renamed-b#section)
+
+            [[renamed-b#section]]
+
+            [[renamed-b#section|Alias]]
+        "}
+    );
+}
+
 fn setup_workspace_with_docs(docs: Vec<(&str, &str)>) -> TempDir {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let temp_path = temp_dir.path();
@@ -282,7 +326,7 @@ fn setup_iwe_config(temp_path: &std::path::Path) {
     create_dir_all(temp_path.join(".iwe")).expect("Failed to create .iwe directory");
 
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

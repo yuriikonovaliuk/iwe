@@ -76,7 +76,7 @@ Every operation document is one YAML mapping. Top-level fields:
 | Field | Operations | Purpose |
 |---|---|---|
 | `filter` | all | Predicate document (§4). Required on `update` / `delete`. Graph operators that extend filter with cross-document selection are defined in §5. |
-| `search` | find | Relevance selection stage (§5A). Restricts membership to documents matching a `lexical` / `fuzzy` text query and supplies the default ordering. Semantics: [Search](query-language.md#search). |
+| `search` | find | Relevance selection stage (§5A). Restricts membership to documents matching a `lexical` / `fuzzy` text query and supplies the default ordering. Semantics: [Search](query-language.md#search-find-only). |
 | `project` | find | Projection (§6). Mutually exclusive with `addFields`. |
 | `addFields` | find | Additive projection (§6.3). Mutually exclusive with `project`. |
 | `sort` | all | §7. On `update` / `delete`, bounds iteration order before mutation. |
@@ -661,6 +661,8 @@ A **walk** is a BFS traversal from the anchor set over the operator's edge type,
 
 `$includes` and `$includedBy` walk only inclusion edges. `$references` and `$referencedBy` walk only reference edges.
 
+Walks only reach documents that exist in the workspace. A reference edge counts only for a link to a document (a `.md` or `.dj` file, or a path with no file extension); links to other local files such as `schema.yaml` or `image.png` are not edges. A link whose target document does not exist is skipped, so `$referencedBy` never returns a key that has no document. An anchor key that names no document, such as `$referencedBy: missing`, selects an empty anchor set, and the operator matches nothing.
+
 #### 5.2.1 Argument shape
 
 Each relational operator accepts either a scalar key (shorthand) or a mapping with an optional `match` field, optional walk parameters, and an optional `$size` count predicate:
@@ -1022,7 +1024,7 @@ At least one of `lexical` / `fuzzy` must be present; the empty mapping `search: 
 
 **Requires the index.** `search` requires the search-indexed graph; running it against a graph built without a search language is an execution-time error naming the missing index.
 
-Grammar: §A.4A. Full semantics: [Search](query-language.md#search).
+Grammar: §A.4A. Full semantics: [Search](query-language.md#search-find-only).
 
 ## 6. Projection
 
@@ -1270,9 +1272,22 @@ The sort direction is type-strict: integer `1` (ascending) or integer `-1` (desc
 
 A `sort` mapping with two or more entries is a parse-time error.
 
+The value may also be a mapping with a required `order` (`1` or `-1`, same rules) and an optional `collation`:
+
+```yaml
+sort:
+  title: { order: 1, collation: binary }
+sort:
+  title: { order: -1, collation: sv-SE }
+```
+
+`collation` is `binary` for codepoint order or a BCP-47 locale tag (`sv-SE`, not `sv_SE`) for that language's collation rules; a language with no collation data of its own uses the root rules without an error. Any other value, an unknown option name, or a mapping without `order` is a parse-time error. Without `collation`, strings compare with the host's collator (see below).
+
 Documents missing the sort key sort as if the value were null. Null sorts before all other values ascending, last descending. Sort applies to all four operations (on `update` / `delete` it bounds the iteration order before mutation).
 
 Ties — including the no-`sort` case — are broken by document key in ascending lexicographic order. The engine sorts the matched set by key first, then applies the user-provided sort with a stable algorithm; the result is deterministic given the same corpus and operation.
+
+The engine compares string values by codepoint unless the sort sets a `collation`. A host may supply a default locale-aware collator (the Unicode Collation Algorithm with the CLDR rules of a locale, numeric ordering on, emoji removed before comparing); the `iwe` CLI, the `iwes` LSP server and the `iwec` MCP server do so from `workspace.locale`, so there case and accents only break ties and `Note 2` precedes `Note 10`. Two strings whose emoji-free text collates equal fall back to the full string with emoji and then to codepoint order. Collation applies to `sort` only; the ordering operators in §4.7 always use codepoint comparison.
 
 ## 8. Limit
 

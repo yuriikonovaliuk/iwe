@@ -1,8 +1,8 @@
 use crate::model::config::DjotOptions;
 use crate::model::document::{LinkType, MathType};
 use crate::model::inline::{
-    append_refs_extension, detect_and_strip_checkbox, text_to_inlines, Attributes, Inline, Inlines,
-    TextSink, TokenStream,
+    append_refs_extension, detect_and_strip_checkbox, Attributes, Inline, Inlines, TextSink,
+    TokenStream,
 };
 use crate::model::is_ref_url;
 use crate::model::node::ColumnAlignment;
@@ -348,9 +348,9 @@ fn render_inline_djot<S: TextSink>(
         }
         Inline::Reference(reference) => {
             let url =
-                append_refs_extension(&reference.key.to_library_url(), &options.refs_extension);
+                append_refs_extension(&reference.target.unresolved_url(), &options.refs_extension);
             out.push("[");
-            render_inlines_djot(&text_to_inlines(&reference.text), options, out, false);
+            render_inlines_djot(&reference.inlines, options, out, false);
             out.push("](");
             out.push(&url);
             out.push(")");

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use diwe::config::{
-    Configuration, LibraryOptions, MarkdownOptions, Patterns, SchemaBinding, TransactionOptions,
+    Configuration, WorkspaceOptions, MarkdownOptions, Patterns, SchemaBinding, TransactionOptions,
     ValidationScope,
 };
 use tempfile::TempDir;
@@ -40,7 +40,7 @@ fn store(gated: bool) -> TempDir {
         ValidationScope::None
     };
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

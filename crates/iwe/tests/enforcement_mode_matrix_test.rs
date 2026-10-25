@@ -148,7 +148,7 @@
 // its own sibling `..._multi_property_write_test.rs` pair and note it here
 // the same way, without restructuring either this file or the table above.
 
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, WorkspaceOptions, MarkdownOptions};
 use std::fs::{create_dir_all, write};
 use std::path::Path;
 use std::process::{Command, Output};
@@ -227,7 +227,7 @@ fn setup() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     create_dir_all(temp.path().join(".iwe")).expect("mkdir .iwe");
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

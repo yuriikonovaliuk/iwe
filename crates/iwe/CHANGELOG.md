@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-10-25 (iwe-plus; upstream iwe 0.29.1)
+
+### Changed
+
+- Merged upstream iwe 0.25.0 through 0.29.1: the `[library]` table is `[workspace]` (an older config is migrated in place on first read, `iwe init --workspace`), `--sort field:DIR:COLLATION` and locale-aware sorting from `workspace.locale`, wiki links keep `#section` anchors through `rename`, `retrieve`/`tree -k`/`export -k`/`update -k` fail on every unknown key at once, link text and directory links survive a write unchanged, lower memory use on large workspaces. The fork's write path is unchanged: every CLI and MCP write still goes through the transaction, commit-lock, permission, journal, `[commit]` trigger and `[integrity]` gates; upstream's `persist_changes` and read-write graph lock were folded back into them.
+
 ## [1.5.0] — 2026-09-26 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added
@@ -74,6 +80,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `iwe argue [-k KEY]... [--filter F] [-f text|json]`: the dialectical standing of every claim (`iwe docs argue`); always exits 0.
 - `requires` (conditional sections) and `$this` anchors in `links` filters are enforced by `iwe schema validate` (`iwe docs schema` §11–12); `[invariants]` from `config.toml` run on every whole-store validation (`iwe docs config`).
 - `iwe schema validate` enforces `links` rules from schema files (target typing, link counts, transitive reach along a section's links); the query language gains `via` on the reference operators. Documented in `iwe docs schema` §11 and `iwe docs query`.
+
+## [0.29.1](https://github.com/iwe-org/iwe/compare/iwe-v0.29.0...iwe-v0.29.1) - 2026-10-24
+
+### Fixed
+- `rename` keeps `#section` anchors in wiki links such as `[[note#section]]` (previously these links were left pointing at the old name)
+- Wiki links with a `#section` anchor now count as links to the note in `find`, `tree` and other commands
+
+## [0.29.0](https://github.com/iwe-org/iwe/compare/iwe-v0.28.0...iwe-v0.29.0) - 2026-10-20
+
+### Changed
+
+- Lower memory use when loading large workspaces
+
+### Fixed
+
+- `iwe create`, `iwe normalize` and other document writes keep text that follows a code block, horizontal rule or heading inside a list item with no blank line between them (previously the text was dropped, or merged into the heading)
+
+## [0.28.0](https://github.com/iwe-org/iwe/compare/iwe-v0.27.0...iwe-v0.28.0) - 2026-10-17
+
+### Added
+
+- `--sort field:DIR:COLLATION` and `sort: { field: { order, collation } }` in query documents, with `binary` for codepoint order or a locale tag such as `sv-SE`
+
+### Changed
+
+- `find --sort` and query `sort` on text fields use locale-aware collation: case and accents no longer split results, `Note 2` sorts before `Note 10` and emoji are ignored except to break ties (previously byte order)
+- The collation language comes from `workspace.locale` in `.iwe/config.toml`, falling back to the system locale and then English
+
+### Fixed
+
+- `workspace.locale` and `markdown.locale` values with a `@` modifier such as `de_DE@euro` now format dates in that language (previously they fell back to POSIX)
+
+## [0.27.0](https://github.com/iwe-org/iwe/compare/iwe-v0.26.1...iwe-v0.27.0) - 2026-10-16
+
+### Changed
+
+- `rename` keeps `[[Name]]` links as they are when a note moves to another folder under the same file name, and otherwise writes the shortest name that resolves (previously every link was rewritten to the full path)
+- `rename` rewrites a `[[Name]]` link to another note that would otherwise start pointing at the renamed note, so it keeps its target
+
+## [0.26.1](https://github.com/iwe-org/iwe/compare/iwe-v0.26.0...iwe-v0.26.1) - 2026-10-08
+
+### Fixed
+
+- `find` and `count` no longer crash or list non-documents when a document links to a missing document or to a non-markdown file; `--referenced-by` and `--included-by` only return existing documents
+
+## [0.26.0](https://github.com/iwe-org/iwe/compare/iwe-v0.25.0...iwe-v0.26.0) - 2026-10-07
+
+### Changed
+
+- A markdown document edited with the editor tools in a Claude Code session is no longer rewritten into canonical form behind the edit; only writes through `iwe` normalize on the way in (previously the whole file was rewritten in place, which broke links and reformatted project markdown such as `README.md`). The schema check on such an edit is unchanged.
+
+### Fixed
+
+- `iwe normalize` and every other document write keep a link to a directory as written: `[docs](docs/)` no longer becomes `[docs](docs.md)`, and `[up](..)` no longer becomes `[up](...md)`, both of which pointed at a file that does not exist.
+- Inline formatting inside link text survives a write: `` [`iwe` tool](setup.md) `` and `[the **setup** guide](setup.md)` keep their code spans and emphasis (previously the link text was flattened to plain words).
+
+## [0.25.0](https://github.com/iwe-org/iwe/compare/iwe-v0.24.2...iwe-v0.25.0) - 2026-10-02
+
+### Changed
+
+- The `[library]` configuration table is now `[workspace]`. A config written for an earlier version is migrated in place the first time a command reads it — the table is renamed and the file's `version` becomes `4`. A config that still says `[library]` is read as before.
+- `iwe init --workspace <DIR>` names the subdirectory holding the markdown files (was `--library`).
+- `iwe init --json` reports the detected directory as `evidence.workspace_path` and keys its settings map with `workspace.path`, `workspace.date_format` and `workspace.frontmatter_document_title` (previously `library_path` and `library.*`).
+- Help text, examples and shipped documentation now call the document collection a workspace.
+
+### Fixed
+
+- `tree -k` with a filter or anchor, `export -k`, and `update -k` in mutation mode now fail on an unknown key (previously the key was silently dropped, producing empty output or `No documents matched`).
+- `retrieve` and every command above report all unknown keys in one error, `Documents not found: 'a', 'b'` (previously only the first).
+
+### Deprecated
+
+- `iwe init --library <DIR>` retained as a hidden alias for `--workspace`.
 
 ## [0.24.2](https://github.com/iwe-org/iwe/compare/iwe-v0.24.1...iwe-v0.24.2) - 2026-09-20
 

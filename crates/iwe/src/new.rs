@@ -44,7 +44,7 @@ fn get_default_template() -> NoteTemplate {
 
 pub struct DocumentCreator<'a> {
     config: &'a Configuration,
-    library_path: PathBuf,
+    workspace_path: PathBuf,
 }
 
 pub struct CreateOptions {
@@ -73,10 +73,10 @@ pub struct CreatedDocument {
 }
 
 impl<'a> DocumentCreator<'a> {
-    pub fn new(config: &'a Configuration, library_path: PathBuf) -> Self {
+    pub fn new(config: &'a Configuration, workspace_path: PathBuf) -> Self {
         Self {
             config,
-            library_path,
+            workspace_path,
         }
     }
 
@@ -85,7 +85,7 @@ impl<'a> DocumentCreator<'a> {
         let mut counter = 1;
 
         while self
-            .library_path
+            .workspace_path
             .join(candidate_key.to_path(self.config.format))
             .exists()
         {
@@ -126,7 +126,7 @@ impl<'a> DocumentCreator<'a> {
             ));
         }
 
-        let file_exists = self.library_path.join(&path_str).exists();
+        let file_exists = self.workspace_path.join(&path_str).exists();
         let final_key = match if_exists {
             IfExists::Skip if file_exists => return Ok(None),
             IfExists::Fail if file_exists => {
@@ -137,7 +137,7 @@ impl<'a> DocumentCreator<'a> {
         };
 
         let file_path = self
-            .library_path
+            .workspace_path
             .join(final_key.to_path(self.config.format));
         Ok(Some((final_key, file_path)))
     }
@@ -166,7 +166,7 @@ impl<'a> DocumentCreator<'a> {
     pub fn prepare(&self, options: CreateOptions) -> Result<Option<PreparedDocument>, String> {
         let template_name = options
             .template_name
-            .or_else(|| self.config.library.default_template.clone())
+            .or_else(|| self.config.workspace.default_template.clone())
             .unwrap_or_else(|| "default".to_string());
 
         let fallback_template = get_default_template();
@@ -185,7 +185,7 @@ impl<'a> DocumentCreator<'a> {
 
         let key_date_format = self
             .config
-            .library
+            .workspace
             .date_format
             .clone()
             .unwrap_or_else(|| DEFAULT_KEY_DATE_FORMAT.to_string());
@@ -199,7 +199,7 @@ impl<'a> DocumentCreator<'a> {
 
         let key_time_format = self
             .config
-            .library
+            .workspace
             .time_format
             .clone()
             .unwrap_or_else(|| key_date_format.clone());
@@ -209,7 +209,7 @@ impl<'a> DocumentCreator<'a> {
             .map(|format| format.to_string())
             .unwrap_or_else(|| content_date_format.clone());
 
-        let key_locale = get_locale(self.config.library.locale.as_deref());
+        let key_locale = get_locale(self.config.workspace.locale.as_deref());
         let content_locale = get_locale(format_options.locale());
 
         let now = Local::now();
@@ -425,10 +425,10 @@ fn widen_fencing_window_for_test() {
 /// `rename`/… identically.
 pub fn validating_backend(configuration: &Configuration) -> Option<ValidatingTransaction> {
     let root = std::env::current_dir().ok()?;
-    let base_path = if configuration.library.path.is_empty() {
+    let base_path = if configuration.workspace.path.is_empty() {
         root.clone()
     } else {
-        root.join(&configuration.library.path)
+        root.join(&configuration.workspace.path)
     };
     ValidatingTransaction::for_config(configuration, &base_path, &root)
 }

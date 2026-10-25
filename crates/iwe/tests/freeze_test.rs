@@ -22,7 +22,7 @@
 // and once with it, and diffs the two `iwe` invocations' outputs directly,
 // rather than merely asserting the same expected string twice.
 
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, WorkspaceOptions, MarkdownOptions};
 use std::fs::{create_dir_all, read_to_string, write};
 use std::path::Path;
 use std::process::{Command, Output};
@@ -36,7 +36,7 @@ fn setup() -> TempDir {
     let temp_path = temp_dir.path();
     create_dir_all(temp_path.join(".iwe")).expect("mkdir .iwe");
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, MarkdownOptions, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, read_to_string, write};
 use std::path::Path;
@@ -10,7 +10,7 @@ fn setup(docs: Vec<(&str, &str)>) -> TempDir {
     let temp_path = temp_dir.path();
     create_dir_all(temp_path.join(".iwe")).expect("mkdir .iwe");
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },
@@ -428,5 +428,23 @@ fn body_overwrite_rejects_a_key_outside_the_workspace() {
     assert_eq!(
         read_to_string(temp.path().join("outside.md")).unwrap(),
         "# Outside\n"
+    );
+}
+
+#[test]
+fn mutation_rejects_unknown_key() {
+    let temp = setup(vec![("one", "# One\n")]);
+
+    let output = run_update(temp.path(), &["-k", "missing", "--set", "status=done"]);
+
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Error: Document 'missing' not found\n"
+    );
+    assert_eq!(
+        read_to_string(temp.path().join("one.md")).expect("read"),
+        "# One\n"
     );
 }

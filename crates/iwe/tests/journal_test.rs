@@ -49,7 +49,7 @@ fn setup(docs: Vec<(&str, &str)>, journal_path: Option<&str>) -> TempDir {
 
 fn write_config(root: &Path, journal_path: Option<&str>) {
     let mut config = Configuration::default();
-    config.library.path = "".to_string();
+    config.workspace.path = "".to_string();
     config.markdown.refs_extension = "".to_string();
     let mut text = toml::to_string(&config).expect("config serializes");
     if let Some(journal_path) = journal_path {

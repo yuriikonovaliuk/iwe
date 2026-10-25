@@ -36,7 +36,7 @@ fn integrity_on_a_real_store() {
     let read = started.elapsed();
 
     let started = Instant::now();
-    let graph = Graph::from_state(&state, false, options.clone(), config.library.frontmatter_document_title.clone());
+    let graph = Graph::from_state(&state, false, options.clone(), config.workspace.frontmatter_document_title.clone());
     let build = started.elapsed();
 
     let started = Instant::now();
@@ -59,9 +59,9 @@ fn integrity_on_a_real_store() {
     for _ in 0..5 {
         let started = Instant::now();
         let before_state = new_for_path(&path, Format::Markdown);
-        let after = Graph::from_state(&before_state.clone(), false, options.clone(), config.library.frontmatter_document_title.clone());
+        let after = Graph::from_state(&before_state.clone(), false, options.clone(), config.workspace.frontmatter_document_title.clone());
         let result = check_commit(&no_new, &after, || {
-            debt(&Graph::from_state(&before_state, false, options.clone(), config.library.frontmatter_document_title.clone()), &no_new)
+            debt(&Graph::from_state(&before_state, false, options.clone(), config.workspace.frontmatter_document_title.clone()), &no_new)
         });
         assert!(result.is_ok());
         samples.push(started.elapsed());

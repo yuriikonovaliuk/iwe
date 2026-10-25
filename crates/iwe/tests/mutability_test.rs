@@ -10,7 +10,7 @@
 // schema, a body and an ordinary `archived` field), no origin/package/
 // assembly vocabulary anywhere.
 
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions, Patterns, SchemaBinding};
+use diwe::config::{Configuration, WorkspaceOptions, MarkdownOptions, Patterns, SchemaBinding};
 use std::collections::HashMap;
 use std::fs::{create_dir_all, read_to_string, write};
 use std::path::Path;
@@ -107,7 +107,7 @@ fn binding(name: &str, pattern: &str) -> HashMap<String, SchemaBinding> {
 
 fn write_config(path: &Path, schemas: HashMap<String, SchemaBinding>) {
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },

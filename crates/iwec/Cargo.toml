@@ -1,6 +1,8 @@
 [package]
 name = "iwec"
-description = "IWE MCP server"
+description = "IWE MCP server: a Markdown knowledge base as structured memory for AI agents"
+homepage = "https://iwe.md/docs/agentic/mcp/"
+documentation = "https://iwe.md/docs/"
 include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs"]
 autotests = false
 
@@ -63,3 +65,6 @@ indoc.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "test-util", "net", "time"] }
 rmcp = { version = "3", features = ["server", "client", "macros", "transport-io", "transport-async-rw", "transport-child-process", "transport-streamable-http-client-reqwest", "schemars"] }
 anyhow = "1"
+
+[lints]
+workspace = true

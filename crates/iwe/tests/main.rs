@@ -1,3 +1,5 @@
+#![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
+
 mod common;
 
 mod attach_test;
@@ -8,6 +10,7 @@ mod cli_mcp_write_scope_parity_test;
 mod cli_write_gate_test;
 mod commit_trigger_test;
 mod completions_test;
+mod config_test;
 mod create_test;
 mod d4_delete_mutability_test;
 mod delete_test;

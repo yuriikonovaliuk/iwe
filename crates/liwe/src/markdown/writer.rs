@@ -170,10 +170,10 @@ impl CmarkTableWriter {
                     events.push(Event::Start(Tag::Link {
                         title: "".into(),
                         link_type: link_type(reference.reference_type.to_link_type()),
-                        dest_url: reference.key.to_library_url().into(),
+                        dest_url: reference.target.unresolved_url().into(),
                         id: "".into(),
                     }));
-                    events.push(Event::Text(reference.text.into()));
+                    events.extend(self.inlines_to_events(reference.inlines));
                     events.push(Event::End(TagEnd::Link));
                 }
                 Inline::Math(math_type, math) => {

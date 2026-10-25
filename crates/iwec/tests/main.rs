@@ -1,3 +1,5 @@
+#![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
+
 mod fixture;
 
 mod agent_transaction_test;

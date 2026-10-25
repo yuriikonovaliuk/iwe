@@ -1,8 +1,8 @@
-use crate::model::{Key, LineRange, NodeId};
+use crate::model::{LineRange, NodeId};
 
 use super::config::FormatOptions;
 use super::ids::alloc_node_id;
-use super::inline::{Inline, Inlines};
+use super::inline::Inlines;
 use super::node::{ColumnAlignment, Node, ReferenceType};
 use super::projector::Projector;
 
@@ -100,17 +100,7 @@ pub trait NodeIter<'a>: Sized {
     fn ref_text(&self) -> Option<String> {
         self.node().and_then(|node| {
             if let Node::Reference(reference) = node {
-                Some(reference.text.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn ref_key2(&self) -> Option<Key> {
-        self.node().and_then(|node| {
-            if let Node::Reference(reference) = node {
-                Some(reference.key.clone())
+                Some(reference.text())
             } else {
                 None
             }
@@ -123,7 +113,7 @@ pub trait NodeIter<'a>: Sized {
                 Node::Section(inlines) => inlines.clone(),
                 Node::Leaf(inlines) => inlines.clone(),
                 Node::Item(_, inlines) => inlines.clone(),
-                Node::Reference(reference) => vec![Inline::Str(reference.text)],
+                Node::Reference(reference) => reference.inlines,
                 _ => vec![],
             })
             .unwrap_or_default()

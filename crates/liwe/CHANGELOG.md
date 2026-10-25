@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] — 2026-10-25 (iwe-plus; upstream iwe 0.29.1)
+
+### Changed
+
+- Merged upstream iwe 0.29.1: collation module and locale-aware sorting, `init` detection moved here from the `iwe` crate, wiki-link `#section` anchors, lower memory use when loading large workspaces.
+
 ## [1.5.0] — 2026-09-26 (iwe-plus; upstream iwe 0.24.2)
 
 ### Added
@@ -70,6 +76,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `argue` warns on circular grounds: an objection resting (transitively) on the claim it attacks, or on the other side of a dispute it enters. Nodes carry `test_state` for hypotheses.
 - `query::argue`: computed acceptability of claims and objections — grounded semantics with deductive support over `Against`/`Undermines` attack edges and `Rests on` support edges, with per-node `because` chains, dispute summaries and warnings. Exported as `argue`, `Argument`, `ArgueStatus`, `render_argument_text`.
 - `via` on `$references` / `$referencedBy`: a block predicate (or a section name) that restricts which of a document's links count as reference edges, applied at every hop of the walk — `$references: { match: { $key: K }, via: Is a, maxDistance: 0 }` follows only the chain of "Is a" links. Rejected on inclusion operators. `BlockIndex::targets_within`, `ViaWalk`, `build_filter_value` are exported for callers.
+
+## [0.29.1](https://github.com/iwe-org/iwe/compare/liwe-v0.29.0...liwe-v0.29.1) - 2026-10-24
+
+### Changed
+- `Target::Name` is now a struct variant `Target::Name { name, fragment }` (was `Target::Name(String)`); `Target::name` splits the `#fragment` off wiki link text
+
+### Added
+- `Target::with_name` and `with_fragment` helpers
+
+### Fixed
+- Wiki links with a `#fragment` now resolve to the note and keep the fragment on rename
+
+## [0.29.0](https://github.com/iwe-org/iwe/compare/liwe-v0.28.0...liwe-v0.29.0) - 2026-10-20
+
+### Added
+
+- `Serialize` and `Deserialize` for `Inline`, `Attributes`, `Reference`, `Target`, `ReferenceType`, `LinkType` and `MathType`
+
+### Fixed
+
+- `MarkdownReader` keeps list item text that follows a code block, horizontal rule or heading as its own paragraph (previously the text was dropped, or merged into the heading)
+
+## [0.28.0](https://github.com/iwe-org/iwe/compare/liwe-v0.27.0...liwe-v0.28.0) - 2026-10-17
+
+### Added
+
+- `collation::TitleCollator` for locale-aware text ordering (case and accents break ties only, numbers compare by value, emoji are ignored); `TitleCollator::binary()` keeps codepoint order
+- `Graph::collator` and `Graph::with_collator`; the default is binary
+- `locale::strip_locale_encoding`
+- `Collation` and `Sort::collation`: a sort key may set `binary` or a locale tag to choose how its strings compare; `TitleCollator::for_collation` builds the matching collator
+
+### Changed
+
+- `sort_in_place` takes a `&TitleCollator`; `Tree::sort_children` and `Tree::is_sorted` take a comparator closure
+
+### Fixed
+
+- `get_locale` accepts locale strings with a `@` modifier such as `de_DE@euro`
+
+## [0.27.0](https://github.com/iwe-org/iwe/compare/liwe-v0.26.1...liwe-v0.27.0) - 2026-10-16
+
+### Added
+
+- `liwe::init` module with the workspace scan, notes folder detection, environment probe and settings detection used by `iwe init`
+- `liwe::fs::walk_md_paths` to list the documents under a directory, honoring `.gitignore`
+- `Target` type for what a link points at: a document key for regular links, the name as written for wiki links
+- `KeyIndex::target_key`, `KeyIndex::resolve`, `KeyIndex::bucket`, `KeyIndex::name_bucket`, `KeyIndex::contains` and `KeyRename` for resolving and renaming link targets
+- `Graph::target_key`, `Graph::resolve`, `Graph::reference_target_key`, `Graph::get_wiki_edges_named_like` and `GraphNode::targets`
+
+### Changed
+
+- Wiki links are resolved against the current documents every time they are read, so creating, moving or removing a note updates backlinks and edges without re-reading the notes that link to it (previously resolved once, when the linking note was parsed)
+- `Reference` and `GraphNode::Reference` hold a `target: Target` (was `key` and `url`); `Reference::plain` and `GraphBuilder::reference_with_inlines` take a `Target`
+- `Inline::ref_keys`, `Line::ref_keys`, `GraphNode::ref_key`, `NodePointer::ref_key`, `Node::reference_key`, `Tree::get_all_inclusion_edge_keys` and `Tree::find_reference_key` return targets instead of keys and are renamed accordingly; `NodePointer` gains `to_target`
+- `Tree::change_key` and `Inline::change_key` are replaced by `rewrite_targets`, which also reaches links inside link text and images
+- `Tree::remove_inclusion_edges_to` and `Tree::remove_inline_links_to` take a predicate over targets, and `Tree::annotate_references` looks parents up by target
+- `InlinesContext::wiki_display` takes a `&Target` (was a key and the written url)
+- `to_graph_inlines`, `DocumentInline::to_graph_inline` and `SectionsBuilder::new` no longer take a `KeyIndex`
+- `operations::references`, `operations::select_reference` and `BlockIndex::from_tree` take a `&KeyIndex`
+- `rename` rewrites a wiki link only when it would stop pointing at the renamed note, writes the shortest name that still resolves (a full path stays a full path), and leaves unchanged documents out of the result (previously every linking document was rewritten with the full path)
+- `rename` rewrites a `[[Name]]` link that pointed at another note and would match the new name, so it keeps pointing at that note; a `[[Name]]` link that pointed nowhere is left as is and points to the renamed note from then on
+- An unresolved wiki link is written as typed in every `wiki_link_path` mode (previously `full` dropped a `.md` extension, so `[[missing.md]]` became `[[missing]]`)
+- `KeyIndex::resolve_link_key` is removed; use `KeyIndex::target_key` with `Target::from_link_url`
+- `delete` removes only the links that pointed at the deleted note; a `[[Name]]` link kept by hand points to another note with the same file name, if there is one
+
+### Fixed
+
+- `Graph::reindex_keys` and backlink cleanup no longer overflow the stack on documents with thousands of blocks in one run
+
+## [0.26.1](https://github.com/iwe-org/iwe/compare/liwe-v0.26.0...liwe-v0.26.1) - 2026-10-08
+
+### Changed
+
+- `is_document_url` is false for a link to a local file that is not a document (such as `schema.yaml` or `image.png`), so such links stay an `Inline::Link` instead of becoming a reference
+
+### Fixed
+
+- `$referencedBy` and `$includedBy` no longer return keys for link targets that have no document, which made `$matches`, `$blocks` and `$content` panic
+
+## [0.26.0](https://github.com/iwe-org/iwe/compare/liwe-v0.25.0...liwe-v0.26.0) - 2026-10-07
+
+### Added
+
+- `is_document_url` in `liwe::model` — true for a relative link that names a document, false for an external URL or a directory path (ending in `/`, or whose last segment is `.` or `..`).
+
+### Changed
+
+- `Reference` stores the link text as written in an `inlines` field (code spans, emphasis and the like) instead of a plain `text` string; `text()` now derives the plain form from the inlines, and `Reference::plain` builds one from a plain string. `GraphNode::new_ref` takes the inlines where it took the text, and `GraphBuilder::reference_with_text` is now `reference_with_inlines`.
+- A link whose target is a directory (ends in `/`, or is `.` or `..`) is no longer turned into a reference: it stays an `Inline::Link` and is written back unchanged.
+
+### Fixed
+
+- Code spans and emphasis inside link text survive a round trip through the graph (previously flattened to plain words).
+
+## [0.25.0](https://github.com/iwe-org/iwe/compare/liwe-v0.24.2...liwe-v0.25.0) - 2026-10-02
+
+### Changed
+
+- `Key::to_workspace_url()` replaces `Key::to_library_url()`, and `WorkspaceUrl` replaces the `LibraryUrl` type alias.
+
+### Deprecated
+
+- `Key::to_library_url()` and `LibraryUrl` retained as deprecated aliases.
 
 ## [0.24.2](https://github.com/iwe-org/iwe/compare/liwe-v0.24.1...liwe-v0.24.2) - 2026-09-20
 

@@ -1,6 +1,8 @@
 [package]
 name = "diwe"
-description = "IWE engine library"
+description = "IWE engine library: loading, search, querying, schema validation and file watching for a Markdown knowledge base"
+homepage = "https://iwe.md/docs/architecture/"
+documentation = "https://docs.rs/diwe"
 include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "tests/**/*.md"]
 
 version.workspace = true
@@ -26,18 +28,22 @@ relative-path.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 ignore.workspace = true
-globset.workspace = true
+globset = { workspace = true, optional = true }
 regex.workspace = true
-csv.workspace = true
-tiktoken-rs.workspace = true
-bm25.workspace = true
-fuzzy-matcher.workspace = true
-notify = "8"
+csv = { workspace = true, optional = true }
+tiktoken-rs = { workspace = true, optional = true }
+bm25 = { workspace = true, optional = true }
+fuzzy-matcher = { workspace = true, optional = true }
+notify = { version = "8", optional = true }
 chrono.workspace = true
 libc = "0.2"
 serde_json.workspace = true
 uuid.workspace = true
 rustc-hash.workspace = true
+
+[features]
+default = ["engine"]
+engine = ["dep:bm25", "dep:tiktoken-rs", "dep:fuzzy-matcher", "dep:notify", "dep:csv", "dep:globset"]
 
 [dev-dependencies]
 env_logger.workspace = true
@@ -45,3 +51,6 @@ pretty_assertions.workspace = true
 tempfile.workspace = true
 crossbeam-channel.workspace = true
 iwe-lock.workspace = true
+
+[lints]
+workspace = true

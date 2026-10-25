@@ -22,8 +22,12 @@ impl Fixture {
 
     pub async fn with_documents_and_config(
         documents: Vec<(&str, &str)>,
-        config: Configuration,
+        mut config: Configuration,
     ) -> Self {
+        config
+            .workspace
+            .locale
+            .get_or_insert_with(|| "en".to_string());
         let server = IweServer::from_documents_with_config(documents, config);
         Self::serve(server).await
     }
@@ -79,6 +83,13 @@ impl Fixture {
         match response {
             ServerResult::CallToolResult(result) => Ok(result),
             other => panic!("expected CallToolResult, got: {other:?}"),
+        }
+    }
+
+    pub fn error_message(error: rmcp::ServiceError) -> String {
+        match error {
+            rmcp::ServiceError::McpError(data) => data.message.to_string(),
+            other => panic!("expected McpError, got: {other:?}"),
         }
     }
 
@@ -185,6 +196,16 @@ impl Fixture {
     }
 
     pub async fn get_prompt(&self, name: &str, arguments: serde_json::Value) -> GetPromptResult {
+        self.try_get_prompt(name, arguments)
+            .await
+            .expect("get prompt to succeed")
+    }
+
+    pub async fn try_get_prompt(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<GetPromptResult, rmcp::ServiceError> {
         let params = match arguments {
             serde_json::Value::Object(map) => {
                 let string_map: serde_json::Map<String, serde_json::Value> = map
@@ -202,11 +223,10 @@ impl Fixture {
         let response = self
             .client
             .send_request(ClientRequest::GetPromptRequest(Request::new(params)))
-            .await
-            .expect("get prompt to succeed");
+            .await?;
 
         match response {
-            ServerResult::GetPromptResult(result) => result,
+            ServerResult::GetPromptResult(result) => Ok(result),
             other => panic!("expected GetPromptResult, got: {other:?}"),
         }
     }

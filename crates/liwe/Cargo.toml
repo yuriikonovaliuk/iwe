@@ -1,6 +1,8 @@
 [package]
 name = "liwe"
-description = "IWE core library"
+description = "IWE core library: Markdown knowledge graph parsing, querying and graph operations"
+homepage = "https://iwe.md/docs/architecture/"
+documentation = "https://docs.rs/liwe"
 include = ["Cargo.toml", "src/**/*.rs", "src/**/*.json", "tests/**/*.rs", "tests/**/*.md"]
 autotests = false
 
@@ -22,6 +24,7 @@ djot = ["dep:jotdown"]
 libc = "0.2"
 indoc.workspace = true
 serde.workspace = true
+postcard.workspace = true
 itertools.workspace = true
 log.workspace = true
 rayon.workspace = true
@@ -36,11 +39,15 @@ serde_json.workspace = true
 relative-path.workspace = true
 chrono.workspace = true
 sys-locale.workspace = true
+icu_collator.workspace = true
+icu_locale_core.workspace = true
+icu_properties.workspace = true
 serde_yaml.workspace = true
 minijinja.workspace = true
 sanitize-filename.workspace = true
 percent-encoding.workspace = true
 iwe-lock.workspace = true
+ignore.workspace = true
 
 [[test]]
 name = "integration"
@@ -68,3 +75,6 @@ path = "tests/write_lock_test.rs"
 env_logger.workspace = true
 pretty_assertions.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

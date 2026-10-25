@@ -27,7 +27,7 @@ bullet_list_content_indent = 4
 rule_token = "-"
 rule_token_count = 72
 
-[library]
+[workspace]
 path = ""
 date_format = "%Y-%m-%d"
 time_format = "%Y-%m-%d %H:%M"
@@ -43,7 +43,7 @@ trigger_characters = ["["]
 ### Markdown Settings
 
 - `refs_extension`: File extension for markdown references (default: empty, uses `.md`)
-- `refs_path`: How the path inside a regular markdown link (`[…](…)`) is written (default: `"relative"`). One of `"relative"` or `"absolute"`: `"relative"` writes each link relative to the linking document's directory, and `"absolute"` writes every link as a root-absolute path from the library root (`/dir/note.md`). Affects normalization, formatting, and link completion. Resolution is unaffected — a link with a leading `/` always resolves from the library root regardless of this setting, and a `#section` fragment is dropped before the target key is computed. See [Keys and Cross-References](keys.md) for details.
+- `refs_path`: How the path inside a regular markdown link (`[…](…)`) is written (default: `"relative"`). One of `"relative"` or `"absolute"`: `"relative"` writes each link relative to the linking document's directory, and `"absolute"` writes every link as a root-absolute path from the workspace root (`/dir/note.md`). Affects normalization, formatting, and link completion. Resolution is unaffected — a link with a leading `/` always resolves from the workspace root regardless of this setting, and a `#section` fragment is dropped before the target key is computed. See [Keys and Cross-References](keys.md) for details.
 - `refs_text`: How the text of a regular markdown link (`[text](…)`) is written when documents are written (default: `"preserve"`). One of `"preserve"` or `"normalize"`: `"preserve"` keeps the link text exactly as typed, and `"normalize"` rewrites each link's text to the linked document's title (its frontmatter title when configured, otherwise its first header). Affects normalization and formatting; wiki links are unaffected. See [Keys and Cross-References](keys.md) for details.
 - `date_format`: Date format for markdown content display and the `{{today}}` variable (default: `"%b %d, %Y"`, e.g., "Jan 15, 2024")
 - `time_format`: Format for the `{{now}}` variable in document content (default: falls back to `date_format`). Use this to include time components like `%H`, `%M`, `%S` in `{{now}}` while keeping `{{today}}` date-only.
@@ -77,12 +77,12 @@ list_token = "-"
 - `line_break_style`: How preserved hard breaks are emitted (default: `"backslash"`). Options: `"backslash"` (`\\\n`, visible and survives whitespace-trimming editors), `"spaces"` (`  \n`, invisible CommonMark default). Only takes effect when `preserve_line_breaks = true`.
 - `preserve_newlines`: Keep soft line breaks inside a paragraph instead of joining the lines (default: `false`). With this on, a paragraph written one sentence per line ([semantic line breaks](https://sembr.org/)) keeps its line layout through normalization instead of being reflowed onto a single line. Composes with `wrap_column`: a preserved line longer than the limit is wrapped on its own, and short lines are left alone instead of being joined.
 
-### Library Settings
+### Workspace Settings
 
 - `path`: Subdirectory for markdown files relative to project root (default: empty, uses root)
 - `date_format`: Date format for file key generation and the `{{today}}` variable (default: `"%Y-%m-%d"`, e.g., "2024-01-15")
 - `time_format`: Format for the `{{now}}` variable in file key generation (default: falls back to `date_format`). Use this to include time components in keys, e.g., `"%Y-%m-%d-%H%M"` for sortable keys with time.
-- `locale`: Locale for date formatting (default: auto-detected from system). Affects day and month names when using `%A`, `%B`, etc.
+- `locale`: Locale for date formatting and for sorting (default: auto-detected from system). Affects day and month names when using `%A`, `%B`, etc., and picks the language rules used to order titles and other text in query `sort`, the sort action and completion.
 - `frontmatter_document_title`: YAML frontmatter field to use as document title (default: none, uses first header)
 
 ### Completion Settings
@@ -135,11 +135,11 @@ Textual specifiers (`%A`, `%a`, `%B`, `%b`) are localized based on the `locale` 
 
 IWE supports separate locales for file keys and document content. By default, both use your system locale independently.
 
-- **`library.locale`**: Controls the language for file key generation (e.g., `journal/Friday-March-27`)
+- **`workspace.locale`**: Controls the language for file key generation (e.g., `journal/Friday-March-27`)
 - **`markdown.locale`**: Controls the language for document content (e.g., `# Freitag, 27. März 2026`)
 
 ``` toml
-[library]
+[workspace]
 date_format = "%A-%B-%d"
 locale = "en_US"
 
@@ -153,6 +153,8 @@ With this configuration:
 - File keys use English day/month names: `journal/Friday-March-27`
 - Document content uses German: `# Freitag, 27. März 2026`
 
+`workspace.locale` also selects the collation rules for sorting. Text is ordered the way the language expects (case and accents only break ties, digit runs compare by value so `Note 2` comes before `Note 10`, and emoji are skipped unless the remaining text is identical). Set it in a shared workspace so every machine sorts the same way; without it the system locale is used, and English is the fallback.
+
 The locale accepts both POSIX format (`de_DE`) and BCP47 format (`de-DE`). Encoding suffixes like `.UTF-8` are automatically stripped.
 
 ### Frontmatter Document Title
@@ -160,7 +162,7 @@ The locale accepts both POSIX format (`de_DE`) and BCP47 format (`de-DE`). Encod
 By default, IWE uses the first header in a document as its title for links, autocomplete suggestions, and search results. You can override this behavior by specifying a YAML frontmatter field to use instead:
 
 ``` toml
-[library]
+[workspace]
 frontmatter_document_title = "title"
 ```
 
@@ -328,8 +330,8 @@ Attach action parameters:
 
 **Attach Actions** support:
 
-- `{{today}}`: Current date formatted using `library.date_format` (for keys) or `markdown.date_format` (for content). Intended for date-only formatting.
-- `{{now}}`: Current date/time formatted using `library.time_format` (for keys) or `markdown.time_format` (for content). Falls back to `date_format` if `time_format` is not set. Intended for date+time formatting.
+- `{{today}}`: Current date formatted using `workspace.date_format` (for keys) or `markdown.date_format` (for content). Intended for date-only formatting.
+- `{{now}}`: Current date/time formatted using `workspace.time_format` (for keys) or `markdown.time_format` (for content). Falls back to `date_format` if `time_format` is not set. Intended for date+time formatting.
 - `{{content}}`: The content being attached
 
 **Transform Actions** support:
@@ -432,7 +434,7 @@ match = ["notes/**", "!notes/index"]
   against the document key (the relative path without the file extension).
 - Globs follow gitignore/globset syntax: `*` matches within a single path
   segment and stops at `/`, `**` crosses segments. A leading `/` is optional
-  — patterns are always anchored at the library root.
+  — patterns are always anchored at the workspace root.
 - A `!` prefix negates a pattern, gitignore-style: within one `match` list
   patterns apply in order and the last matching one decides, so
   `["notes/**", "!notes/index"]` binds everything under `notes/` except

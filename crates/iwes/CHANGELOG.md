@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- A note deleted and recreated outside the editor could disappear from the server until it was changed again
+- A note closed in the editor could briefly show outdated content
+
+## [0.29.1](https://github.com/iwe-org/iwe/compare/iwes-v0.29.0...iwes-v0.29.1) - 2026-10-24
+
+### Fixed
+- Rename keeps `#section` anchors in wiki links such as `[[note#section]]` (previously these links were left pointing at the old name)
+- Wiki links with a `#section` anchor now resolve to the note for go to definition, backlinks and other features
+
+## [0.29.0](https://github.com/iwe-org/iwe/compare/iwes-v0.28.0...iwes-v0.29.0) - 2026-10-20
+
+### Changed
+
+- Lower memory use when loading large workspaces
+
+### Fixed
+
+- `textDocument/formatting` keeps text that follows a code block, horizontal rule or heading inside a list item with no blank line between them (previously the text was dropped, or merged into the heading)
+
+## [0.28.0](https://github.com/iwe-org/iwe/compare/iwes-v0.27.0...iwes-v0.28.0) - 2026-10-17
+
+### Changed
+
+- The sort code action and completion ordering use locale-aware collation: case and accents no longer split a list, `Note 2` sorts before `Note 10` and emoji are ignored except to break ties
+- The collation language comes from `workspace.locale` in `.iwe/config.toml`, falling back to the system locale and then English
+
+### Fixed
+
+- `workspace.locale` and `markdown.locale` values with a `@` modifier such as `de_DE@euro` now format dates in that language (previously they fell back to POSIX)
+
+## [0.27.0](https://github.com/iwe-org/iwe/compare/iwes-v0.26.1...iwes-v0.27.0) - 2026-10-16
+
+### Added
+
+- `workspace/inlayHint/refresh` is sent when a document is created or removed
+
+### Changed
+
+- Backlinks, references and inlay hints follow wiki links to notes created, moved or removed after the linking note was opened (previously stale until the linking note was edited)
+- Rename sends no edits for notes whose wiki links still point at the moved note, and rewritten wiki links use the shortest name that resolves (was the full path)
+- Rename rewrites a `[[Name]]` link to another note that would otherwise start pointing at the renamed note, so it keeps its target
+
+## [0.26.1](https://github.com/iwe-org/iwe/compare/iwes-v0.26.0...iwes-v0.26.1) - 2026-10-08
+
+Workspace version bump — no user-visible changes in this crate.
+
+## [0.26.0](https://github.com/iwe-org/iwe/compare/iwes-v0.25.0...iwes-v0.26.0) - 2026-10-07
+
+### Fixed
+
+- Formatting keeps a link to a directory as written (`[docs](docs/)` no longer becomes `[docs](docs.md)`) and keeps code spans and emphasis inside link text instead of flattening them to plain words.
+
+## [0.25.0](https://github.com/iwe-org/iwe/compare/iwes-v0.24.2...iwes-v0.25.0) - 2026-10-02
+
+### Changed
+
+- The `[library]` configuration table is now `[workspace]`; the server reads the document path, date formats, locale and frontmatter title from it. A config that still says `[library]` keeps working.
+
 ## [0.24.2](https://github.com/iwe-org/iwe/compare/iwes-v0.24.1...iwes-v0.24.2) - 2026-09-20
 
 ### Fixed

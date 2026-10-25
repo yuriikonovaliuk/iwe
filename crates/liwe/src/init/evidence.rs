@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use diwe::fs::walk_md_paths;
-use liwe::model::config::Format;
+use crate::fs::walk_md_paths;
+use crate::model::config::Format;
 use regex::Regex;
 use serde::Serialize;
+
+use crate::init::notes::{notes_candidates, NotesProposal};
 
 pub const SCAN_CAP: usize = 5000;
 
@@ -175,7 +177,13 @@ pub struct Evidence {
     pub capped: bool,
     pub markdown_files: usize,
     pub djot_files: usize,
-    pub library_path: String,
+    pub workspace_path: String,
+    #[serde(skip)]
+    pub root: PathBuf,
+    #[serde(skip)]
+    pub markdown_keys: Vec<String>,
+    #[serde(skip)]
+    pub notes: NotesProposal,
 
     pub wiki_links: usize,
     pub markdown_links: usize,
@@ -272,30 +280,33 @@ pub fn scan(root: &Path) -> Evidence {
     };
     paths.sort();
 
-    evidence.library_path = detect_library_path(&paths);
+    evidence.root = root.to_path_buf();
+    evidence.markdown_keys = paths.iter().map(|(key, _)| key.clone()).collect();
+    evidence.notes = notes_candidates(&evidence);
+    evidence.workspace_path = evidence.notes.cli_workspace_path();
 
-    let prefix = if evidence.library_path.is_empty() {
+    let prefix = if evidence.workspace_path.is_empty() {
         String::new()
     } else {
-        format!("{}/", evidence.library_path)
+        format!("{}/", evidence.workspace_path)
     };
 
-    let mut in_library: Vec<(String, PathBuf)> = paths
+    let mut in_workspace: Vec<(String, PathBuf)> = paths
         .into_iter()
         .filter(|(key, _)| prefix.is_empty() || key.starts_with(&prefix))
         .map(|(key, path)| (key[prefix.len()..].to_string(), path))
         .collect();
 
-    if in_library.len() > SCAN_CAP {
+    if in_workspace.len() > SCAN_CAP {
         evidence.capped = true;
-        in_library.truncate(SCAN_CAP);
+        in_workspace.truncate(SCAN_CAP);
     }
-    evidence.scanned_files = in_library.len();
+    evidence.scanned_files = in_workspace.len();
 
-    let keys: BTreeSet<String> = in_library.iter().map(|(key, _)| key.clone()).collect();
+    let keys: BTreeSet<String> = in_workspace.iter().map(|(key, _)| key.clone()).collect();
 
     let mut facts = Vec::new();
-    for (key, path) in &in_library {
+    for (key, path) in &in_workspace {
         match std::fs::read(path) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(raw) => facts.push(scan_file(key, &raw, &mut evidence)),
@@ -310,72 +321,6 @@ pub fn scan(root: &Path) -> Evidence {
     evidence.locale_language = locale_language();
 
     evidence
-}
-
-const ROOT_META_FILES: [&str; 9] = [
-    "readme",
-    "agents",
-    "claude",
-    "contributing",
-    "changelog",
-    "license",
-    "code_of_conduct",
-    "security",
-    "index",
-];
-
-fn is_root_meta_file(key: &str) -> bool {
-    !key.contains('/') && ROOT_META_FILES.contains(&key.to_lowercase().as_str())
-}
-
-fn detect_library_path(all_paths: &[(String, PathBuf)]) -> String {
-    let paths: Vec<&(String, PathBuf)> = all_paths
-        .iter()
-        .filter(|(key, _)| !is_root_meta_file(key))
-        .collect();
-
-    if paths.is_empty() {
-        return String::new();
-    }
-
-    let mut current = String::new();
-    loop {
-        let prefix = if current.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", current)
-        };
-
-        let under: Vec<&String> = paths
-            .iter()
-            .map(|(key, _)| key)
-            .filter(|key| prefix.is_empty() || key.starts_with(&prefix))
-            .collect();
-
-        let mut children: BTreeMap<String, usize> = BTreeMap::new();
-        for key in &under {
-            let rest = &key[prefix.len()..];
-            if let Some((head, _)) = rest.split_once('/') {
-                *children.entry(head.to_string()).or_default() += 1;
-            }
-        }
-
-        let qualifying: Vec<(&String, &usize)> = children
-            .iter()
-            .filter(|(_, count)| **count * 10 >= paths.len() * 9)
-            .collect();
-
-        match qualifying.as_slice() {
-            [(head, _)] => {
-                current = if current.is_empty() {
-                    (*head).clone()
-                } else {
-                    format!("{}/{}", current, head)
-                };
-            }
-            _ => return current,
-        }
-    }
 }
 
 fn scan_file(key: &str, raw: &str, evidence: &mut Evidence) -> FileFacts {

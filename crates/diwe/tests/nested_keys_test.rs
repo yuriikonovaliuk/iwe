@@ -1,3 +1,5 @@
+#![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
+
 use std::fs;
 use std::sync::Once;
 
@@ -56,7 +58,7 @@ fn double_extension_file_strips_only_one_extension() {
 
     let graph = graph_from_path(&base_path, false, MarkdownOptions::default(), None);
 
-    let keys: Vec<String> = graph.keys().iter().map(|k| k.to_library_url()).collect();
+    let keys: Vec<String> = graph.keys().iter().map(|k| k.to_workspace_url()).collect();
 
     assert_eq!(keys, vec!["note.md".to_string()]);
 }

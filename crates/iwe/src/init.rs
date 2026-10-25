@@ -1,13 +1,11 @@
 pub mod agents;
-pub mod detect;
-pub mod evidence;
 pub mod fit;
 pub mod okf;
-pub mod probe;
 pub mod report;
 pub mod screen;
-pub mod settings;
 pub mod writer;
+
+pub use liwe::init::{detect, evidence, notes, probe, settings};
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -23,8 +21,8 @@ use crate::init::report::{
     epilogue, notes, render_settings, summarize, summary_line, warnings, Report,
 };
 use crate::init::screen::{run, Outcome};
-use crate::init::settings::{defaults, to_configuration, Confidence, SettingId, Settings, Value};
-use crate::init::writer::render;
+use crate::init::settings::{defaults, Confidence, SettingId, Settings, Value};
+use crate::init::writer::{render, to_configuration};
 use crate::internal::claude::{enable_memory, EnableOptions};
 
 pub const IWE_MARKER: &str = ".iwe";
@@ -36,7 +34,7 @@ pub const EXIT_ALREADY_INITIALIZED: i32 = 2;
 
 #[derive(Debug, Default, Clone)]
 pub struct Overrides {
-    pub library: Option<String>,
+    pub workspace: Option<String>,
     pub link_format: Option<String>,
     pub refs_extension: Option<String>,
     pub format: Option<String>,
@@ -46,8 +44,8 @@ pub struct Overrides {
 impl Overrides {
     fn entries(&self) -> Vec<(SettingId, String)> {
         let mut entries = Vec::new();
-        if let Some(value) = &self.library {
-            entries.push((SettingId::LibraryPath, value.clone()));
+        if let Some(value) = &self.workspace {
+            entries.push((SettingId::WorkspacePath, value.clone()));
         }
         if let Some(value) = &self.link_format {
             entries.push((SettingId::LinkFormat, value.clone()));
@@ -79,7 +77,7 @@ pub struct InitOptions {
     pub overrides: Overrides,
 }
 
-pub fn init_library(root: &Path, options: &InitOptions) -> i32 {
+pub fn init_workspace(root: &Path, options: &InitOptions) -> i32 {
     let marker = root.join(IWE_MARKER);
     if marker.exists() {
         return already_initialized(&marker, options);
@@ -155,15 +153,15 @@ pub fn init_library(root: &Path, options: &InitOptions) -> i32 {
     };
     let warnings = warnings(&evidence, &chosen, &probes);
     let mut notes = notes(&evidence);
-    let library = chosen
-        .get(SettingId::LibraryPath)
+    let workspace = chosen
+        .get(SettingId::WorkspacePath)
         .as_text()
         .unwrap_or_default()
         .to_string();
 
     if options.dry_run {
         if options.okf {
-            notes.extend(okf::planned_artifacts(root, &library));
+            notes.extend(okf::planned_artifacts(root, &workspace));
         }
         return finish_dry_run(
             options,
@@ -188,7 +186,7 @@ pub fn init_library(root: &Path, options: &InitOptions) -> i32 {
 
     let mut artifacts = Vec::new();
     if options.okf {
-        artifacts.extend(okf::write_artifacts(root, &library));
+        artifacts.extend(okf::write_artifacts(root, &workspace));
     }
     if chosen.agents_enabled() {
         artifacts.extend(write_agent_artifacts(root, !confirmed));

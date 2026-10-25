@@ -165,6 +165,10 @@ All write and refactoring tools support a `dry_run` parameter to preview changes
 
 `iwe_find`, `iwe_retrieve`, and `iwe_tree` accept a structural selector embedded in their tool input: `in`, `in_any`, `not_in`, and `max_depth`. Each entry is either a bare key or `{ key, depth }`. These are a convenience for the most common selection patterns; the full query surface — `--filter`-style documents, `$`-prefixed graph operators, block predicates, frontmatter and block mutation — is `iwe_query`, documented in the [Query Language](query-language.md) reference.
 
+### Unknown keys
+
+`keys` on `iwe_retrieve` and `iwe_tree`, and `key` on every single-document tool and on the `review` / `refactor` prompts, name documents: an unknown key is an `invalid_params` error that lists every missing key. Selector anchors, `exclude`, and `keys` used as the candidate set for `search` / `fuzzy` are filters and may match nothing. See [Named Keys vs Filters](keys.md#named-keys-vs-filters).
+
 ## Prompts
 
 The server provides three built-in prompts that guide AI agents through common workflows:
@@ -189,3 +193,13 @@ The server exposes knowledge graph data as MCP resources:
 ## File watching
 
 The MCP server watches the knowledge graph directory for changes. When you edit markdown files in your editor, the server automatically updates its in-memory graph. There is no need to restart the server after making changes.
+
+## Consistency
+
+- Each tool call works on the graph in one step. Writes run one at a time; reads run alongside each other but never alongside a write, including updates from the file watcher. A read that arrives while a write is waiting runs after that write.
+- A call that starts after an MCP write returned sees that write. A multi-file operation (rename, delete, extract, inline, attach, query update or delete) that succeeds becomes visible as a whole.
+- A call runs to completion even if the client cancels it.
+- If writing files fails, the tool returns an error. Some files may already be changed; the server re-reads every note the call touched, so the graph shows what reached disk.
+- Edits made outside the server (CLI, editor, git) are picked up by the file watcher shortly after, with no ordering across files. A note that another program is still writing can briefly appear incomplete until its next change event. Hidden and gitignored files are not watched.
+- Clients that need to share one graph should connect to a single `--transport http` server: all its sessions share one graph. With stdio each client starts its own server with its own graph.
+- A sequence of calls is not a transaction. To publish several related notes, write the new notes first, then one note that points to them.

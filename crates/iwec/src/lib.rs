@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Local;
 use diwe::config::{
-    library_path_in, schemas_dir_in, ActionDefinition, CompletionOptions, Configuration,
+    schemas_dir_in, workspace_path_in, ActionDefinition, CompletionOptions, Configuration,
     MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
@@ -19,6 +19,7 @@ use diwe::fs::{
     key_escapes_workspace, new_for_path, new_from_hashmap, workspace_document_path,
     write_file_if_changed,
 };
+use diwe::require_documents;
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_documents_in, validate_pending_documents,
@@ -32,6 +33,7 @@ use diwe::stats::{
 };
 use diwe::tokens::Truncation;
 use diwe::validating_transaction::ValidatingTransaction;
+use liwe::collation::TitleCollator;
 use liwe::graph::{Graph, GraphContext};
 use liwe::model::node::NodePointer;
 use liwe::model::tree::{Tree, TreeIter};
@@ -314,7 +316,7 @@ pub struct ExpandParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RetrieveParams {
     #[schemars(
-        description = "Document keys to retrieve, or the candidate set searched within when `search`/`fuzzy` is present. Can be empty when a structural selector is provided."
+        description = "Document keys to retrieve, or the candidate set searched within when `search`/`fuzzy` is present. Unknown keys are an error unless searching, where they match nothing. Can be empty when a structural selector is provided."
     )]
     #[serde(default)]
     pub keys: Vec<String>,
@@ -432,7 +434,7 @@ impl RetrieveParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TreeParams {
     #[schemars(
-        description = "Starting document keys. If empty and no selector, shows all root documents."
+        description = "Starting document keys. Unknown keys are an error. If empty and no selector, shows all root documents."
     )]
     pub keys: Option<Vec<String>>,
     #[schemars(description = "Maximum traversal depth. Default: 4")]
@@ -606,7 +608,7 @@ pub struct QueryParams {
     )]
     pub operation: QueryKind,
     #[schemars(
-        description = "The operation document as YAML. Uses the IWE query + block-selection language: `filter` (with $content block membership), `project`/`addFields` ($content narrowing, $blocks, $matches), `sort`, `limit` for reads; `filter` + `update` (with block operators $replace, $replaceText, $insertBefore, $insertAfter, $append, $delete) for update; `filter` + `expect` for delete. This surface is always strict: every mutating application must carry an `expect` guard (document-level `expect`, and one per block operator)."
+        description = "The operation document as YAML. Uses the IWE query + block-selection language: `filter` (with $content block membership), `project`/`addFields` ($content narrowing, $blocks, $matches), `sort` (`field: 1 | -1`, or `field: { order, collation }` with `binary` or a locale tag), `limit` for reads; `filter` + `update` (with block operators $replace, $replaceText, $insertBefore, $insertAfter, $append, $delete) for update; `filter` + `expect` for delete. This surface is always strict: every mutating application must carry an `expect` guard (document-level `expect`, and one per block operator)."
     )]
     pub document: String,
     #[schemars(
@@ -774,14 +776,15 @@ struct AttachActionEntry {
 #[derive(Debug, Serialize)]
 struct ConfigResource {
     markdown: MarkdownOptions,
-    library: LibraryResourceView,
+    workspace: WorkspaceResourceView,
+    library: WorkspaceResourceView,
     completion: CompletionOptions,
     templates: HashMap<String, NoteTemplate>,
     actions: Vec<ActionResourceView>,
 }
 
-#[derive(Debug, Serialize)]
-struct LibraryResourceView {
+#[derive(Debug, Clone, Serialize)]
+struct WorkspaceResourceView {
     date_format: Option<String>,
     default_template: Option<String>,
     frontmatter_document_title: Option<String>,
@@ -825,14 +828,17 @@ impl ConfigResource {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        let workspace = WorkspaceResourceView {
+            date_format: config.workspace.date_format.clone(),
+            default_template: config.workspace.default_template.clone(),
+            frontmatter_document_title: config.workspace.frontmatter_document_title.clone(),
+            locale: config.workspace.locale.clone(),
+        };
+
         Ok(Self {
             markdown: config.markdown.clone(),
-            library: LibraryResourceView {
-                date_format: config.library.date_format.clone(),
-                default_template: config.library.default_template.clone(),
-                frontmatter_document_title: config.library.frontmatter_document_title.clone(),
-                locale: config.library.locale.clone(),
-            },
+            library: workspace.clone(),
+            workspace,
             completion: config.completion.clone(),
             templates: config.templates.clone(),
             actions,
@@ -1215,8 +1221,10 @@ impl IweServer {
             let seeds = diwe::search_query::ranked(&graph, &index, &candidates, &spec);
             reader.retrieve_many(&seeds, &options)
         } else {
-            options.filter = params.selector.to_filter();
+            // A missing key is answered below with its fill-in request, not
+            // refused (unlike upstream's require_documents).
             let keys: Vec<Key> = params.keys.iter().map(|k| Key::name(k)).collect();
+            options.filter = params.selector.to_filter();
             reader.retrieve_many(&keys, &options)
         };
 
@@ -1263,6 +1271,7 @@ impl IweServer {
             .filter(|k| !k.is_empty())
             .map(|ks| ks.iter().map(|k| Key::name(k)).collect())
             .unwrap_or_default();
+        require_documents(&graph, &explicit_keys).map_err(|e| McpError::invalid_params(e, None))?;
 
         let root_keys: Vec<Key> = if let Some(f) = filter {
             let selector_set: HashSet<Key> = query::evaluate(&f, &graph).into_iter().collect();
@@ -1425,7 +1434,7 @@ impl IweServer {
         }
 
         let squashed: Tree = (&*graph).squash(&key, depth);
-        let mut patch = Graph::new();
+        let mut patch = graph.new_patch();
         patch.build_key_from_iter(&key, TreeIter::new(&squashed));
         let content = patch.export_key(&key).unwrap_or_default();
         to_text_result(content)
@@ -1539,7 +1548,7 @@ impl IweServer {
                 &key,
                 &markdown,
                 self.config.format_options(),
-                self.config.library.frontmatter_document_title.clone(),
+                self.config.workspace.frontmatter_document_title.clone(),
             );
             let linked = diwe::integrity::append_link_item(
                 &parent_content,
@@ -1983,7 +1992,7 @@ impl IweServer {
         let tree = (&*graph).collect(&source_key);
 
         if params.list.unwrap_or(false) {
-            let refs: Vec<ReferenceEntry> = references(&tree)
+            let refs: Vec<ReferenceEntry> = references(&tree, graph.key_index())
                 .into_iter()
                 .map(|reference| ReferenceEntry {
                     block_number: reference.number,
@@ -1994,7 +2003,12 @@ impl IweServer {
             return to_json_result(&refs);
         }
 
-        let reference = match select_reference(&tree, params.reference.as_deref(), params.block) {
+        let reference = match select_reference(
+            &tree,
+            graph.key_index(),
+            params.reference.as_deref(),
+            params.block,
+        ) {
             Ok(reference) => reference,
             Err(SelectError::NotFound(query)) => {
                 return Err(McpError::invalid_params(
@@ -2070,12 +2084,12 @@ impl IweServer {
         let state = graph.export();
         let original_count = state.len();
 
-        let mut changed = 0usize;
+        let mut changed = 0;
         if self.base_path.is_some() {
-            for (key_str, normalized_content) in &state {
-                let key = Key::name(key_str);
+            for (key_str, normalized_content) in state {
+                let key = Key::name(&key_str);
                 if self.read_file(&key).as_deref() != Some(normalized_content.as_str()) {
-                    self.write_file(&key, normalized_content, &handle, implicit_handle)
+                    self.write_file(&key, &normalized_content, &handle, implicit_handle)
                         .map_err(write_error_to_mcp)?;
                     changed += 1;
                 }
@@ -2574,7 +2588,7 @@ fn build_tree_node(
         let ref_node_ids = graph.get_inclusion_edges_in(key);
         let mut refs: Vec<Key> = ref_node_ids
             .iter()
-            .filter_map(|id| graph.graph_node(*id).ref_key())
+            .filter_map(|id| graph.reference_target_key(*id))
             .collect();
         refs.sort();
         refs.into_iter()
@@ -2623,6 +2637,8 @@ impl IweServer {
     ) -> Result<GetPromptResult, McpError> {
         let graph = self.graph.lock().await;
         let key = Key::name(&args.key);
+        require_documents(&graph, std::slice::from_ref(&key))
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let reader = DocumentReader::new(&graph);
         let output = reader.retrieve(
             &key,
@@ -2658,6 +2674,8 @@ impl IweServer {
     ) -> Result<GetPromptResult, McpError> {
         let graph = self.graph.lock().await;
         let key = Key::name(&args.key);
+        require_documents(&graph, std::slice::from_ref(&key))
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let reader = DocumentReader::new(&graph);
         let output = reader.retrieve(
             &key,
@@ -2844,17 +2862,20 @@ impl ServerHandler for IweServer {
 impl IweServer {
     pub fn new(project_path: &str, configuration: &Configuration) -> Self {
         let root = PathBuf::from_str(project_path).expect("valid path");
-        let library = library_path_in(&root, configuration);
-        let state = new_for_path(&library, configuration.format);
+        let workspace = workspace_path_in(&root, configuration);
+        let state = new_for_path(&workspace, configuration.format);
         let graph = Graph::from_state(
             &state,
             false,
             configuration.format_options(),
-            configuration.library.frontmatter_document_title.clone(),
-        );
+            configuration.workspace.frontmatter_document_title.clone(),
+        )
+        .with_collator(TitleCollator::for_locale(
+            configuration.workspace.locale.as_deref(),
+        ));
         Self {
             graph: Arc::new(Mutex::new(graph)),
-            base_path: Some(library),
+            base_path: Some(workspace),
             project_path: Some(root),
             config: configuration.clone(),
             index: Arc::new(Mutex::new(None)),
@@ -2873,7 +2894,7 @@ impl IweServer {
             &state,
             false,
             configuration.format_options(),
-            configuration.library.frontmatter_document_title.clone(),
+            configuration.workspace.frontmatter_document_title.clone(),
         );
         Self {
             graph: Arc::new(Mutex::new(graph)),
@@ -3071,7 +3092,9 @@ impl IweServer {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<HashMap<String, String>>(),
         );
-        let graph = Graph::from_state(&state, true, MarkdownOptions::default(), None);
+        let graph = Graph::from_state(&state, true, config.format_options(), None).with_collator(
+            TitleCollator::for_locale(config.workspace.locale.as_deref()),
+        );
         Self {
             graph: Arc::new(Mutex::new(graph)),
             base_path: None,
@@ -3402,7 +3425,7 @@ impl IweServer {
             &state,
             false,
             self.config.format_options(),
-            self.config.library.frontmatter_document_title.clone(),
+            self.config.workspace.frontmatter_document_title.clone(),
         );
         *self.graph.lock().await = reloaded;
         *self.index.lock().await = None;
@@ -3791,7 +3814,7 @@ impl IweServer {
         let now = Local::now();
         let date_format = self
             .config
-            .library
+            .workspace
             .date_format
             .as_deref()
             .unwrap_or(DEFAULT_KEY_DATE_FORMAT);

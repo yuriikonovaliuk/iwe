@@ -1,4 +1,4 @@
-use diwe::config::{Configuration, LibraryOptions, MarkdownOptions};
+use diwe::config::{Configuration, MarkdownOptions, WorkspaceOptions};
 use indoc::indoc;
 use std::fs::{create_dir_all, write};
 use std::process::Command;
@@ -32,7 +32,7 @@ fn setup_test_workspace() -> TempDir {
     create_dir_all(temp_path.join(".iwe")).expect("Failed to create .iwe directory");
 
     let config = Configuration {
-        library: LibraryOptions {
+        workspace: WorkspaceOptions {
             path: "".to_string(),
             ..Default::default()
         },
@@ -93,4 +93,17 @@ fn run_export_dot_command(temp_dir: &TempDir, args: &[&str]) -> std::process::Ou
     }
 
     cmd.output().expect("Failed to execute export dot command")
+}
+
+#[test]
+fn test_export_dot_rejects_unknown_key() {
+    let temp_dir = setup_test_workspace();
+    let output = run_export_dot_command(&temp_dir, &["-k", "missing"]);
+
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "Error: Document 'missing' not found\n"
+    );
 }

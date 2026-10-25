@@ -14,7 +14,7 @@ pub type LineMap = FxHashMap<LineId, Line>;
 
 fn empty_line() -> &'static Line {
     static EMPTY: OnceLock<Line> = OnceLock::new();
-    EMPTY.get_or_init(|| Line::new(0, Inlines::new()))
+    EMPTY.get_or_init(|| Line::new(Inlines::new()))
 }
 
 #[derive(Clone, Default)]
@@ -32,13 +32,19 @@ impl Arena {
         self.nodes.get(&id).cloned().unwrap_or(GraphNode::Empty)
     }
 
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|node| !matches!(node, GraphNode::Empty))
+    }
+
     pub fn get_line(&self, id: LineId) -> &Line {
         self.lines.get(&id).unwrap_or_else(|| empty_line())
     }
 
     pub fn add_line(&mut self, inlines: Inlines) -> LineId {
         let id = alloc_line_id();
-        self.lines.insert(id, Line::new(id, inlines));
+        self.lines.insert(id, Line::new(inlines));
         id
     }
 
@@ -153,7 +159,7 @@ impl<'a> BuildArena<'a> {
 
     pub fn add_line(&mut self, inlines: Inlines) -> LineId {
         let id = self.new_line_id();
-        self.lines.insert(id, Line::new(id, inlines));
+        self.lines.insert(id, Line::new(inlines));
         id
     }
 

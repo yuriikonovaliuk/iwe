@@ -541,7 +541,7 @@ impl ValidatingTransaction {
             state,
             false,
             self.config.format_options(),
-            self.config.library.frontmatter_document_title.clone(),
+            self.config.workspace.frontmatter_document_title.clone(),
         )
     }
 
@@ -551,7 +551,7 @@ impl ValidatingTransaction {
         format!(
             "{:?}|{:?}|{:?}",
             self.config.format_options(),
-            self.config.library.frontmatter_document_title,
+            self.config.workspace.frontmatter_document_title,
             self.config.integrity
         )
     }
