@@ -209,8 +209,8 @@ trial_index,key,label,order_position,elapsed_ms,returncode
 103,world/engineering/relations/registers,m2,1,60.296001145616174,0
 104,efforts/multi-agent-orchestration/stage,m2,0,61.28482706844807,0
 104,efforts/multi-agent-orchestration/stage,baseline,1,40.81926494836807,0
-105,world/engineering/rulings/2026-08-31-lean-on-minimax-m3-for-delegable-token-load,m2,0,64.005778869614,0
-105,world/engineering/rulings/2026-08-31-lean-on-minimax-m3-for-delegable-token-load,baseline,1,38.79568702541292,0
+105,world/engineering/rulings/2026-08-31-lean-on-model-a-for-delegable-token-load,m2,0,64.005778869614,0
+105,world/engineering/rulings/2026-08-31-lean-on-model-a-for-delegable-token-load,baseline,1,38.79568702541292,0
 106,efforts/multi-agent-orchestration/implementation/harness/ruling-a12-grounds,m2,0,70.8289691247046,0
 106,efforts/multi-agent-orchestration/implementation/harness/ruling-a12-grounds,baseline,1,42.02636890113354,0
 107,mind/ontology/relations/temporal-part-of,baseline,0,46.3971309363842,0

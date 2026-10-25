@@ -15,8 +15,8 @@ trial_index,key,label,order_position,elapsed_ms,returncode
 6,world/crew/models/write-retrieve-layer,m2,1,61.030866112560034,0
 7,efforts/knowledge-compositor/spec-requirements,baseline,0,38.0870399530977,0
 7,efforts/knowledge-compositor/spec-requirements,m2,1,56.620851159095764,0
-8,world/engineering/rulings/2026-08-31-lean-on-minimax-m3-for-delegable-token-load,baseline,0,37.10796101950109,0
-8,world/engineering/rulings/2026-08-31-lean-on-minimax-m3-for-delegable-token-load,m2,1,58.6792950052768,0
+8,world/engineering/rulings/2026-08-31-lean-on-model-a-for-delegable-token-load,baseline,0,37.10796101950109,0
+8,world/engineering/rulings/2026-08-31-lean-on-model-a-for-delegable-token-load,m2,1,58.6792950052768,0
 9,mind/dialectic/concepts/dispute,m2,0,57.76399583555758,0
 9,mind/dialectic/concepts/dispute,baseline,1,37.314977031201124,0
 10,efforts/knowledge-compositor/m5/requirements,baseline,0,38.34724589250982,0
@@ -289,8 +289,8 @@ trial_index,key,label,order_position,elapsed_ms,returncode
 143,efforts/multi-agent-orchestration/implementation/harness/m1/design/agent-declaration-schema,baseline,1,46.26559489406645,0
 144,efforts/why-plug-nvim/m2-ecosystem/scope,m2,0,64.13983600214124,0
 144,efforts/why-plug-nvim/m2-ecosystem/scope,baseline,1,42.411881033331156,0
-145,world/crew/observations/2026-08-30-minimax-m3-configured-and-unused,m2,0,69.82642295770347,0
-145,world/crew/observations/2026-08-30-minimax-m3-configured-and-unused,baseline,1,42.7935931365937,0
+145,world/crew/observations/2026-08-30-model-a-configured-and-unused,m2,0,69.82642295770347,0
+145,world/crew/observations/2026-08-30-model-a-configured-and-unused,baseline,1,42.7935931365937,0
 146,efforts/multi-agent-orchestration/implementation/harness/t9a-task-2d-criteria-12-14,m2,0,63.332748832181096,0
 146,efforts/multi-agent-orchestration/implementation/harness/t9a-task-2d-criteria-12-14,baseline,1,44.5209089666605,0
 147,mind/ontology/concepts/definition,baseline,0,40.96033005043864,0
