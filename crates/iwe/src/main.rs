@@ -11,7 +11,9 @@ use clap_complete_nushell::Nushell;
 mod help;
 use itertools::Itertools;
 
-use diwe::config::{load_config, ActionDefinition, Configuration, InlineType, LinkType};
+use diwe::cascade::{cascade_rename, frontmatter_referrers, FrontmatterReference};
+use diwe::config::{load_config, schemas_dir, ActionDefinition, Configuration, InlineType, LinkType};
+use diwe::schema::KeyReferences;
 use diwe::fs::key_escapes_workspace;
 use diwe::schema::{
     explain_documents, explain_documents_against_file, pending_from_changes, render_reports_text,
@@ -3643,13 +3645,16 @@ fn rename_command(args: Rename) {
         std::process::exit(1);
     }
 
-    let result = match op_rename(&graph, &old_key, &new_key) {
+    let mut result = match op_rename(&graph, &old_key, &new_key) {
         Ok(changes) => changes,
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
     };
+    // The cascade: frontmatter fields the bound schemas declare as keys follow the rename.
+    let refs = load_key_references(&config);
+    let rewritten = cascade_rename(&graph, &refs, &old_key, &new_key, &mut result);
 
     let keys_mode = args.format == MutationFormat::Keys || args.keys_legacy;
 
@@ -3669,6 +3674,7 @@ fn rename_command(args: Rename) {
             for (key, _) in &result.updates {
                 println!("  {}", key);
             }
+            print_rewritten("Would rewrite", &rewritten);
             return;
         }
         println!("Renaming '{}' to '{}'", old_key, new_key);
@@ -3678,8 +3684,55 @@ fn rename_command(args: Rename) {
         apply_changes(&result, &config);
         if !args.quiet && !keys_mode {
             println!("Updated {} document(s)", result.updates.len());
+            print_rewritten("Rewrote", &rewritten);
         }
     }
+}
+
+/// The key-bearing frontmatter paths of the schemas in force, for the cascade.
+fn load_key_references(config: &Configuration) -> KeyReferences {
+    let dir = schemas_dir().unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+    KeyReferences::load(&dir, config).unwrap_or_else(|errors| {
+        eprintln!("Error: schema configuration: {}", errors.join("; "));
+        std::process::exit(1);
+    })
+}
+
+fn print_rewritten(verb: &str, rewritten: &[FrontmatterReference]) {
+    if rewritten.is_empty() {
+        return;
+    }
+    println!("{} {} frontmatter reference(s)", verb, rewritten.len());
+    for r in rewritten {
+        println!("  {}", r);
+    }
+}
+
+/// Refuse to delete `targets` while another document names one of them in a
+/// frontmatter field the bound schemas declare as a key: the referrer would be
+/// left invalid. Referrers that are themselves deleted do not count.
+fn refuse_delete_of_frontmatter_targets(config: &Configuration, graph: &Graph, targets: &[Key]) {
+    let refs = load_key_references(config);
+    let mut blocking: Vec<(Key, FrontmatterReference)> = Vec::new();
+    for target in targets {
+        for r in frontmatter_referrers(graph, &refs, target) {
+            if !targets.contains(&r.key) {
+                blocking.push((target.clone(), r));
+            }
+        }
+    }
+    if blocking.is_empty() {
+        return;
+    }
+    eprintln!("Error: delete refused: a document names the target in its frontmatter");
+    for (target, r) in &blocking {
+        eprintln!("  '{}' is named by {}", target, r);
+    }
+    eprintln!("hint: rename the target so the reference follows, or rewrite the referrer first");
+    std::process::exit(1);
 }
 
 #[tracing::instrument(level = "debug")]
@@ -3701,6 +3754,7 @@ fn delete_command(args: Delete) {
     }
 
     let targets = resolve_delete_targets(&args, &graph);
+    refuse_delete_of_frontmatter_targets(&config, &graph, &targets);
 
     if !args.dry_run {
         let doc_refs = build_doc_refs(&graph, &targets);

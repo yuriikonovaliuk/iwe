@@ -1,3 +1,4 @@
+pub mod cascade;
 pub mod checkers;
 pub mod commit_trigger;
 pub mod config;

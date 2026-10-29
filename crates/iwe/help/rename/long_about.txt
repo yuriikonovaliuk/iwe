@@ -3,3 +3,9 @@ Rename a document and update all references to it.
 Renames the source document file to the new key and updates all block
 references and inline links that point to the old document key. This
 ensures referential integrity across the knowledge base after renaming.
+
+Frontmatter references follow too. A bound schema that reads a frontmatter
+field as a document key (a `links` rule with `$key: $this.frontmatter.<path>`,
+or a `covers` rule) declares that field a reference; every such field equal
+to the old key is rewritten to the new one in the same transaction, so the
+referrer stays valid and the write gate accepts the rename as a whole.

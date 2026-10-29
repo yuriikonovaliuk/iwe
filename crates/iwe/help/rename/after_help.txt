@@ -20,3 +20,10 @@ OUTPUT:
     in shape.
 
   --dry-run: shows what would happen without making changes.
+
+FRONTMATTER REFERENCES:
+
+  Fields the bound schemas declare as keys (`$key: $this.frontmatter.<path>`)
+  are rewritten along with the links; the rewritten fields are listed as
+  `key (path)`. Nothing is configured: the cascade is derived from the
+  schemas in force.

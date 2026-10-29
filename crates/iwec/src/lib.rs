@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use diwe::cascade::{cascade_rename, frontmatter_referrers};
 use diwe::config::{
-    schemas_dir_in, workspace_path_in, ActionDefinition, CompletionOptions, Configuration,
+    schemas_dir, schemas_dir_in, workspace_path_in, ActionDefinition, CompletionOptions, Configuration,
     MarkdownOptions, NoteTemplate, ValidationScope, DEFAULT_KEY_DATE_FORMAT,
 };
 use diwe::find::{DocumentFinder, FindOptions, FindOutput};
@@ -21,6 +22,7 @@ use diwe::fs::{
 };
 use diwe::require_documents;
 use diwe::retrieve::{DocumentReader, RetrieveOptions, RetrieveOutput};
+use diwe::schema::KeyReferences;
 use diwe::schema::{
     pending_from_changes, render_reports_text, validate_documents_in, validate_pending_documents,
     validate_pending_documents_in, KeyReport,
@@ -1689,6 +1691,7 @@ impl IweServer {
         let key = Key::name(&params.key);
         let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
+        self.refuse_delete_of_frontmatter_targets(&graph, std::slice::from_ref(&key))?;
         let changes = op_delete(&graph, &key).map_err(op_error_to_mcp)?;
 
         let mut warnings = Vec::new();
@@ -1829,6 +1832,7 @@ impl IweServer {
                 let Outcome::Delete { removed } = outcome else {
                     unreachable!("delete operation yields a delete outcome")
                 };
+                self.refuse_delete_of_frontmatter_targets(&graph, &removed)?;
                 let mut combined = Changes::default();
                 for key in &removed {
                     let changes = op_delete(&graph, key).map_err(op_error_to_mcp)?;
@@ -1864,7 +1868,9 @@ impl IweServer {
         }
         let (graph_arc, _tx_lease) = self.tx_graph(&handle, implicit_handle)?;
         let mut graph = graph_arc.lock().await;
-        let changes = op_rename(&graph, &old_key, &new_key).map_err(op_error_to_mcp)?;
+        let mut changes = op_rename(&graph, &old_key, &new_key).map_err(op_error_to_mcp)?;
+        let refs = self.key_references()?;
+        cascade_rename(&graph, &refs, &old_key, &new_key, &mut changes);
 
         if !params.dry_run.unwrap_or(false) {
             self.ensure_schema_clean(&pending_from_changes(&changes))?;
@@ -3117,6 +3123,49 @@ impl IweServer {
         for (key, markdown) in &changes.updates {
             graph.update_document(key.clone(), markdown.clone());
         }
+    }
+
+    /// The key-bearing frontmatter paths of the schemas in force, for the cascade.
+    fn key_references(&self) -> Result<KeyReferences, McpError> {
+        let dir = match &self.project_path {
+            Some(root) => schemas_dir_in(root),
+            None => schemas_dir().map_err(|e| McpError::internal_error(e, None))?,
+        };
+        KeyReferences::load(&dir, &self.config).map_err(|errors| {
+            McpError::invalid_params(
+                format!("schema configuration error: {}", errors.join("; ")),
+                None,
+            )
+        })
+    }
+
+    /// Refuse to delete while another document names a target in a frontmatter
+    /// field the bound schemas declare as a key; referrers that are themselves
+    /// deleted do not count.
+    fn refuse_delete_of_frontmatter_targets(
+        &self,
+        graph: &liwe::graph::Graph,
+        targets: &[Key],
+    ) -> Result<(), McpError> {
+        let refs = self.key_references()?;
+        let mut lines = Vec::new();
+        for target in targets {
+            for r in frontmatter_referrers(graph, &refs, target) {
+                if !targets.contains(&r.key) {
+                    lines.push(format!("'{}' is named by {}", target, r));
+                }
+            }
+        }
+        if lines.is_empty() {
+            return Ok(());
+        }
+        Err(McpError::invalid_params(
+            format!(
+                "delete refused: a document names the target in its frontmatter: {}; rename the target so the reference follows, or rewrite the referrer first",
+                lines.join("; ")
+            ),
+            None,
+        ))
     }
 
     fn ensure_schema_clean(&self, docs: &[(Key, String)]) -> Result<(), McpError> {

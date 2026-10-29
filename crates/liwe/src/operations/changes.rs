@@ -67,6 +67,11 @@ impl Changes {
                 self.updates.push((key, markdown));
             }
         }
+        // A document removed by either side has no update: deleting two
+        // documents where one links the other must not rewrite the one
+        // that goes away, or the write gate judges a ghost.
+        let removed = self.removes.clone();
+        self.updates.retain(|(key, _)| !removed.contains(key));
     }
 
     pub fn affected_keys(&self) -> Vec<&Key> {

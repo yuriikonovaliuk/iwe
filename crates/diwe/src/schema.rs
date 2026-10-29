@@ -2310,6 +2310,96 @@ fn check_links_bounded(
     violations
 }
 
+
+// ---------------------------------------------------------------------------
+// Key references: the frontmatter paths a schema declares as document keys.
+// ---------------------------------------------------------------------------
+
+impl LinkRule {
+    /// The `$this.frontmatter.<path>` anchors this rule uses as document keys:
+    /// every anchor under a `$key` filter in `target`, `some` or `covers`.
+    /// A `when` comparison (`$gt: $this.frontmatter.opened_at`) is not a key
+    /// and is not collected.
+    fn key_anchor_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for raw in [&self.target_this, &self.some_this] {
+            if let Some(value) = raw {
+                collect_key_anchors(value, false, &mut out);
+            }
+        }
+        if let Some((value, _)) = &self.covers {
+            collect_key_anchors(value, false, &mut out);
+        }
+        out
+    }
+}
+
+/// The frontmatter anchors that sit under a `$key` (directly, or inside its
+/// `$in`/`$nin` list) anywhere in a filter value.
+fn collect_key_anchors(value: &Value, under_key: bool, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) if under_key && s.starts_with(THIS_FRONTMATTER_PREFIX) => {
+            out.push(s[THIS_FRONTMATTER_PREFIX.len()..].to_string())
+        }
+        Value::Sequence(items) => items
+            .iter()
+            .for_each(|v| collect_key_anchors(v, under_key, out)),
+        Value::Mapping(map) => map.iter().for_each(|(k, v)| {
+            let is_key = matches!(k, Value::String(s) if s == "$key");
+            collect_key_anchors(v, under_key || is_key, out)
+        }),
+        _ => {}
+    }
+}
+
+/// The frontmatter paths each bound schema declares as document keys, so a
+/// rename or delete can cascade into them: derived from the schemas in force,
+/// never configured. See `cascade`.
+#[derive(Debug)]
+pub struct KeyReferences {
+    bindings: SchemaBindings,
+    paths: HashMap<String, Vec<String>>,
+}
+
+impl KeyReferences {
+    /// Compile the schemas under `dir` bound by `config` and collect their key
+    /// paths.
+    pub fn load(dir: &Path, config: &Configuration) -> Result<Self, Vec<String>> {
+        let bindings = SchemaBindings::compile(&config.schemas)?;
+        let compiled = compile_schemas(dir, &config.schemas)?;
+        let paths = compiled
+            .iter()
+            .map(|(name, set)| {
+                let mut paths: Vec<String> =
+                    set.links.iter().flat_map(LinkRule::key_anchor_paths).collect();
+                paths.sort();
+                paths.dedup();
+                (name.clone(), paths)
+            })
+            .collect();
+        Ok(KeyReferences { bindings, paths })
+    }
+
+    /// The key-bearing frontmatter paths of every schema bound to `key`,
+    /// sorted and distinct.
+    pub fn paths_for(&self, key: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .bindings
+            .schemas_for(key)
+            .into_iter()
+            .flat_map(|name| self.paths.get(name).cloned().unwrap_or_default())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Every schema name with the paths it declares, for diagnostics.
+    pub fn declared(&self) -> &HashMap<String, Vec<String>> {
+        &self.paths
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

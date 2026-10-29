@@ -3,6 +3,7 @@
 mod common;
 
 mod attach_test;
+mod cascade_test;
 mod c1_compliance_test;
 mod cli_filter_test;
 mod cli_lock_wiring_test;

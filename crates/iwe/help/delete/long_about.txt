@@ -7,3 +7,8 @@ whole matched set. Use --dry-run to preview before applying.
 
 Inclusion links to deleted documents are removed entirely; inline links
 are converted to plain text.
+
+A delete is refused while another document names a target in a frontmatter
+field a bound schema reads as a document key (`$key: $this.frontmatter.<path>`):
+the referrer would be left invalid. The refusal names each referrer and the
+field. Referrers that are deleted in the same command do not block it.

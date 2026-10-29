@@ -16,6 +16,9 @@ REFERENCE HANDLING:
 
   - Inclusion links to deleted docs are removed entirely.
   - Inline links to deleted docs are converted to plain text.
+  - A frontmatter field that a bound schema reads as a key cannot be left
+    dangling: the delete is refused and the referrer named; rename the
+    target instead, or rewrite the referrer first.
 
 OUTPUT:
 
