@@ -834,6 +834,23 @@ fn apply_transactions_env_overlay(transactions: &mut TransactionOptions) -> Resu
     Ok(())
 }
 
+/// The configuration version this binary writes.
+const CURRENT_CONFIG_VERSION: i64 = 4;
+
+/// Whether the store's configuration file belongs to something other than
+/// iwe: a knowledge-compositor tree (`.iwe/store.toml` with `kind = "tree"`)
+/// materializes its config from packages, so iwe must never rewrite it.
+fn config_owned_elsewhere(project_root: &Path) -> bool {
+    let marker = project_root.join(IWE_MARKER).join("store.toml");
+    let Ok(text) = read_to_string(marker) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("kind") && line.contains("\"tree\"")
+    })
+}
+
 fn migrate(config: &str, project_root: &Path) -> Result<String, String> {
     let doc = config
         .parse::<DocumentMut>()
@@ -887,14 +904,39 @@ fn migrate(config: &str, project_root: &Path) -> Result<String, String> {
         config_path.push(IWE_MARKER);
         config_path.push(CONFIG_FILE_NAME);
 
-        debug!("updating configuration file");
-        std::fs::write(&config_path, &updated).map_err(|e| {
-            format!(
-                "Failed to write config file '{}': {}",
+        if config_owned_elsewhere(project_root) {
+            // A compositor tree's config is materialized from its packages:
+            // the migrated form is used for this run, the file is theirs.
+            log::warn!(
+                "configuration at '{}' is version {} and is managed by the knowledge compositor; \
+                 migrated in memory only, the package should move to version {}",
                 config_path.display(),
-                e
-            )
-        })?;
+                current_version,
+                CURRENT_CONFIG_VERSION
+            );
+        } else {
+            debug!("updating configuration file");
+            match std::fs::write(&config_path, &updated) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    // Not ours to write (another user's store): run on the
+                    // migrated form, leave the file as found.
+                    log::warn!(
+                        "configuration at '{}' is version {} but cannot be written here; \
+                         migrated in memory only",
+                        config_path.display(),
+                        current_version
+                    );
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to write config file '{}': {}",
+                        config_path.display(),
+                        e
+                    ))
+                }
+            }
+        }
     }
 
     Ok(updated)
@@ -1193,5 +1235,53 @@ mod tests {
         let allow = vec!["mind/**".to_string()];
         let key = Key::name("world/notes");
         assert!(!write_permitted(&[], &allow, &key));
+    }
+
+    #[test]
+    fn migration_of_a_compositor_tree_config_stays_in_memory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let iwe = temp.path().join(IWE_MARKER);
+        std::fs::create_dir_all(&iwe).unwrap();
+        let source = "version = 3\n\n[library]\npath = \"\"\n";
+        std::fs::write(iwe.join(CONFIG_FILE_NAME), source).unwrap();
+        std::fs::write(iwe.join("store.toml"), "kind = \"tree\"\ntree = \"x\"\n").unwrap();
+        let migrated = migrate(source, temp.path()).expect("migrates in memory");
+        assert!(migrated.contains("[workspace]") && migrated.contains("version = 4"), "{migrated}");
+        assert_eq!(
+            std::fs::read_to_string(iwe.join(CONFIG_FILE_NAME)).unwrap(),
+            source,
+            "the compositor's file is not rewritten"
+        );
+        let config = load_config_in(temp.path()).expect("loads");
+        assert_eq!(config.workspace.path, "");
+    }
+
+    #[test]
+    fn migration_of_an_unwritable_config_is_a_warning_not_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::TempDir::new().unwrap();
+        let iwe = temp.path().join(IWE_MARKER);
+        std::fs::create_dir_all(&iwe).unwrap();
+        let source = "version = 3\n\n[library]\npath = \"\"\n";
+        let path = iwe.join(CONFIG_FILE_NAME);
+        std::fs::write(&path, source).unwrap();
+        std::fs::set_permissions(&iwe, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let result = migrate(source, temp.path());
+        std::fs::set_permissions(&iwe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if nix_is_root() {
+            return; // root can write anything; the case cannot be exercised
+        }
+        let migrated = result.expect("a read-only file is not an error");
+        assert!(migrated.contains("[workspace]"), "{migrated}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    fn nix_is_root() -> bool {
+        std::fs::metadata("/proc/self").map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.uid() == 0
+        }).unwrap_or(false)
     }
 }
