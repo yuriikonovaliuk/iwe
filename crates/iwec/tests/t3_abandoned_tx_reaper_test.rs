@@ -33,7 +33,6 @@
 //!                                                             -> criterion 6
 
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -80,13 +79,7 @@ fn store() -> TempDir {
     dir
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind port")
-        .local_addr()
-        .expect("port address")
-        .port()
-}
+use crate::http_support::spawn_on_free_port;
 
 async fn wait_until_listening(addr: &str) {
     for _ in 0..200 {
@@ -104,27 +97,28 @@ async fn wait_until_listening(addr: &str) {
 /// running.
 fn spawn_http(
     store: &Path,
-    port: u16,
     tx_idle_timeout_secs: Option<u64>,
-) -> (ServerProcess, Arc<Mutex<Vec<String>>>) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_iwec"));
-    command
-        .arg("--transport")
-        .arg("http")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--store")
-        .arg(store);
-    if let Some(secs) = tx_idle_timeout_secs {
-        command.arg("--tx-idle-timeout-secs").arg(secs.to_string());
-    }
-    let mut child = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn HTTP iwec");
+) -> (u16, ServerProcess, Arc<Mutex<Vec<String>>>) {
+    let (port, mut child) = spawn_on_free_port(|port| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_iwec"));
+        command
+            .arg("--transport")
+            .arg("http")
+            .arg("--host")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--store")
+            .arg(store);
+        if let Some(secs) = tx_idle_timeout_secs {
+            command.arg("--tx-idle-timeout-secs").arg(secs.to_string());
+        }
+        command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn HTTP iwec")
+    });
 
     let stderr = child.stderr.take().expect("piped stderr");
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -135,7 +129,7 @@ fn spawn_http(
         }
     });
 
-    (ServerProcess(child), log)
+    (port, ServerProcess(child), log)
 }
 
 async fn http_client(addr: &str) -> RunningService<RoleClient, ClientInfo> {
@@ -224,7 +218,6 @@ fn log_lines_containing(log: &Arc<Mutex<Vec<String>>>, needle_lower: &str) -> us
 #[tokio::test]
 async fn staging_writes_refresh_the_idle_clock_so_an_actively_used_transaction_survives() {
     let dir = store();
-    let port = free_port();
     // 10s (not the tighter 2s an unloaded machine could get away with):
     // each of the three gaps below must individually land under the idle
     // timeout, so the margin between the two has to absorb real
@@ -232,7 +225,7 @@ async fn staging_writes_refresh_the_idle_clock_so_an_actively_used_transaction_s
     // and the server's MCP round trip -- when another test suite is
     // contending for CPU on the same machine, not just cover the
     // nominal 1.2s/2s gap.
-    let (_server, _log) = spawn_http(dir.path(), port, Some(10));
+    let (port, _server, _log) = spawn_http(dir.path(), Some(10));
     let addr = format!("127.0.0.1:{port}");
     let client = http_client(&addr).await;
 
@@ -293,8 +286,7 @@ async fn staging_writes_refresh_the_idle_clock_so_an_actively_used_transaction_s
 #[tokio::test]
 async fn idle_transaction_is_force_aborted_leaving_store_valid_and_check_passing() {
     let dir = store();
-    let port = free_port();
-    let (_server, log) = spawn_http(dir.path(), port, Some(1));
+    let (port, _server, log) = spawn_http(dir.path(), Some(1));
     let addr = format!("127.0.0.1:{port}");
     let client = http_client(&addr).await;
 
@@ -385,8 +377,7 @@ async fn idle_transaction_is_force_aborted_leaving_store_valid_and_check_passing
 #[tokio::test]
 async fn n_abandoned_transactions_do_not_accumulate_and_are_all_reaped() {
     let dir = store();
-    let port = free_port();
-    let (_server, log) = spawn_http(dir.path(), port, Some(1));
+    let (port, _server, log) = spawn_http(dir.path(), Some(1));
     let addr = format!("127.0.0.1:{port}");
     let client = http_client(&addr).await;
 
@@ -510,8 +501,7 @@ async fn tx_idle_timeout_flag_defaults_to_600_seconds_in_help() {
 #[tokio::test]
 async fn without_the_override_flag_a_briefly_idle_transaction_is_not_reaped() {
     let dir = store();
-    let port = free_port();
-    let (_server, _log) = spawn_http(dir.path(), port, None);
+    let (port, _server, _log) = spawn_http(dir.path(), None);
     let addr = format!("127.0.0.1:{port}");
     let client = http_client(&addr).await;
 
@@ -601,8 +591,7 @@ async fn stdio_mode_does_not_reap_idle_transactions_even_with_a_short_override()
 #[tokio::test]
 async fn sweep_runs_periodically_producing_multiple_cycles_over_time() {
     let dir = store();
-    let port = free_port();
-    let (_server, log) = spawn_http(dir.path(), port, Some(1));
+    let (port, _server, log) = spawn_http(dir.path(), Some(1));
     let addr = format!("127.0.0.1:{port}");
     wait_until_listening(&addr).await;
 

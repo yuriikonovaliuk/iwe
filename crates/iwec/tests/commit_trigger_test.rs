@@ -19,7 +19,6 @@
 //! The CLI halves of criteria 2–5 live in the CLI half's file.
 
 use std::fs::{self, create_dir_all, write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -35,6 +34,8 @@ use tempfile::TempDir;
 /// guarantees it is built before these tests run).
 const PROBE: &str = env!("CARGO_BIN_EXE_iwe_commit_probe");
 
+use crate::http_support::spawn_on_free_port;
+
 struct ServerProcess {
     child: Child,
 }
@@ -44,14 +45,6 @@ impl Drop for ServerProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 async fn wait_until_listening(addr: &str) {
@@ -105,26 +98,27 @@ fn trigger_config(command: &str, journal: bool, validate: Option<&str>) -> Strin
 /// Spawn `iwec` over HTTP on an ephemeral port, cwd set to the scratch
 /// store (its `.iwe/config.toml` is the config the server loads).
 fn spawn_server(dir: &TempDir) -> (u16, ServerProcess) {
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_iwec"))
-        .arg("--transport")
-        .arg("http")
-        .arg("--port")
-        .arg(port.to_string())
-        // Hermeticity: no ambient transactions/trigger env may leak in.
-        // The trigger env vars in particular must not be inherited
-        // pre-set from the test runner (the trigger supplies its own
-        // values; the in-window assertions then prove it).
-        .env_remove("IWE_TRANSACTIONS_DENY")
-        .env_remove("IWE_TRANSACTIONS_ALLOW")
-        .env_remove("IWE_STORE_ROOT")
-        .env_remove("IWE_COMMIT_LOCK_GENERATION")
-        .env_remove("IWE_TEST_LOCK_FENCING_DELAY_MS")
-        .current_dir(dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn iwec");
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new(env!("CARGO_BIN_EXE_iwec"))
+            .arg("--transport")
+            .arg("http")
+            .arg("--port")
+            .arg(port.to_string())
+            // Hermeticity: no ambient transactions/trigger env may leak in.
+            // The trigger env vars in particular must not be inherited
+            // pre-set from the test runner (the trigger supplies its own
+            // values; the in-window assertions then prove it).
+            .env_remove("IWE_TRANSACTIONS_DENY")
+            .env_remove("IWE_TRANSACTIONS_ALLOW")
+            .env_remove("IWE_STORE_ROOT")
+            .env_remove("IWE_COMMIT_LOCK_GENERATION")
+            .env_remove("IWE_TEST_LOCK_FENCING_DELAY_MS")
+            .current_dir(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn iwec")
+    });
     (port, ServerProcess { child })
 }
 

@@ -1,4 +1,3 @@
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -19,13 +18,7 @@ impl Drop for ServerProcess {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+use crate::http_support::spawn_on_free_port;
 
 async fn wait_until_listening(addr: &str) {
     for _ in 0..100 {
@@ -86,19 +79,19 @@ async fn http_transport_serves_the_graph() {
     )
     .expect("write document");
 
-    let port = free_port();
-    let _server = ServerProcess {
-        child: Command::new(env!("CARGO_BIN_EXE_iwec"))
-            .arg("--transport")
-            .arg("http")
-            .arg("--port")
-            .arg(port.to_string())
-            .current_dir(dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn iwec"),
-    };
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new    (env!("CARGO_BIN_EXE_iwec"))
+                .arg("--transport")
+                .arg("http")
+                .arg("--port")
+                .arg(port.to_string())
+                .current_dir(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn iwec")
+    });
+    let _server = ServerProcess { child };
 
     let json = find_welcome_over_http(&format!("127.0.0.1:{port}")).await;
 
@@ -126,21 +119,21 @@ async fn http_transport_binds_to_the_host_flag() {
     )
     .expect("write document");
 
-    let port = free_port();
-    let _server = ServerProcess {
-        child: Command::new(env!("CARGO_BIN_EXE_iwec"))
-            .arg("--transport")
-            .arg("http")
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .current_dir(dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn iwec"),
-    };
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new    (env!("CARGO_BIN_EXE_iwec"))
+                .arg("--transport")
+                .arg("http")
+                .arg("--host")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port.to_string())
+                .current_dir(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn iwec")
+    });
+    let _server = ServerProcess { child };
 
     let json = find_welcome_over_http(&format!("127.0.0.1:{port}")).await;
 
@@ -169,20 +162,20 @@ async fn http_sessions_isolate_implicit_transactions() {
     )
     .expect("write transaction config");
 
-    let port = free_port();
-    let _server = ServerProcess {
-        child: Command::new(env!("CARGO_BIN_EXE_iwec"))
-            .arg("--transport")
-            .arg("http")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--store")
-            .arg(dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn iwec"),
-    };
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new    (env!("CARGO_BIN_EXE_iwec"))
+                .arg("--transport")
+                .arg("http")
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--store")
+                .arg(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn iwec")
+    });
+    let _server = ServerProcess { child };
     let addr = format!("127.0.0.1:{port}");
     wait_until_listening(&addr).await;
 

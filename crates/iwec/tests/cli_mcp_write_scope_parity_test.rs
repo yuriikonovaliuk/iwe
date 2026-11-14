@@ -33,7 +33,6 @@
 // key, never on the variant identifier.
 
 use std::fs::{create_dir_all, write};
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -44,6 +43,8 @@ use rmcp::{RoleClient, ServiceError, ServiceExt};
 use serde_json::json;
 use tempfile::TempDir;
 
+use crate::http_support::spawn_on_free_port;
+
 struct ServerProcess {
     child: Child,
 }
@@ -53,14 +54,6 @@ impl Drop for ServerProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 async fn wait_until_listening(addr: &str) {
@@ -93,19 +86,20 @@ fn store() -> TempDir {
 /// fail-fast on the resolved deny-and-allow-both-non-empty case would
 /// otherwise fire on a run where the runner has both set).
 fn spawn_server(dir: &TempDir) -> (u16, ServerProcess) {
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_iwec"))
-        .arg("--transport")
-        .arg("http")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("IWE_TRANSACTIONS_ALLOW", "mind/**")
-        .env_remove("IWE_TRANSACTIONS_DENY")
-        .current_dir(dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn iwec");
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new(env!("CARGO_BIN_EXE_iwec"))
+            .arg("--transport")
+            .arg("http")
+            .arg("--port")
+            .arg(port.to_string())
+            .env("IWE_TRANSACTIONS_ALLOW", "mind/**")
+            .env_remove("IWE_TRANSACTIONS_DENY")
+            .current_dir(dir.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn iwec")
+    });
     (port, ServerProcess { child })
 }
 

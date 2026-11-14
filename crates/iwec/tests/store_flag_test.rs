@@ -29,7 +29,6 @@
 //   point of that criterion is that cwd discovery itself is unchanged.
 
 use std::fs::{create_dir_all, write};
-use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -59,13 +58,7 @@ impl Drop for ServerProcess {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+use crate::http_support::{free_port, spawn_on_free_port};
 
 async fn wait_until_listening(addr: &str) {
     for _ in 0..100 {
@@ -111,23 +104,24 @@ fn iwe_store_with_seed(marker: &str) -> TempDir {
     dir
 }
 
-fn spawn_http(dir_for_cwd: &Path, store: Option<&Path>, port: u16) -> ServerProcess {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_iwec"));
-    cmd.arg("--transport")
-        .arg("http")
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .current_dir(dir_for_cwd)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(store) = store {
-        cmd.arg("--store").arg(store);
-    }
-    ServerProcess {
-        child: cmd.spawn().expect("spawn iwec"),
-    }
+fn spawn_http(dir_for_cwd: &Path, store: Option<&Path>) -> (u16, ServerProcess) {
+    let (port, child) = spawn_on_free_port(|port| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_iwec"));
+        cmd.arg("--transport")
+            .arg("http")
+            .arg("--host")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .current_dir(dir_for_cwd)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(store) = store {
+            cmd.arg("--store").arg(store);
+        }
+        cmd.spawn().expect("spawn iwec")
+    });
+    (port, ServerProcess { child })
 }
 
 async fn connect_http(addr: &str) -> RunningService<RoleClient, ClientInfo> {
@@ -178,8 +172,7 @@ fn result_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
 async fn http_store_flag_serves_the_flagged_store_for_a_read_regardless_of_cwd() {
     let flagged = iwe_store_with_seed("STORE_MARKER");
     let cwd = store_with_seed("CWD_MARKER");
-    let port = free_port();
-    let _server = spawn_http(cwd.path(), Some(flagged.path()), port);
+    let (port, _server) = spawn_http(cwd.path(), Some(flagged.path()));
 
     let client = connect_http(&format!("127.0.0.1:{port}")).await;
     let seen = call_tool(&client, "iwe_retrieve", json!({"keys": ["seed"]})).await;
@@ -205,8 +198,7 @@ async fn http_store_flag_serves_the_flagged_store_for_a_read_regardless_of_cwd()
 async fn http_store_flag_lands_a_staged_then_committed_write_in_the_flagged_store_not_cwd() {
     let flagged = iwe_store_with_seed("STORE_MARKER");
     let cwd = store_with_seed("CWD_MARKER");
-    let port = free_port();
-    let _server = spawn_http(cwd.path(), Some(flagged.path()), port);
+    let (port, _server) = spawn_http(cwd.path(), Some(flagged.path()));
 
     let client = connect_http(&format!("127.0.0.1:{port}")).await;
 
@@ -243,8 +235,7 @@ async fn http_store_flag_lands_a_staged_then_committed_write_in_the_flagged_stor
 #[tokio::test]
 async fn http_without_store_flag_discovers_the_cwd_store_as_before() {
     let cwd = store_with_seed("CWD_MARKER");
-    let port = free_port();
-    let _server = spawn_http(cwd.path(), None, port);
+    let (port, _server) = spawn_http(cwd.path(), None);
 
     let client = connect_http(&format!("127.0.0.1:{port}")).await;
     let seen = call_tool(&client, "iwe_retrieve", json!({"keys": ["seed"]})).await;

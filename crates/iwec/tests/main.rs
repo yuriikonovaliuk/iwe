@@ -1,6 +1,7 @@
 #![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
 
 mod fixture;
+mod http_support;
 
 mod agent_transaction_test;
 mod attach_test;

@@ -3,7 +3,6 @@
 //! process moves disk state, then the daemon attempts its commit.
 
 use std::fs::{create_dir_all, read_to_string, write};
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Stdio};
 use std::time::Duration;
@@ -36,13 +35,7 @@ fn store() -> TempDir {
     dir
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind port")
-        .local_addr()
-        .expect("port address")
-        .port()
-}
+use crate::http_support::spawn_on_free_port;
 
 async fn wait_for_http(address: &str) {
     for _ in 0..100 {
@@ -54,8 +47,8 @@ async fn wait_for_http(address: &str) {
     panic!("HTTP iwec did not listen at {address}");
 }
 
-fn spawn_http(store: &Path, port: u16) -> ServerProcess {
-    ServerProcess(
+fn spawn_http(store: &Path) -> (u16, ServerProcess) {
+    let (port, child) = spawn_on_free_port(|port| {
         std::process::Command::new(env!("CARGO_BIN_EXE_iwec"))
             .args(["--transport", "http", "--host", "127.0.0.1", "--port"])
             .arg(port.to_string())
@@ -64,8 +57,9 @@ fn spawn_http(store: &Path, port: u16) -> ServerProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn HTTP iwec"),
-    )
+            .expect("spawn HTTP iwec")
+    });
+    (port, ServerProcess(child))
 }
 
 async fn http_client(address: &str) -> RunningService<RoleClient, ClientInfo> {
@@ -132,8 +126,7 @@ async fn create_and_commit(
 #[tokio::test]
 async fn daemon_and_independent_stdio_commit_interleaved_distinct_documents_without_loss() {
     let store = store();
-    let port = free_port();
-    let _server = spawn_http(store.path(), port);
+    let (port, _server) = spawn_http(store.path());
     let daemon = http_client(&format!("127.0.0.1:{port}")).await;
 
     // Stage through the long-lived daemon before a separate OS process moves
@@ -172,8 +165,7 @@ async fn daemon_and_independent_stdio_commit_interleaved_distinct_documents_with
 #[tokio::test]
 async fn daemon_commit_detects_stdio_moved_base_under_the_commit_lock() {
     let store = store();
-    let port = free_port();
-    let _server = spawn_http(store.path(), port);
+    let (port, _server) = spawn_http(store.path());
     let daemon = http_client(&format!("127.0.0.1:{port}")).await;
 
     let begun = call(&daemon, "iwe_tx_begin", json!({})).await;
@@ -217,8 +209,7 @@ async fn daemon_commit_detects_stdio_moved_base_under_the_commit_lock() {
 #[tokio::test]
 async fn stdio_commit_detects_daemon_moved_base_under_the_commit_lock() {
     let store = store();
-    let port = free_port();
-    let _server = spawn_http(store.path(), port);
+    let (port, _server) = spawn_http(store.path());
     let daemon = http_client(&format!("127.0.0.1:{port}")).await;
     let stdio = stdio_client(store.path()).await;
 

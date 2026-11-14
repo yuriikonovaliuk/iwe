@@ -8,7 +8,7 @@
 //! restart, exactly as a connected client (Claude Code) would keep sending it.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -134,23 +134,7 @@ impl Daemon {
     }
 }
 
-/// An ephemeral port never handed out before in this test process, so a
-/// test restarting its daemon on its port cannot collide with a sibling.
-fn free_port() -> u16 {
-    static USED: Mutex<Vec<u16>> = Mutex::new(Vec::new());
-    loop {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .expect("bind ephemeral port")
-            .local_addr()
-            .expect("local addr")
-            .port();
-        let mut used = USED.lock().unwrap();
-        if !used.contains(&port) {
-            used.push(port);
-            return port;
-        }
-    }
-}
+use crate::http_support::free_port;
 
 /// A store accepting transactions, with one seed document.
 fn store() -> TempDir {

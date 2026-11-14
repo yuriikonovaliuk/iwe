@@ -21,7 +21,6 @@
 // probe since this crate has no whole-store-validate MCP tool).
 
 use std::fs::{create_dir_all, write};
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -47,13 +46,7 @@ impl Drop for ServerProcess {
     }
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
+use crate::http_support::spawn_on_free_port;
 
 async fn wait_until_listening(addr: &str) {
     for _ in 0..100 {
@@ -83,9 +76,9 @@ fn store() -> TempDir {
     dir
 }
 
-fn spawn_http(dir: &TempDir, port: u16) -> ServerProcess {
-    ServerProcess {
-        child: Command::new(env!("CARGO_BIN_EXE_iwec"))
+fn spawn_http(dir: &TempDir) -> (u16, ServerProcess) {
+    let (port, child) = spawn_on_free_port(|port| {
+        Command::new(env!("CARGO_BIN_EXE_iwec"))
             .arg("--transport")
             .arg("http")
             .arg("--host")
@@ -96,8 +89,9 @@ fn spawn_http(dir: &TempDir, port: u16) -> ServerProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn iwec"),
-    }
+            .expect("spawn iwec")
+    });
+    (port, ServerProcess { child })
 }
 
 async fn connect_http(addr: &str) -> RunningService<RoleClient, ClientInfo> {
@@ -198,8 +192,7 @@ async fn begin_stage_commit(
 #[tokio::test]
 async fn http_two_overlapping_sessions_get_isolated_implicit_transactions() {
     let dir = store();
-    let port = free_port();
-    let _server = spawn_http(&dir, port);
+    let (port, _server) = spawn_http(&dir);
     let addr = format!("127.0.0.1:{port}");
 
     let client_a = connect_http(&addr).await;
@@ -286,8 +279,7 @@ async fn http_two_overlapping_sessions_get_isolated_implicit_transactions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_two_concurrent_sessions_writing_on_the_implicit_handle_lose_no_update() {
     let dir = store();
-    let port = free_port();
-    let _server = spawn_http(&dir, port);
+    let (port, _server) = spawn_http(&dir);
     let addr = format!("127.0.0.1:{port}");
 
     let client_a = connect_http(&addr).await;
@@ -397,8 +389,7 @@ async fn explicit_named_handle_still_isolated_and_lands(client: &RunningService<
 #[tokio::test]
 async fn http_explicit_named_handle_regression() {
     let dir = store();
-    let port = free_port();
-    let _server = spawn_http(&dir, port);
+    let (port, _server) = spawn_http(&dir);
     let client = connect_http(&format!("127.0.0.1:{port}")).await;
 
     explicit_named_handle_still_isolated_and_lands(&client, &dir).await;
