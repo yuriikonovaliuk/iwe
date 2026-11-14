@@ -41,5 +41,6 @@ mod tree_test;
 mod watcher_test;
 mod write_permission_test;
 mod write_test;
+mod unknown_arguments_test;
 mod t11_mutability_independent_test;
 mod cross_process_locking_test;

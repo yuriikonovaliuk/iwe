@@ -2708,9 +2708,88 @@ impl IweServer {
     }
 }
 
+/// Arguments kept out of a tool's published schema (`#[schemars(skip)]`) that
+/// its handler still reads, to refuse them with a message of its own.
+const UNPUBLISHED_ARGUMENTS: &[(&str, &[&str])] =
+    &[("iwe_create", &["template", "variables", "frontmatter"])];
+
+fn unpublished_arguments(tool: &str) -> &'static [&'static str] {
+    UNPUBLISHED_ARGUMENTS
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .map_or(&[], |(_, a)| *a)
+}
+
+/// Argument names in `args` that the tool's input schema does not declare.
+///
+/// serde ignores unknown fields, so a misspelled argument (`key` for `keys`)
+/// used to run the tool with its default (`keys: []`) and answer `[]` — an
+/// empty result indistinguishable from "nothing matched". A schema without a
+/// `properties` object, or one that allows additional properties, accepts
+/// anything.
+pub fn unknown_arguments(
+    schema: &rmcp::model::JsonObject,
+    args: &rmcp::model::JsonObject,
+) -> Vec<String> {
+    if schema
+        .get("additionalProperties")
+        .is_some_and(|v| v != &serde_json::Value::Bool(false))
+    {
+        return Vec::new();
+    }
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = args
+        .keys()
+        .filter(|k| !props.contains_key(k.as_str()))
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
+}
+
 #[tool_handler]
 #[prompt_handler]
 impl ServerHandler for IweServer {
+    // Replaces the call #[tool_handler] would generate: the same dispatch,
+    // after refusing arguments the tool's schema does not declare (unless the
+    // handler reads them itself, see UNPUBLISHED_ARGUMENTS).
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let router = Self::tool_router();
+        if let (Some(tool), Some(args)) = (router.get(&request.name), request.arguments.as_ref()) {
+            let hidden = unpublished_arguments(&request.name);
+            let unknown: Vec<String> = unknown_arguments(&tool.input_schema, args)
+                .into_iter()
+                .filter(|a| !hidden.contains(&a.as_str()))
+                .collect();
+            if !unknown.is_empty() {
+                let mut known: Vec<&str> = tool
+                    .input_schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| p.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                known.sort_unstable();
+                return Err(McpError::invalid_params(
+                    format!(
+                        "{}: unknown argument(s) {}; accepted: {}",
+                        request.name,
+                        unknown.join(", "),
+                        known.join(", ")
+                    ),
+                    None,
+                ));
+            }
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        router.call(tcc).await
+    }
+
     // Replaces the listing #[tool_handler] would generate: the same tools,
     // served compact unless IWEC_FULL_TOOL_SCHEMAS=1 (see compact_tools).
     async fn list_tools(
