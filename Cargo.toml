@@ -8,16 +8,16 @@ license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.82"
 repository = "https://github.com/iwe-org/iwe"
-version = "1.7.1"
+version = "1.7.2"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
 
 [workspace.dependencies]
-liwe = { path = "./crates/liwe", version = "1.7.1" }
-diwe = { path = "./crates/diwe", version = "1.7.1" }
-iwe = { path = "./crates/iwe", version = "1.7.1" }
-iwe-lock = { path = "./crates/iwe-lock", version = "1.7.1" }
+liwe = { path = "./crates/liwe", version = "1.7.2" }
+diwe = { path = "./crates/diwe", version = "1.7.2" }
+iwe = { path = "./crates/iwe", version = "1.7.2" }
+iwe-lock = { path = "./crates/iwe-lock", version = "1.7.2" }
 schematter-validator = "0.2.0"
 
 anyhow = "1.0.104"
