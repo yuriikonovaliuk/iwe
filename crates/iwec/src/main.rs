@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -120,6 +121,22 @@ async fn drain_transactions(server: &IweServer, signal: &str, timeout: Duration,
             dropped = ?remaining,
             "transactions still open at shutdown are dropped (no --state-dir: they are not remembered)"
         );
+    }
+}
+
+/// Holds one in-flight request in the shared count until dropped.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn enter(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        InFlight(counter)
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -268,6 +285,29 @@ async fn runtime_main() -> Result<()> {
                 config,
             );
             let mut router = axum::Router::new().nest_service("/mcp", service);
+            // Count POST requests until their response body is fully sent, so
+            // the shutdown can let a response (e.g. the commit that ended the
+            // drain) flush before the stream-closing cancellation.
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let counter = in_flight.clone();
+            router = router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let counter = counter.clone();
+                    async move {
+                        if request.method() != http::Method::POST {
+                            return next.run(request).await;
+                        }
+                        let guard = InFlight::enter(counter);
+                        let response = next.run(request).await;
+                        let (parts, body) = response.into_parts();
+                        let stream = futures_util::StreamExt::map(body.into_data_stream(), move |chunk| {
+                            let _held = &guard;
+                            chunk
+                        });
+                        axum::response::Response::from_parts(parts, axum::body::Body::from_stream(stream))
+                    }
+                },
+            ));
             if let Some(store) = session_store.clone() {
                 // Session IDs name files: refuse a malformed one before rmcp
                 // sees it, and count each request as activity on its session
@@ -302,6 +342,12 @@ async fn runtime_main() -> Result<()> {
                 .with_graceful_shutdown(async move {
                     let signal = stop_signal().await;
                     drain_transactions(&drain_server, signal, drain_timeout, persisted).await;
+                    // Cancelling closes open streams: let responses still being
+                    // sent (the last commit's) flush first.
+                    let flush_deadline = Instant::now() + Duration::from_secs(5);
+                    while in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < flush_deadline {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
                     cancellation.cancel();
                 })
                 .await?;
