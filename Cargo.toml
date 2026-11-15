@@ -8,7 +8,7 @@ license = "Apache-2.0"
 edition = "2021"
 rust-version = "1.82"
 repository = "https://github.com/iwe-org/iwe"
-version = "1.7.2"
+version = "1.7.3"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
